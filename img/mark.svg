@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="DoseBuddy">
+  <title>DoseBuddy</title>
+  <rect width="100" height="100" rx="22" fill="#2A9D8F"/>
+  <g transform="rotate(-45 50 50)">
+    <rect x="19" y="37.5" width="62" height="25" rx="12.5" fill="#FFFFFF"/>
+    <path d="M50 37.5 H68.5 a12.5 12.5 0 0 1 0 25 H50 Z" fill="#B7E4DD"/>
+    <rect x="49.4" y="37.5" width="1.2" height="25" fill="#2A9D8F"/>
+  </g>
+</svg>

@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>OG card template</title>
+<style>
+  @font-face {
+    font-family: "Atkinson Hyperlegible Next";
+    src: url("../fonts/atkinson-hyperlegible-next-latin.woff2") format("woff2");
+    font-weight: 400 700;
+    font-display: block;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 1200px; height: 630px; overflow: hidden; }
+  body {
+    font-family: "Atkinson Hyperlegible Next", sans-serif;
+    background: #2A9D8F;
+    display: grid;
+    grid-template-columns: 1fr 400px;
+    align-items: center;
+    color: #fff;
+  }
+  .copy { padding: 0 0 0 76px; }
+  .brand { display: flex; align-items: center; gap: 20px; margin-bottom: 40px; }
+  .brand svg { width: 76px; height: 76px; display: block; }
+  .brand span { font-size: 52px; font-weight: 700; letter-spacing: -0.02em; }
+  h1 { font-size: 60px; font-weight: 700; line-height: 1.12; letter-spacing: -0.02em; max-width: 15ch; }
+  p { margin-top: 26px; font-size: 29px; line-height: 1.4; color: #D6F2EC; max-width: 24ch; }
+  .shot {
+    align-self: end;
+    width: 340px;
+    margin: 0 40px -60px 0;
+    border-radius: 26px 26px 0 0;
+    overflow: hidden;
+    box-shadow: 0 24px 70px rgba(0, 40, 35, 0.35);
+    background: #fff;
+  }
+  .shot img { width: 100%; display: block; }
+  [data-lang="es"] .en, [data-lang="en"] .es { display: none; }
+</style>
+</head>
+<body>
+  <div class="copy">
+    <div class="brand">
+      <svg viewBox="0 0 100 100" aria-hidden="true">
+        <rect width="100" height="100" rx="22" fill="#fff"/>
+        <g transform="rotate(-45 50 50)">
+          <rect x="19" y="37.5" width="62" height="25" rx="12.5" fill="#2A9D8F"/>
+          <path d="M50 37.5 H68.5 a12.5 12.5 0 0 1 0 25 H50 Z" fill="#1C7469"/>
+          <rect x="49.4" y="37.5" width="1.2" height="25" fill="#fff"/>
+        </g>
+      </svg>
+      <span>DoseBuddy</span>
+    </div>
+    <h1 class="en">Medication reminders your parent can actually use</h1>
+    <h1 class="es">Recordatorios de medicación que tus padres sí saben usar</h1>
+    <p class="en">Big text, two big buttons, an alarm that really rings. Free on Android.</p>
+    <p class="es">Texto grande, dos botones grandes y una alarma que suena de verdad. Gratis en Android.</p>
+  </div>
+  <div class="shot"><img id="shot" src="" alt=""></div>
+<script>
+  var lang = new URLSearchParams(location.search).get("lang") === "es" ? "es" : "en";
+  document.body.dataset.lang = lang;
+  document.documentElement.lang = lang;
+  document.getElementById("shot").src = "../img/screens/" + lang + "-today-640.webp";
+</script>
+</body>
+</html>

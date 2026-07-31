@@ -1,0 +1,539 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DoseBuddy — Medication Reminder for Elderly Parents</title>
+<meta name="description" content="A simple, reliable medication reminder for the parent you look after. Huge text and two big buttons for them, a clear intake history for you. Free on Android.">
+
+<link rel="canonical" href="https://dosebuddyapp.com/">
+<link rel="alternate" hreflang="en" href="https://dosebuddyapp.com/">
+<link rel="alternate" hreflang="es" href="https://dosebuddyapp.com/es/">
+<link rel="alternate" hreflang="x-default" href="https://dosebuddyapp.com/">
+
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="DoseBuddy">
+<meta property="og:locale" content="en">
+<meta property="og:locale:alternate" content="es">
+<meta property="og:url" content="https://dosebuddyapp.com/">
+<meta property="og:title" content="DoseBuddy — Medication Reminder for Elderly Parents">
+<meta property="og:description" content="Big text, two big buttons and an alarm that really rings, for the parent you look after. Free on Android.">
+<meta property="og:image" content="https://dosebuddyapp.com/img/og-en.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="DoseBuddy — medication reminders your parent can actually use.">
+<meta name="twitter:card" content="summary_large_image">
+
+<link rel="icon" href="/img/mark.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<meta name="theme-color" content="#2a9d8f">
+
+<link rel="preload" href="/fonts/atkinson-hyperlegible-next-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/css/site.css">
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "DoseBuddy",
+  "alternateName": "DoseBuddy — Pill Reminder",
+  "description": "A medication reminder built for families looking after an elderly parent. You add the medicines and schedules; they see one huge screen with two buttons. Full-screen alarms that survive reboots and battery savers, intake history, and stock tracking.",
+  "applicationCategory": "HealthApplication",
+  "applicationSubCategory": "Medication reminder",
+  "operatingSystem": "Android 8.0 and up",
+  "inLanguage": ["en", "es"],
+  "url": "https://dosebuddyapp.com/",
+  "installUrl": "https://play.google.com/store/apps/details?id=com.everpine.dosebuddy",
+  "image": "https://dosebuddyapp.com/img/og-en.jpg",
+  "screenshot": [
+    "https://dosebuddyapp.com/img/screens/en-today-640.webp",
+    "https://dosebuddyapp.com/img/screens/en-elder-640.webp",
+    "https://dosebuddyapp.com/img/screens/en-calendar-640.webp"
+  ],
+  "author": { "@type": "Organization", "name": "Everpine" },
+  "offers": {
+    "@type": "Offer",
+    "price": "0",
+    "priceCurrency": "EUR",
+    "availability": "https://schema.org/InStock"
+  }
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "Is DoseBuddy free?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes. The free version covers one profile and up to three medications, with the complete reminder engine — nothing about the reminding is held back. Premium is a one-time purchase, not a subscription: it lifts the medication limit and adds interval schedules such as every eight hours. The current price is shown on the Google Play listing." }
+    },
+    {
+      "@type": "Question",
+      "name": "Which phones does it work on?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Android 8.0 (Oreo) and newer. There is no iPhone version. Reminder delivery is tested hardest on Samsung and Huawei, the brands most aggressive about shutting down background apps." }
+    },
+    {
+      "@type": "Question",
+      "name": "Does it need an internet connection?",
+      "acceptedAnswer": { "@type": "Answer", "text": "No. The schedule, the reminders and the history all work offline, with no account and no sign-up. A connection is only needed to install the app or to buy Premium." }
+    },
+    {
+      "@type": "Question",
+      "name": "Will it ring if the phone is on silent?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes. The reminder takes over the whole screen and rings on the alarm channel, like an alarm clock, so silent mode does not mute it. Android asks for a couple of permissions the first time and the setup walks through them." }
+    },
+    {
+      "@type": "Question",
+      "name": "What happens if they tap Later?",
+      "acceptedAnswer": { "@type": "Answer", "text": "DoseBuddy comes back in fifteen minutes, and keeps coming back until the dose is confirmed or the intake window closes. Nothing is ever silently marked as taken." }
+    },
+    {
+      "@type": "Question",
+      "name": "Can I set it up on my own phone for them?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes. Many people run DoseBuddy on their own phone as a personal reminder, or set up a parent's phone and hand it back. For now the schedule lives on whichever phone it was set up on; syncing two phones is what we are building next." }
+    },
+    {
+      "@type": "Question",
+      "name": "Are there ads?",
+      "acceptedAnswer": { "@type": "Answer", "text": "No. There are no ads in DoseBuddy today, and there will never be one on a reminder, an alarm or the elder-mode screen." }
+    },
+    {
+      "@type": "Question",
+      "name": "What does DoseBuddy not do?",
+      "acceptedAnswer": { "@type": "Answer", "text": "It does not give medical advice, suggest doses, or check whether two medicines interact. It is a reminder organiser — the medical questions belong with a doctor or pharmacist." }
+    }
+  ]
+}
+</script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<!-- Shown only to Spanish-speaking visitors, and only as an offer — never a
+     redirect. Both versions stay crawlable and reachable from the header. -->
+<div class="lang-hint" id="lang-hint" data-lang="es" hidden>
+  <span lang="es">Esta página también está en español.</span>
+  <a href="/es/" hreflang="es" lang="es">Ver en español</a>
+  <button class="btn" type="button" data-hint-close lang="es">No, gracias</button>
+</div>
+<script>
+  /* Decided while the parser is still here, before the first paint. Revealing
+     this bar from a deferred script instead would push the whole page down
+     after paint and cost ~0.11 CLS. */
+  (function () {
+    var e = document.getElementById("lang-hint");
+    try { if (sessionStorage.getItem("dosebuddy-lang-hint") === "1") return; } catch (x) {}
+    if ((navigator.language || "").toLowerCase().slice(0, 2) === e.dataset.lang) e.hidden = false;
+  })();
+</script>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="/">
+      <img src="/img/mark.svg" alt="" width="34" height="34">
+      <span>DoseBuddy</span>
+    </a>
+    <nav class="lang-switch" aria-label="Language">
+      <span aria-current="true" lang="en">EN</span>
+      <a href="/es/" hreflang="es" lang="es"><span class="visually-hidden">Ver esta página en </span>ES</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+
+  <!-- 1. Hero -->
+  <section class="hero">
+    <div class="wrap hero__grid">
+      <div>
+        <p class="eyebrow">For families looking after an elderly parent</p>
+        <h1>Medication reminders your parent can actually use</h1>
+        <p class="hero__lead">
+          You add the medicines once. They see one screen — the time, the medicine,
+          and two big buttons. DoseBuddy keeps reminding, out loud and full screen,
+          until the dose is confirmed.
+        </p>
+
+        <div class="hero__cta">
+          <a class="play-badge" href="https://play.google.com/store/apps/details?id=com.everpine.dosebuddy" rel="noopener">
+            <img src="/img/badges/en.webp" alt="Get DoseBuddy on Google Play" width="512" height="198">
+          </a>
+          <p class="cta-note">Free · Android 8.0 and up · English &amp; Spanish · No ads</p>
+        </div>
+
+        <ul class="dose-strip" aria-hidden="true">
+          <li class="cell"><strong>08:00</strong><small>Taken</small></li>
+          <li class="cell"><strong>14:00</strong><small>Taken</small></li>
+          <li class="cell is-next"><strong>21:00</strong><small>Due now</small></li>
+        </ul>
+      </div>
+
+      <figure class="shot shot--center">
+        <img src="/img/screens/en-today-640.webp"
+             srcset="/img/screens/en-today-320.webp 320w, /img/screens/en-today-640.webp 640w"
+             sizes="304px"
+             width="640" height="1256" fetchpriority="high" decoding="async"
+             alt="The DoseBuddy Today screen listing the morning and afternoon medicines with the time each one is due and a tick beside the ones already taken.">
+      </figure>
+    </div>
+  </section>
+
+  <!-- 2. The problem -->
+  <section class="section">
+    <div class="wrap split">
+      <div class="split__body stack">
+        <h2>Remembering three pills a day is harder than it sounds</h2>
+        <p>
+          It is almost never stubbornness. It is a phone call in the middle of
+          breakfast, a nap that runs long, a new box that looks exactly like the
+          old one.
+        </p>
+        <p>
+          A paper chart on the fridge does not ring. A phone's built-in reminder is
+          one quiet notification, already gone by the time anyone looks at the
+          screen.
+        </p>
+        <p>
+          DoseBuddy is built for that moment instead: loud, full screen, and it
+          keeps asking until somebody answers.
+        </p>
+      </div>
+      <div class="stat">
+        <b>About half</b>
+        <p>of people living with a long-term condition do not take their medicines as prescribed.</p>
+        <cite>World Health Organization</cite>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3. How it works -->
+  <section class="section">
+    <div class="wrap">
+      <div class="section__head">
+        <h2>How it works</h2>
+        <p>Three steps, and only the first one is yours to do twice.</p>
+      </div>
+      <ol class="steps">
+        <li class="cell">
+          <h3>You set it up</h3>
+          <p>
+            Add each medicine with a photo of the box, the times it is due, and how
+            many pills come in a pack. A few minutes, once.
+          </p>
+        </li>
+        <li class="cell">
+          <h3>They just tap</h3>
+          <p>
+            At the right time the phone rings and fills the screen: the medicine,
+            the time, and two buttons — Take and Later. Nothing else to find.
+          </p>
+        </li>
+        <li class="cell">
+          <h3>You can see it later</h3>
+          <p>
+            Every confirmed dose lands in a calendar on that phone. One look tells
+            you how the week actually went, with no interrogation over dinner.
+          </p>
+        </li>
+      </ol>
+    </div>
+  </section>
+
+  <!-- 4. Senior mode -->
+  <section class="section">
+    <div class="wrap split split--flip">
+      <figure class="shot shot--center">
+        <img src="/img/screens/en-elder-640.webp"
+             srcset="/img/screens/en-elder-320.webp 320w, /img/screens/en-elder-640.webp 640w"
+             sizes="304px"
+             width="640" height="1256" loading="lazy" decoding="async"
+             alt="DoseBuddy elder mode: one medicine shown in very large text with the dose time, a photo of the package, and two full-width buttons labelled Take and Later.">
+      </figure>
+      <div class="split__body stack">
+        <h2>Senior mode: two buttons, and nothing to break</h2>
+        <p>
+          Turn it on and the app becomes a single screen. No tabs, no menus, no
+          settings to wander into by accident.
+        </p>
+        <ul class="stack">
+          <li><strong>Text at a size you can read across the kitchen</strong> — the whole screen scales up, not just the heading.</li>
+          <li><strong>A photo of the actual box</strong> — so the right pack is obvious even when every name looks alike.</li>
+          <li><strong>An alarm that really rings</strong> — full screen, like an alarm clock, even when the phone is on silent.</li>
+          <li><strong>A guarded exit</strong> — a stray tap cannot drop them into settings and lose the app.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- 5. Peace of mind (v1.1 groundwork — deliberately no dates promised) -->
+  <section class="section">
+    <div class="wrap split">
+      <div class="split__body stack">
+        <h2>Big buttons for them. Peace of mind for you.</h2>
+        <p>
+          Right now DoseBuddy runs entirely on one phone — theirs, or yours if you
+          keep the schedule yourself. It needs no account, no signal and no
+          subscription to do its job.
+        </p>
+        <p>
+          Sharing one schedule between their phone and yours is the next thing we
+          are building. We are not putting a date on it: reminders that never miss
+          come first, and we would rather ship that late than ship it half-working.
+        </p>
+        <p>Meanwhile the app is free, so there is nothing to wait for.</p>
+      </div>
+      <figure class="shot shot--center">
+        <img src="/img/screens/en-calendar-640.webp"
+             srcset="/img/screens/en-calendar-320.webp 320w, /img/screens/en-calendar-640.webp 640w"
+             sizes="304px"
+             width="640" height="1256" loading="lazy" decoding="async"
+             alt="The DoseBuddy calendar for July 2026, with each day marked according to whether every dose was confirmed.">
+      </figure>
+    </div>
+  </section>
+
+  <!-- 6. Reliability and privacy -->
+  <section class="section">
+    <div class="wrap">
+      <div class="section__head">
+        <h2>Built to still be there at nine in the evening</h2>
+        <p>
+          A reminder that quietly stops working is worse than no reminder at all.
+          That is the part of DoseBuddy that gets the most attention.
+        </p>
+      </div>
+
+      <ul class="features">
+        <li class="cell">
+          <h3>Survives reboots and battery savers</h3>
+          <p>
+            Exact-time alarms are re-armed after a restart, and the setup asks for
+            exactly the permissions Android needs to let them fire on time.
+          </p>
+        </li>
+        <li class="cell">
+          <h3>Keeps asking</h3>
+          <p>
+            Repeats escalate until the dose is confirmed or the intake window
+            closes. Snooze for fifteen minutes when now is not the moment.
+          </p>
+        </li>
+        <li class="cell">
+          <h3>A reliability check built in</h3>
+          <p>
+            Send yourself a test reminder, and follow a step-by-step guide to the
+            battery settings for your phone's brand — Huawei and Xiaomi need a hand.
+          </p>
+        </li>
+        <li class="cell">
+          <h3>Counts what is left</h3>
+          <p>
+            Tell it the pack size and DoseBuddy counts down, then reminds you to buy
+            the next box before the last pill goes.
+          </p>
+        </li>
+      </ul>
+
+      <div class="split spaced">
+        <div class="split__body stack">
+          <h3>What leaves the phone: almost nothing</h3>
+          <p>
+            Your medication list, schedules and intake history are kept on the
+            device, with no account and no sign-up. Medication and profile names are
+            never sent to analytics or advertisers, and your data is never sold.
+          </p>
+          <p>
+            DoseBuddy does send anonymous crash and usage statistics through Google
+            Firebase, so bugs can be found and fixed — that is the only thing that
+            leaves the phone. The detail is in the
+            <a href="https://lepiloff.github.io/dosebuddy-legal/privacy.html" rel="noopener">privacy policy</a>.
+          </p>
+        </div>
+        <figure class="shot shot--center">
+          <img src="/img/screens/en-medications-640.webp"
+               srcset="/img/screens/en-medications-320.webp 320w, /img/screens/en-medications-640.webp 640w"
+               sizes="304px"
+               width="640" height="1256" loading="lazy" decoding="async"
+               alt="The DoseBuddy medications list, showing each medicine with its dose, schedule and how many pills are left in the pack.">
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <!-- 7. FAQ -->
+  <section class="section" id="faq">
+    <div class="wrap">
+      <div class="section__head">
+        <h2>Questions people actually ask</h2>
+      </div>
+
+      <div class="faq">
+        <details class="cell" name="faq">
+          <summary>Is DoseBuddy free?</summary>
+          <div class="faq__body">
+            <p>
+              Yes. The free version covers one profile and up to three medications,
+              with the complete reminder engine — nothing about the reminding is
+              held back.
+            </p>
+            <p>
+              Premium is a one-time purchase, not a subscription: it lifts the
+              medication limit and adds interval schedules such as “every eight
+              hours”. The current price is on the
+              <a href="https://play.google.com/store/apps/details?id=com.everpine.dosebuddy" rel="noopener">Google Play listing</a>.
+            </p>
+          </div>
+        </details>
+
+        <details class="cell" name="faq">
+          <summary>Which phones does it work on?</summary>
+          <div class="faq__body">
+            <p>
+              Android 8.0 (Oreo) and newer. There is no iPhone version. Reminder
+              delivery is tested hardest on Samsung and Huawei — the brands most
+              aggressive about shutting down background apps.
+            </p>
+          </div>
+        </details>
+
+        <details class="cell" name="faq">
+          <summary>Does it need an internet connection?</summary>
+          <div class="faq__body">
+            <p>
+              No. The schedule, the reminders and the history all work offline, with
+              no account and no sign-up. A connection is only needed to install the
+              app or to buy Premium.
+            </p>
+          </div>
+        </details>
+
+        <details class="cell" name="faq">
+          <summary>Will it ring if the phone is on silent?</summary>
+          <div class="faq__body">
+            <p>
+              Yes. The reminder takes over the whole screen and rings on the alarm
+              channel, like an alarm clock, so silent mode does not mute it.
+            </p>
+            <p>
+              Android asks for a couple of permissions the first time — exact alarms
+              and full-screen notifications — and the setup walks through them one
+              at a time.
+            </p>
+          </div>
+        </details>
+
+        <details class="cell" name="faq">
+          <summary>What happens if they tap “Later”?</summary>
+          <div class="faq__body">
+            <p>
+              DoseBuddy comes back in fifteen minutes, and keeps coming back until
+              the dose is confirmed or the intake window closes. Nothing is ever
+              silently marked as taken.
+            </p>
+          </div>
+        </details>
+
+        <details class="cell" name="faq">
+          <summary>Can I set it up on my own phone for them?</summary>
+          <div class="faq__body">
+            <p>
+              Yes. Plenty of people run DoseBuddy on their own phone as a personal
+              reminder, or set up a parent's phone and hand it back.
+            </p>
+            <p>
+              For now the schedule lives on whichever phone it was set up on.
+              Syncing two phones is what we are building next.
+            </p>
+          </div>
+        </details>
+
+        <details class="cell" name="faq">
+          <summary>Are there ads?</summary>
+          <div class="faq__body">
+            <p>
+              No. There are no ads in DoseBuddy today, and there will never be one
+              on a reminder, an alarm or the elder-mode screen.
+            </p>
+          </div>
+        </details>
+
+        <details class="cell" name="faq">
+          <summary>What does DoseBuddy not do?</summary>
+          <div class="faq__body">
+            <p>
+              It does not give medical advice, suggest doses, or check whether two
+              medicines interact. It is a reminder organiser — the medical questions
+              belong with a doctor or a pharmacist.
+            </p>
+          </div>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <!-- 8. Closing CTA -->
+  <section class="closing">
+    <div class="wrap">
+      <h2>Set it up tonight. They get the first reminder tomorrow.</h2>
+      <p>
+        Free on Google Play. No account, no sign-up — the first medicine is added
+        before the kettle boils.
+      </p>
+      <a class="play-badge" href="https://play.google.com/store/apps/details?id=com.everpine.dosebuddy" rel="noopener">
+        <img src="/img/badges/en.webp" alt="Get DoseBuddy on Google Play" width="512" height="198" loading="lazy">
+      </a>
+    </div>
+  </section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="site-footer__top">
+      <a class="brand" href="/">
+        <img src="/img/mark.svg" alt="" width="34" height="34">
+        <span>DoseBuddy</span>
+      </a>
+      <nav aria-label="Footer">
+        <ul>
+          <li><a href="https://play.google.com/store/apps/details?id=com.everpine.dosebuddy" rel="noopener">Google Play</a></li>
+          <li><a href="https://lepiloff.github.io/dosebuddy-legal/privacy.html" rel="noopener">Privacy policy</a></li>
+          <li><a href="#consent" data-consent-reopen>Cookie settings</a></li>
+          <li><a href="/es/" hreflang="es" lang="es">Español</a></li>
+        </ul>
+      </nav>
+    </div>
+    <p class="disclaimer">
+      DoseBuddy is a reminder organizer, not a medical device. It does not diagnose,
+      treat, cure, or prevent any medical condition, and does not provide medical
+      advice, dosage recommendations or interaction checks. Always consult your
+      doctor or pharmacist for medical advice, diagnosis or treatment.
+    </p>
+    <p class="colophon">
+      © 2026 Everpine. Google Play and the Google Play logo are trademarks of
+      Google LLC. Set in Atkinson Hyperlegible Next, drawn by the Braille Institute
+      for low-vision readers.
+    </p>
+  </div>
+</footer>
+
+<!-- Consent gate: no analytics script exists on the page until this is accepted. -->
+<aside class="consent" id="consent" hidden aria-label="Cookie consent">
+  <div class="wrap consent__inner">
+    <p id="consent-text">
+      We would like to use Google Analytics to count visits and see which pages are
+      useful. It sets cookies, so it is off until you say yes. The site works either way.
+    </p>
+    <div class="consent__actions">
+      <button class="btn" type="button" data-consent="denied">Decline</button>
+      <button class="btn btn--solid" type="button" data-consent="granted">Accept</button>
+    </div>
+  </div>
+</aside>
+
+<script src="/js/consent.js" defer></script>
+<script src="/js/ui.js" defer></script>
+</body>
+</html>
