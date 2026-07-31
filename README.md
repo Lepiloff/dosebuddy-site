@@ -52,9 +52,38 @@ override with `APP_REPO=…`). Needs `imagemagick`, `curl` and `google-chrome`.
 
 ---
 
+## Deployment status
+
+| | |
+|---|---|
+| Repository | [Lepiloff/dosebuddy-site](https://github.com/Lepiloff/dosebuddy-site), public |
+| GitHub Pages | enabled, `main` / root, build **green** |
+| Custom domain | `dosebuddyapp.com`, picked up from the committed `CNAME` |
+| `lepiloff.github.io/dosebuddy-site` | 301 → `dosebuddyapp.com` — the `github.io` URL can never be indexed |
+| Serving correctly | verified against the Pages edge with the DNS bypassed |
+| **Blocked on** | **DNS (step 1), then HTTPS (step 2)** |
+
+The site is already built and served by GitHub. It is not reachable at
+`dosebuddyapp.com` yet only because the domain still resolves to GoDaddy's
+parking page.
+
+---
+
 ## Owner checklist
 
-### 1. DNS at the `dosebuddyapp.com` registrar — required
+### 1. DNS at the `dosebuddyapp.com` registrar — required, blocking
+
+The domain is registered at **GoDaddy** (`ns39/ns40.domaincontrol.com`) and
+currently points at their parking page (`76.223.105.230`, `13.248.243.5`).
+
+In GoDaddy → *My Products* → `dosebuddyapp.com` → *DNS*:
+
+1. **Delete** the two parked `A` records on `@`.
+2. **Delete** any *Forwarding* rule on the domain or on `www`, if one is set —
+   forwarding overrides the records below.
+3. **Change** the existing `www` record: it is currently a `CNAME` to `@`; it
+   must become a `CNAME` to `lepiloff.github.io`.
+4. **Add** the eight records listed below.
 
 The `CNAME` file is already committed, so the site never gets indexed under a
 `*.github.io` address. It only takes effect once DNS points at GitHub.
@@ -84,16 +113,29 @@ Host: www     Value: lepiloff.github.io
 ```
 
 Apex is the canonical host; GitHub issues the 301 from `www` automatically.
-Verify with `dig dosebuddyapp.com +short` before moving on.
 
-### 2. GitHub Pages — required
+Verify before moving on — this must list the four GitHub addresses, not the
+GoDaddy ones:
 
-1. Create a **public** repository (suggested name `dosebuddy-site`) and push this
-   directory to `main`.
-2. Settings → Pages → Source: *Deploy from a branch* → `main` / `/ (root)`.
-3. Settings → Pages → Custom domain: `dosebuddyapp.com` → Save.
-4. Wait for the DNS check to go green, then tick **Enforce HTTPS**
-   (free certificate, can take up to an hour to become available).
+```bash
+dig +short dosebuddyapp.com A
+dig +short www.dosebuddyapp.com CNAME
+```
+
+### 2. Enforce HTTPS — required, after DNS
+
+Once DNS resolves to GitHub, GitHub issues a free Let's Encrypt certificate.
+That takes anywhere from a few minutes to about an hour; until it exists the
+setting cannot be turned on at all (the API answers *"The certificate does not
+exist yet"*).
+
+Then either tick **Settings → Pages → Enforce HTTPS**, or:
+
+```bash
+gh api -X PUT repos/Lepiloff/dosebuddy-site/pages -F https_enforced=true
+```
+
+Leaving this off would serve the site over plain HTTP, so it is not optional.
 
 ### 3. Google Analytics 4 — required before the banner does anything
 
