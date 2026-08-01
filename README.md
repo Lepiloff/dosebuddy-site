@@ -4,7 +4,7 @@ Marketing site for [DoseBuddy](https://play.google.com/store/apps/details?id=com
 an Android medication reminder built for families looking after an elderly parent.
 
 Static HTML, CSS and vanilla JavaScript. No framework, no build step, no
-dependencies — what is in this repository is exactly what is served.
+dependencies. What is in this repository is exactly what is served.
 
 - English: `/` → `index.html`
 - Español: `/es/` → `es/index.html`
@@ -59,7 +59,7 @@ override with `APP_REPO=…`). Needs `imagemagick`, `curl` and `google-chrome`.
 | Repository | [Lepiloff/dosebuddy-site](https://github.com/Lepiloff/dosebuddy-site), public |
 | GitHub Pages | enabled, `main` / root, build **green** |
 | Custom domain | `dosebuddyapp.com`, picked up from the committed `CNAME` |
-| `lepiloff.github.io/dosebuddy-site` | 301 → `dosebuddyapp.com` — the `github.io` URL can never be indexed |
+| `lepiloff.github.io/dosebuddy-site` | 301 → `dosebuddyapp.com`, the `github.io` URL can never be indexed |
 | Serving correctly | verified against the Pages edge with the DNS bypassed |
 | **Blocked on** | **DNS (step 1), then HTTPS (step 2)** |
 
@@ -71,7 +71,7 @@ parking page.
 
 ## Owner checklist
 
-### 1. DNS at the `dosebuddyapp.com` registrar — required, blocking
+### 1. DNS at the `dosebuddyapp.com` registrar (required, blocking)
 
 The domain is registered at **GoDaddy** (`ns39/ns40.domaincontrol.com`) and
 currently points at their parking page (`76.223.105.230`, `13.248.243.5`).
@@ -79,8 +79,8 @@ currently points at their parking page (`76.223.105.230`, `13.248.243.5`).
 In GoDaddy → *My Products* → `dosebuddyapp.com` → *DNS*:
 
 1. **Delete** the two parked `A` records on `@`.
-2. **Delete** any *Forwarding* rule on the domain or on `www`, if one is set —
-   forwarding overrides the records below.
+2. **Delete** any *Forwarding* rule on the domain or on `www`, if one is set.
+   Forwarding overrides the records below.
 3. **Change** the existing `www` record: it is currently a `CNAME` to `@`; it
    must become a `CNAME` to `lepiloff.github.io`.
 4. **Add** the eight records listed below.
@@ -114,7 +114,7 @@ Host: www     Value: lepiloff.github.io
 
 Apex is the canonical host; GitHub issues the 301 from `www` automatically.
 
-Verify before moving on — this must list the four GitHub addresses, not the
+Verify before moving on. This must list the four GitHub addresses, not the
 GoDaddy ones:
 
 ```bash
@@ -122,7 +122,7 @@ dig +short dosebuddyapp.com A
 dig +short www.dosebuddyapp.com CNAME
 ```
 
-### 2. Enforce HTTPS — required, after DNS
+### 2. Enforce HTTPS (required, after DNS)
 
 Once DNS resolves to GitHub, GitHub issues a free Let's Encrypt certificate.
 That takes anywhere from a few minutes to about an hour; until it exists the
@@ -137,15 +137,15 @@ gh api -X PUT repos/Lepiloff/dosebuddy-site/pages -F https_enforced=true
 
 Leaving this off would serve the site over plain HTTP, so it is not optional.
 
-### 3. Google Analytics 4 — done
+### 3. Google Analytics 4 (done)
 
 `js/consent.js` carries the live Measurement ID `G-LE5K9MMGRG` (property
 *DoseBuddy site*, web stream `dosebuddyapp.com`). The consent banner is
 therefore active.
 
-Enhanced measurement is on for the stream, so outbound clicks — including the
-Google Play button, the only conversion this page has — are counted without any
-extra code on the page.
+Enhanced measurement is on for the stream, so outbound clicks are counted
+without any extra code on the page. That includes the Google Play button, the
+only conversion this page has.
 
 To swap the ID later, edit that one line. If it is ever set back to a
 placeholder the banner hides itself again on purpose: with nothing being
@@ -155,12 +155,12 @@ GA will always under-count relative to reality, because visitors who decline
 are never measured at all. Search Console is the honest number for organic
 search.
 
-### 4. Google Search Console — recommended
+### 4. Google Search Console (recommended)
 
 Add `https://dosebuddyapp.com` as a property, verify by DNS TXT record, and
 submit `https://dosebuddyapp.com/sitemap.xml`.
 
-### 5. Copy review — your call
+### 5. Copy review (your call)
 
 Both languages were written for this page rather than translated from the store
 listing, so the tone is yours to approve:
@@ -173,11 +173,76 @@ Two lines to look at in particular:
 - **"No ads" / "Sin publicidad"** in the hero note is true for the shipped
   release. If AdMob ever ships (v1.0.x backlog), that line has to change. The
   FAQ answer is written to survive it: it promises only that an ad will never
-  appear on a reminder, an alarm or the elder-mode screen — which is a hard
+  appear on a reminder, an alarm or the elder-mode screen, which is a hard
   invariant of the app, not a temporary state.
 - **Premium price** is deliberately not printed anywhere; the page points at the
   Play listing instead, so the site never goes stale when prices change per
   market.
+
+---
+
+## Keyword research (2026-08-01)
+
+Method: Google autocomplete expanded across the alphabet for seven seeds per
+language, plus Google Trends for relative volume. Autocomplete is the honest
+signal here: a phrase that returns no suggestions is a phrase nobody types.
+
+### What the data changed
+
+**Spanish was aimed at the wrong noun.** The page led with *medicación*. Trends
+(Spain, 12 months) puts `recordar pastillas` at 1.9 and both `recordatorio de
+medicamentos` and `recordatorio de medicación` at 0.0, while autocomplete
+returns a thick cluster around *pastillas* and *medicamentos*. The two phrases
+the original plan targeted, `recordatorio de medicación para personas mayores`
+and `app para recordar la medicación a mis padres`, return **nothing at all**.
+They are not queries. Title, H1 and description now lead with *pastillas*, with
+*medicamentos* in the body.
+
+**"Free" and "Android" were missing everywhere.** Autocomplete is full of
+`medication reminder app free android`, `best free medication reminder app for
+android`, `recordatorio de medicamentos gratis`, `app para recordar tomar
+pastillas gratis`. DoseBuddy is free and Android-only, so this is the easiest
+qualifier available and neither title carried it. Both now do.
+
+**The alarm cluster was untapped.** `alarms for taking medication`,
+`medication alarm app`, `medication alarm for elderly`, `alarma para tomar
+medicamentos android`, `como poner alarma para tomar medicamentos` are all real
+queries. The full-screen alarm is the product's differentiator, so "alarm" now
+appears in the hero lead and both meta descriptions rather than only halfway
+down the page.
+
+**"Caregiver" is a weaker target than assumed.** English autocomplete around
+*caregiver medication* skews professional: `caregiver medication aide`,
+`medication technician`, `medication administration`, `medication training`.
+Consumer intent phrases itself as *for elderly* / *for seniors*. The caregiver
+framing stays in the copy because it is true and it converts, but it is not
+worth optimising for as a keyword.
+
+**Nouns, English.** Trends (US): `medication reminder` 24.9, `medicine
+reminder` 15.0, `pill reminder` 14.7. The title already used the strongest one.
+
+### What on-page SEO cannot fix
+
+The SERP for `best free medication reminder app for android` and for `app para
+recordar tomar las pastillas personas mayores` is owned by roundups, not by
+product pages: seniorsguide.com, myseniorcarehub.com and pillo.care in English;
+tevafarmacia.es, cuideo.com, facilparatodos.es, pastillero.com and
+mitservicios.com in Spanish. A landing page will not outrank a listicle for a
+"best app" query. Getting DoseBuddy *into* those lists is worth more than any
+further on-page work, and it is outreach, not code.
+
+### Competitors the market analysis does not mention
+
+Surfaced while checking the SERP, each competing on ground we assumed was ours:
+
+- **Pillo**, "persistent alarm system that won't stop until you respond". Our
+  differentiator, described in our own words.
+- **MedTimer**, open source, zero data collection, no account. Our privacy angle.
+- **mySeniorCareHub**, "designed especially for seniors with large text, simple
+  buttons". Our exact wedge.
+- **Recuerdamed**, Spanish, free, simple. A local competitor in market #1.
+
+Worth folding back into `docs/06-market-analysis.md` in the app repo.
 
 ---
 
@@ -188,7 +253,7 @@ Two lines to look at in particular:
 have consented to anything. The whole family is one 33 KB `.woff2`.
 
 **The brand teal is not a text colour.** `#2A9D8F` measures 3.2:1 against the
-page background — below the WCAG AA threshold of 4.5:1. It is used for fills,
+page background, below the WCAG AA threshold of 4.5:1. It is used for fills,
 borders and the mark; `--accent-ink` (`#12655C`, 6.6:1) carries text, links and
 filled buttons. Please keep that split when adding anything.
 
@@ -202,7 +267,7 @@ consent.
 domain; identical paths mean the migration costs nothing in search. Changing a
 path later is the one thing that genuinely breaks rankings.
 
-**No medical claims — anywhere.** The app is a reminder organiser, not a medical
+**No medical claims anywhere.** The app is a reminder organiser, not a medical
 device. No dosage guidance, no interaction checks, no promises about treatment
 outcomes, in either language. The footer disclaimer matches the approved store
 listing word for word.

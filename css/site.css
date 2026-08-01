@@ -1,6 +1,6 @@
 /* ============================================================================
-   DoseBuddy — dosebuddyapp.com
-   Direction: "Pastillero" — the visual language of a weekly pill organiser.
+   DoseBuddy - dosebuddyapp.com
+   Direction: "Pastillero", the visual language of a weekly pill organiser.
    The compartment (rounded cell with a lid edge) is the page's one signature
    shape: it carries the hero dose strip, the three setup steps and the cards.
 
@@ -10,7 +10,7 @@
    filled button needs to clear WCAG AA.
 
    Type is Atkinson Hyperlegible Next, self-hosted. It is drawn by the Braille
-   Institute for low-vision readers — the page is set in the same values the
+   Institute for low-vision readers. The page is set in the same values the
    product sells.
    ========================================================================= */
 
@@ -34,11 +34,11 @@
 :root {
   color-scheme: light dark;
 
-  /* Tier 1 — literal brand values (shared with the Android app) */
+  /* Tier 1, literal brand values (shared with the Android app) */
   --teal: #2a9d8f;
   --mint: #b7e4dd;
 
-  /* Tier 2 — semantic, light theme */
+  /* Tier 2, semantic, light theme */
   --bg: #fbfaf7;
   --surface: #ffffff;
   --cell-fill: #e8f6f3;
@@ -375,7 +375,7 @@
     color: var(--ink-muted);
   }
 
-  /* Compartment — the signature shape ------------------------------------- */
+  /* Compartment, the signature shape ------------------------------------- */
   .cell {
     position: relative;
     background: var(--cell-fill);
@@ -425,7 +425,7 @@
     margin-block-start: var(--space-4);
   }
 
-  /* Dose strip — a day of compartments, the next dose still open ----------- */
+  /* Dose strip, a day of compartments, the next dose still open ----------- */
   .dose-strip {
     display: flex;
     flex-wrap: wrap;
@@ -480,7 +480,7 @@
     margin-inline: auto;
   }
 
-  /* Steps — a real sequence, so the numerals carry information ------------- */
+  /* Steps, a real sequence, so the numerals carry information ------------- */
   .steps {
     display: grid;
     gap: var(--space-3);
@@ -587,7 +587,7 @@
     color: var(--ink-muted);
   }
 
-  /* FAQ — native details, so it works with JS off ------------------------- */
+  /* FAQ, native details, so it works with JS off ------------------------- */
   .faq {
     display: grid;
     gap: var(--space-2);
@@ -780,7 +780,7 @@
     gap: var(--space-2);
   }
 
-  /* Both choices are styled with equal weight — a consent banner that makes
+  /* Both choices are styled with equal weight, a consent banner that makes
      "reject" quieter than "accept" is not freely given consent under GDPR. */
   .btn {
     min-block-size: 2.75rem;
@@ -811,7 +811,7 @@
 
   /* Video slot ------------------------------------------------------------ */
   /* Empty on launch. Drop a <div class="video" data-yt="ID"> in and the lazy
-     facade in js/ui.js takes over — no layout change needed later. */
+     facade in js/ui.js takes over, no layout change needed later. */
   .video {
     position: relative;
     aspect-ratio: 16 / 9;

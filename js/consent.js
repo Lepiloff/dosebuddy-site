@@ -31,7 +31,7 @@
     window.dataLayer.push(arguments);
   }
 
-  // Everything denied until told otherwise — including on repeat visits, since
+  // Everything denied until told otherwise, including on repeat visits, since
   // the update below only ever relaxes what the visitor explicitly allowed.
   gtag("consent", "default", {
     ad_storage: "denied",
@@ -46,7 +46,7 @@
     try {
       return localStorage.getItem(STORAGE_KEY);
     } catch (e) {
-      return null; // private mode / storage blocked — treat as "not answered"
+      return null; // private mode / storage blocked, treat as "not answered"
     }
   }
 

@@ -30,7 +30,7 @@ fetch_badges() {
   curl -sSL -A "$UA" -o img/badges/es.png \
     "https://play.google.com/intl/es_es/badges/static/images/badges/es_badge_web_generic.png"
   # Re-encoded to WebP at 2x of the 248px render box. Only the container format
-  # and resolution change — the artwork itself is never recoloured, cropped or
+  # and resolution change, the artwork itself is never recoloured, cropped or
   # re-proportioned, which is what Google's badge guidelines forbid.
   for lang in en es; do
     convert "img/badges/$lang.png" -resize 512x -strip -define webp:alpha-quality=100 \

@@ -1,6 +1,6 @@
 /* ============================================================================
-   Progressive enhancement only. Everything below is optional polish — with
-   JavaScript off the page keeps every link, both language versions, and the
+   Progressive enhancement only. Everything below is optional polish. With
+   JavaScript off, the page keeps every link, both language versions and the
    whole FAQ (native <details>) working.
    ========================================================================= */
 (function () {
