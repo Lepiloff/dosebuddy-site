@@ -17,7 +17,7 @@
 (function () {
   "use strict";
 
-  var GA_MEASUREMENT_ID = "G-XXXXXXXXXX";
+  var GA_MEASUREMENT_ID = "G-LE5K9MMGRG";
 
   var STORAGE_KEY = "dosebuddy-consent";
   var banner = document.getElementById("consent");

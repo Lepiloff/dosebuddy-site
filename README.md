@@ -137,20 +137,23 @@ gh api -X PUT repos/Lepiloff/dosebuddy-site/pages -F https_enforced=true
 
 Leaving this off would serve the site over plain HTTP, so it is not optional.
 
-### 3. Google Analytics 4 — required before the banner does anything
+### 3. Google Analytics 4 — done
 
-Open `js/consent.js` and replace the placeholder on line 20:
+`js/consent.js` carries the live Measurement ID `G-LE5K9MMGRG` (property
+*DoseBuddy site*, web stream `dosebuddyapp.com`). The consent banner is
+therefore active.
 
-```js
-var GA_MEASUREMENT_ID = "G-XXXXXXXXXX";
-```
+Enhanced measurement is on for the stream, so outbound clicks — including the
+Google Play button, the only conversion this page has — are counted without any
+extra code on the page.
 
-with the Measurement ID from **Google Analytics → Admin → Data streams → Web**
-(format `G-ABC1234XYZ`). Nothing else needs changing.
+To swap the ID later, edit that one line. If it is ever set back to a
+placeholder the banner hides itself again on purpose: with nothing being
+collected, asking for consent would be misleading.
 
-While the placeholder is in place the consent banner stays hidden on purpose —
-no cookies are set and nothing is sent to Google, so there is nothing to ask
-consent for. It appears by itself once a real ID is in.
+GA will always under-count relative to reality, because visitors who decline
+are never measured at all. Search Console is the honest number for organic
+search.
 
 ### 4. Google Search Console — recommended
 
