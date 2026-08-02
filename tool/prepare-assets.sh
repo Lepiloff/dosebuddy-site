@@ -15,19 +15,21 @@ UA='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrom
 # Atkinson Hyperlegible Next (SIL OFL 1.1), variable 400..700, latin subset only.
 # Self-hosted on purpose: loading it from the Google Fonts CDN would leak visitor
 # IPs to Google before consent, which is not lawful for EU visitors under GDPR.
+# --fail everywhere: without it curl writes an error page over the asset and
+# still exits 0, so a 404 would silently replace the font with HTML.
 fetch_font() {
-  curl -sS -o fonts/atkinson-hyperlegible-next-latin.woff2 \
+  curl --fail --location -sS -o fonts/atkinson-hyperlegible-next-latin.woff2 \
     "https://fonts.gstatic.com/s/atkinsonhyperlegiblenext/v7/NaPNcYPdHfdVxJw0IfIP0lvYFqijb-UxCtm5_wdGseiJn3o.woff2"
-  curl -sS -o fonts/OFL.txt \
+  curl --fail --location -sS -o fonts/OFL.txt \
     "https://raw.githubusercontent.com/googlefonts/atkinson-hyperlegible-next/main/OFL.txt"
 }
 
 # --- 2. Official Google Play badges -------------------------------------------
 # Must be Google's own artwork; the transparent margin is the mandated clear space.
 fetch_badges() {
-  curl -sSL -A "$UA" -o img/badges/en.png \
+  curl --fail -sSL -A "$UA" -o img/badges/en.png \
     "https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png"
-  curl -sSL -A "$UA" -o img/badges/es.png \
+  curl --fail -sSL -A "$UA" -o img/badges/es.png \
     "https://play.google.com/intl/es_es/badges/static/images/badges/es_badge_web_generic.png"
   # Re-encoded to WebP at 2x of the 248px render box. Only the container format
   # and resolution change, the artwork itself is never recoloured, cropped or

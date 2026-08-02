@@ -8,11 +8,14 @@
    Consent Mode v2 signals are queued into dataLayer before the library loads,
    so whenever GA does start it already knows what it is allowed to do.
 
-   OWNER: replace GA_MEASUREMENT_ID with the real ID from
-   Google Analytics → Admin → Data streams → Web. While it is still the
-   placeholder the banner stays hidden, because nothing is being collected and
-   asking for consent to nothing would be misleading. To preview the banner
-   anyway, load any page with ?consent-preview=1
+   Withdrawing is not the mirror image of granting. Once gtag.js is on the
+   page, a consent update stops it storing cookies but does not unload it, so
+   declining after having accepted also clears the GA cookies and reloads into
+   a state where the script is never injected again.
+
+   GA_MEASUREMENT_ID below is live. If it is ever put back to a placeholder the
+   banner hides itself, because nothing would be collected and asking consent
+   for nothing is misleading; ?consent-preview=1 forces it visible.
    ========================================================================= */
 (function () {
   "use strict";
@@ -82,10 +85,47 @@
     banner.hidden = true;
   }
 
+  /* Google's own cookies. Names are documented and stable: _ga plus one
+     _ga_<container> per measurement id. */
+  function clearAnalyticsCookies() {
+    var names = document.cookie.split(";").map(function (c) {
+      return c.split("=")[0].trim();
+    });
+    var host = location.hostname;
+    for (var i = 0; i < names.length; i++) {
+      if (names[i] !== "_ga" && names[i].indexOf("_ga_") !== 0) continue;
+      // Delete on the exact host and on the registrable domain, since GA sets
+      // its cookie on the latter and the two are different jars.
+      var scopes = ["", "; domain=" + host, "; domain=." + host];
+      var parent = host.split(".").slice(-2).join(".");
+      if (parent !== host) scopes.push("; domain=." + parent);
+      for (var s = 0; s < scopes.length; s++) {
+        document.cookie =
+          names[i] + "=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT" + scopes[s];
+      }
+    }
+  }
+
   function decide(value) {
     write(value);
     hide();
-    if (value === "granted") loadAnalytics();
+    if (value === "granted") {
+      loadAnalytics();
+      return;
+    }
+    if (loaded) {
+      // gtag.js is already on the page. Updating consent stops new storage but
+      // leaves the library running, so signal the withdrawal, drop the cookies
+      // it set, and reload into the state where it is never injected.
+      gtag("consent", "update", {
+        ad_storage: "denied",
+        ad_user_data: "denied",
+        ad_personalization: "denied",
+        analytics_storage: "denied"
+      });
+      clearAnalyticsCookies();
+      location.reload();
+    }
   }
 
   banner.addEventListener("click", function (event) {

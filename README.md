@@ -37,8 +37,8 @@ python3 -m http.server 8765
 # http://127.0.0.1:8765/es/  Español
 ```
 
-Add `?consent-preview=1` to force the cookie banner to appear while the
-Analytics ID is still a placeholder.
+`?consent-preview=1` forces the cookie banner to appear even if the Analytics
+ID is ever put back to a placeholder.
 
 ## Regenerating assets
 
@@ -61,20 +61,19 @@ override with `APP_REPO=…`). Needs `imagemagick`, `curl` and `google-chrome`.
 | Custom domain | `dosebuddyapp.com`, picked up from the committed `CNAME` |
 | `lepiloff.github.io/dosebuddy-site` | 301 → `dosebuddyapp.com`, the `github.io` URL can never be indexed |
 | Serving correctly | verified against the Pages edge with the DNS bypassed |
-| **Blocked on** | **DNS (step 1), then HTTPS (step 2)** |
+| **Live since** | 2026-07-31, HTTPS enforced, both locales serving |
 
-The site is already built and served by GitHub. It is not reachable at
-`dosebuddyapp.com` yet only because the domain still resolves to GoDaddy's
-parking page.
+The site is live. Steps 1 and 2 below are kept as a record of how the domain
+was wired, in case it ever has to be redone.
 
 ---
 
 ## Owner checklist
 
-### 1. DNS at the `dosebuddyapp.com` registrar (required, blocking)
+### 1. DNS at the `dosebuddyapp.com` registrar (done 2026-07-31)
 
-The domain is registered at **GoDaddy** (`ns39/ns40.domaincontrol.com`) and
-currently points at their parking page (`76.223.105.230`, `13.248.243.5`).
+The domain is registered at **GoDaddy** (`ns39/ns40.domaincontrol.com`). It
+used to point at their parking page; these are the records that replaced it.
 
 In GoDaddy → *My Products* → `dosebuddyapp.com` → *DNS*:
 
@@ -122,7 +121,7 @@ dig +short dosebuddyapp.com A
 dig +short www.dosebuddyapp.com CNAME
 ```
 
-### 2. Enforce HTTPS (required, after DNS)
+### 2. Enforce HTTPS (done 2026-07-31)
 
 Once DNS resolves to GitHub, GitHub issues a free Let's Encrypt certificate.
 That takes anywhere from a few minutes to about an hour; until it exists the
@@ -295,7 +294,7 @@ until the visitor clicks, and the embed then uses `youtube-nocookie.com`.
 | Horizontal reflow, 320 → 1440 px, both languages | no overflow |
 | Rendering with JavaScript disabled | pixel-identical |
 | Analytics before consent | zero requests to Google |
-| Structured data | `SoftwareApplication` + `FAQPage` (8 Q&A per language) |
+| Structured data | `SoftwareApplication` + `FAQPage` (9 Q&A per language) |
 | Dark mode (`prefers-color-scheme`) | full token set |
 
 Re-run the Lighthouse check with the local server on:
