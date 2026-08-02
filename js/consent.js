@@ -146,9 +146,13 @@
   }
 
   var stored = read();
-  if (stored === "granted") {
+  if (preview) {
+    // Documented as "force the banner", so it has to win over a stored choice
+    // too, otherwise the owner can never see it again after answering once.
+    show();
+  } else if (stored === "granted") {
     loadAnalytics();
-  } else if (stored !== "denied" && (configured || preview)) {
+  } else if (stored !== "denied" && configured) {
     show();
   }
 })();
