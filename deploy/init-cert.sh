@@ -52,32 +52,44 @@ in_certbot() {
     docker run --rm -v "$PWD/$CONF_DIR:/etc/letsencrypt" "$@"
 }
 
+# Every look at /etc/letsencrypt goes through here, as root inside a container.
+#
+# Not fussiness. Once certbot has issued a certificate, live/<name>/*.pem are
+# symlinks into archive/, and archive/ is root-only 0700. A `test -f` run as
+# ubuntu then fails to traverse it and reports "no certificate" for one that
+# plainly exists — after which this script would helpfully write a placeholder
+# straight through those symlinks and destroy the real thing. It did exactly
+# that once before this was fixed.
+as_root() {
+    in_certbot --entrypoint sh certbot/certbot -c "$1" >/dev/null 2>&1
+}
+
+cert_exists() { as_root "test -f /etc/letsencrypt/live/$1/fullchain.pem"; }
+is_placeholder() { as_root "test -f /etc/letsencrypt/live/$1/.dummy"; }
+
 # "Real" means trusted by browsers, which rules out two impostors: the
 # placeholder this script writes, and a staging certificate. Staging is the
 # dangerous one — it is a complete, valid-looking certificate that no browser
 # trusts, and without this check the documented "staging first, then for real"
 # sequence would end with the second run reporting nothing to do and leaving
 # the untrusted certificate serving.
-is_staging() {
-    grep -q 'acme-staging' "$CONF_DIR/renewal/$1.conf" 2>/dev/null
-}
+is_staging() { as_root "grep -q acme-staging /etc/letsencrypt/renewal/$1.conf"; }
 
 is_real() {
-    [ -f "$CONF_DIR/live/$1/fullchain.pem" ] || return 1
-    [ -f "$CONF_DIR/live/$1/.dummy" ] && return 1
+    cert_exists "$1" || return 1
+    is_placeholder "$1" && return 1
     is_staging "$1" && return 1
     return 0
 }
 
 place_dummy() {
     local name="$1"
-    mkdir -p "$CONF_DIR/live/$name"
-    in_certbot --entrypoint openssl certbot/certbot \
-        req -x509 -nodes -newkey rsa:2048 -days 1 \
-            -keyout "/etc/letsencrypt/live/$name/privkey.pem" \
-            -out "/etc/letsencrypt/live/$name/fullchain.pem" \
-            -subj "/CN=$name" 2>/dev/null
-    touch "$CONF_DIR/live/$name/.dummy"
+    as_root "mkdir -p /etc/letsencrypt/live/$name \
+             && openssl req -x509 -nodes -newkey rsa:2048 -days 1 \
+                  -keyout /etc/letsencrypt/live/$name/privkey.pem \
+                  -out /etc/letsencrypt/live/$name/fullchain.pem \
+                  -subj /CN=$name \
+             && touch /etc/letsencrypt/live/$name/.dummy"
     echo "    placeholder for $name"
 }
 
@@ -95,8 +107,8 @@ REFERENCED=$(grep -hoE '/etc/letsencrypt/live/[^/]+/' nginx/conf.d/*.conf \
 for name in $REFERENCED; do
     if is_real "$name"; then
         echo "    $name already has a real certificate"
-    elif [ -f "$CONF_DIR/live/$name/fullchain.pem" ]; then
-        echo "    $name already has a placeholder"
+    elif cert_exists "$name"; then
+        echo "    $name already has something nginx can load"
     else
         place_dummy "$name"
     fi
