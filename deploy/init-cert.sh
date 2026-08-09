@@ -153,4 +153,4 @@ $COMPOSE exec -T nginx nginx -s reload
 
 echo
 echo "Done. Confirm renewal is wired up before walking away:"
-echo "  $COMPOSE run --rm --entrypoint certbot certbot renew --dry-run"
+echo "  $COMPOSE run --rm -T --entrypoint certbot certbot renew --dry-run --no-random-sleep-on-renew"

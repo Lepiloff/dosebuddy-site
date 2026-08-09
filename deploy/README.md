@@ -167,11 +167,28 @@ certificate — a few minutes. Accepted, given traffic is ≈0.
 
 ```bash
 ./verify.sh dosebuddyapp.com                                     # must be failed 0
-docker compose run --rm --entrypoint certbot certbot renew --dry-run
+
+docker compose run --rm -T --entrypoint certbot certbot \
+  renew --dry-run --no-random-sleep-on-renew
 ```
 
 The renewal dry run is not optional. `init-cert.sh` uses webroot HTTP-01
 precisely so renewal is automatic from day one; the dry run is what proves it.
+Expect `Congratulations, all simulated renewals succeeded`.
+
+Both flags are there to stop it looking broken when it is not:
+
+- **`--no-random-sleep-on-renew`.** Run non-interactively, certbot sleeps a
+  random interval of up to eight minutes before renewing, to spread load across
+  Let's Encrypt's clients. It prints nothing further while it waits, so it reads
+  exactly like a hang. The sidecar keeps the delay — that is what it is for —
+  but a person watching a terminal should not have to.
+- **`-T`.** Without it `docker compose run` wants a TTY.
+
+If a run is interrupted, check for a leftover container before retrying:
+`docker ps --filter name=certbot-run`. Certbot takes a lock on
+`/etc/letsencrypt`, so an orphan from a cancelled run makes every later attempt
+sit and wait, silently, which looks like the same hang again.
 
 Then:
 
