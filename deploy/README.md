@@ -46,24 +46,43 @@ verify.sh                  the acceptance test
 
 ## 1. The box
 
+Created in the console; everything after that is SSH. The AWS API is not used
+anywhere in this runbook, so the IAM user needs no EC2 permissions.
+
 - `t4g.small`, Ubuntu 24.04 ARM, **eu-central-1**, gp3 20 GB, **volume encrypted**
   (at-rest for the backend is still an open decision — spec §2.2 — but an
   encrypted volume costs nothing to take now).
 - **Elastic IP.** Not optional: without it the address changes on stop/start and
   the DNS records point at nothing.
 - Security group: 22 from the owner's address only, 80 and 443 from anywhere.
-- No IPv6. See step 4.
+- No IPv6 — see step 3.
+- Key pair: **import** `~/.ssh/dosebuddy_ec2.pub` rather than letting AWS
+  generate one.
 
-Then:
+Two keys, not one:
+
+| Key | Used by | Why separate |
+|---|---|---|
+| `~/.ssh/dosebuddy_ec2` | the owner, and any operator session | stays on the laptop, never leaves it |
+| `~/.ssh/dosebuddy_deploy` | GitHub Actions only | its private half lives in a GitHub secret, so it must not be a key that also opens anything else |
+
+Reusing an old `.pem` shared with another project would mean one leak opens both
+boxes, and putting a personal login key into CI secrets widens that further.
 
 ```bash
+ssh -i ~/.ssh/dosebuddy_ec2 ubuntu@<elastic-ip>
+
 sudo apt update && sudo apt install -y docker.io docker-compose-v2 rsync git
-sudo usermod -aG docker ubuntu
+sudo usermod -aG docker ubuntu       # log out and back in for this to take
 
 sudo mkdir -p /srv/dosebuddy/site
 sudo chown ubuntu:ubuntu /srv/dosebuddy/site
 
 git clone https://github.com/Lepiloff/dosebuddy-site.git /home/ubuntu/dosebuddy-site
+
+# let the deploy key in, alongside the operator key
+echo 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMKWx+LQyRlZjFU0/FTD3g2pAfhXFXo+ehDBb58/hemZ dosebuddy_deploy@dosebuddy' \
+  >> ~/.ssh/authorized_keys
 ```
 
 GitHub repository secrets for the deploy workflow:
@@ -71,7 +90,7 @@ GitHub repository secrets for the deploy workflow:
 | Secret | Value |
 |---|---|
 | `EC2_HOST` | the Elastic IP |
-| `EC2_SSH_KEY` | private key whose public half is in `~ubuntu/.ssh/authorized_keys` |
+| `EC2_SSH_KEY` | contents of `~/.ssh/dosebuddy_deploy` — the private half, whole file |
 | `EC2_HOST_KEY` | output of `ssh-keyscan -t ed25519 <elastic-ip>` |
 
 `EC2_HOST_KEY` is pinned rather than trusted blindly. This box holds article 9
