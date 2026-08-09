@@ -66,6 +66,11 @@ override with `APP_REPO=…`). Needs `imagemagick`, `curl` and `google-chrome`.
 The site is live. Steps 1 and 2 below are kept as a record of how the domain
 was wired, in case it ever has to be redone.
 
+**This is being moved to EC2** — same domain, same URLs — because the repository
+becomes the monorepo for the v1.1 backend. The stack, the cutover and the
+rollback live in [`deploy/README.md`](deploy/README.md). Until that cutover is
+done and verified, everything above remains how the site is actually served.
+
 ---
 
 ## Owner checklist

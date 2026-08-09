@@ -1,0 +1,46 @@
+# nginx + certbot for dosebuddyapp.com.
+#
+# Modelled on the stack already running canna (canna/docker-compose.yaml), so
+# there is nothing new to learn on the box. Postgres, Redis and the FastAPI api
+# join this file at the next step of the build order (spec 0.5 item 4); the
+# network is named accordingly rather than after the landing.
+
+name: dosebuddy
+
+networks:
+  dosebuddy:
+    driver: bridge
+
+services:
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: dosebuddy-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/snippets:/etc/nginx/snippets:ro
+      - /srv/dosebuddy/site:/srv/dosebuddy/site:ro
+      - ./data/certbot/conf:/etc/letsencrypt
+      - ./data/certbot/www:/var/www/certbot
+    # Reload every six hours so a certificate renewed by the sidecar is picked
+    # up without anyone having to remember to do it.
+    command: >-
+      /bin/sh -c 'while :; do sleep 6h & wait $${!}; nginx -s reload; done
+                  & nginx -g "daemon off;"'
+    networks:
+      - dosebuddy
+
+  certbot:
+    image: certbot/certbot
+    container_name: dosebuddy-certbot
+    restart: unless-stopped
+    volumes:
+      - ./data/certbot/conf:/etc/letsencrypt
+      - ./data/certbot/www:/var/www/certbot
+    entrypoint: >-
+      /bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'
+    networks:
+      - dosebuddy

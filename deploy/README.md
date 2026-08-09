@@ -1,0 +1,234 @@
+# Hosting: GitHub Pages → EC2
+
+The landing moves off GitHub Pages onto an EC2 box, keeping the same domain and
+the same URLs, because `dosebuddy-site` becomes the monorepo for the v1.1 backend
+(spec `05-technical-spec-v1.1.md` §0.2, §4.1). This directory holds everything
+the move needs and everything undoing it needs.
+
+Doing it now is deliberate: traffic is ≈0, so a botched cutover costs nothing and
+DNS rolls back in about ten minutes. Later the same mistake is expensive.
+
+**The move is only successful if it is invisible from outside.** `verify.sh` is
+the executable form of that claim, calibrated against the live Pages edge on
+2026-08-09.
+
+---
+
+## What GitHub was doing for free
+
+| | On Pages | Here |
+|---|---|---|
+| TLS certificate | issued and renewed by GitHub | Let's Encrypt via the certbot sidecar |
+| `http` → `https` | automatic | `conf.d/10-dosebuddyapp.conf` |
+| `www` → apex, 301 | automatic | same, in one hop as before |
+| CDN | Fastly, global | **lost.** Single origin in eu-central-1 |
+| Web root | the whole repository | only the site (`site-exclude.txt`) |
+
+Losing the CDN is a known, accepted regression (owner's call). Measure it after
+the cutover and record the numbers next to the ones in the top-level `README.md`.
+
+---
+
+## Files
+
+```
+docker-compose.yml         nginx + certbot
+nginx/conf.d/00-common.conf     http-level settings, TLS params, catch-all vhost
+nginx/conf.d/10-dosebuddyapp.conf   the four production server blocks
+nginx/conf.d/20-rehearsal.conf      TEMPORARY: new.dosebuddyapp.com, delete after cutover
+nginx/snippets/landing.conf     how the site is served; shared by both vhosts
+site-exclude.txt           what never reaches the web root
+init-cert.sh               first certificate for a hostname
+verify.sh                  the acceptance test
+```
+
+---
+
+## 1. The box
+
+- `t4g.small`, Ubuntu 24.04 ARM, **eu-central-1**, gp3 20 GB, **volume encrypted**
+  (at-rest for the backend is still an open decision — spec §2.2 — but an
+  encrypted volume costs nothing to take now).
+- **Elastic IP.** Not optional: without it the address changes on stop/start and
+  the DNS records point at nothing.
+- Security group: 22 from the owner's address only, 80 and 443 from anywhere.
+- No IPv6. See step 4.
+
+Then:
+
+```bash
+sudo apt update && sudo apt install -y docker.io docker-compose-v2 rsync git
+sudo usermod -aG docker ubuntu
+
+sudo mkdir -p /srv/dosebuddy/site
+sudo chown ubuntu:ubuntu /srv/dosebuddy/site
+
+git clone https://github.com/Lepiloff/dosebuddy-site.git /home/ubuntu/dosebuddy-site
+```
+
+GitHub repository secrets for the deploy workflow:
+
+| Secret | Value |
+|---|---|
+| `EC2_HOST` | the Elastic IP |
+| `EC2_SSH_KEY` | private key whose public half is in `~ubuntu/.ssh/authorized_keys` |
+| `EC2_HOST_KEY` | output of `ssh-keyscan -t ed25519 <elastic-ip>` |
+
+`EC2_HOST_KEY` is pinned rather than trusted blindly. This box holds article 9
+health data once the api lands on it; a deploy that accepts whatever answers on
+port 22 is a standing hole.
+
+## 2. Rehearsal on `new.dosebuddyapp.com`
+
+The point of this step: prove the whole stack over real TLS **while
+dosebuddyapp.com is still served by Pages**, so a mistake is invisible.
+
+1. Add one A record at GoDaddy: `new` → Elastic IP.
+2. Issue the rehearsal certificate. This comes **before** the first deploy, not
+   after: nginx will not start until every certificate its config names exists,
+   and `init-cert.sh` is what puts placeholders there and brings nginx up. A
+   deploy attempted first would just fail on a container that cannot boot.
+
+   Use staging on the first run; production Let's Encrypt allows five identical
+   certificates a week and a typo eats the allowance:
+
+   ```bash
+   cd /home/ubuntu/dosebuddy-site/deploy
+   STAGING=1 ./init-cert.sh new.dosebuddyapp.com   # dry run
+   ./init-cert.sh new.dosebuddyapp.com             # for real
+   ```
+
+3. Publish the site: GitHub → Actions → *Deploy landing to EC2* → Run. Until this
+   runs the web root is empty and every path answers 404.
+4. Run the acceptance test from anywhere:
+
+   ```bash
+   ./verify.sh new.dosebuddyapp.com
+   ```
+
+   It must end `failed 0`. The `https://www → apex` check is skipped here and
+   only runs after the cutover: pinning `www` to this box now would present the
+   rehearsal certificate and fail for the wrong reason.
+
+`20-rehearsal.conf` sends `X-Robots-Tag: noindex, nofollow`. That header is the
+only thing stopping Google from indexing a second copy of the landing under a
+subdomain, which is exactly the duplicate content this migration exists to avoid.
+
+## 3. Cutover
+
+DNS TTL is already 600 s, so there is nothing to lower first.
+
+At GoDaddy → `dosebuddyapp.com` → DNS:
+
+1. Replace the **four A records** on `@` (`185.199.108–111.153`) with one A
+   record pointing at the Elastic IP.
+2. **Delete the four AAAA records** on `@`. Leaving them is the one change that
+   breaks quietly: dual-stack clients would keep reaching GitHub over IPv6 while
+   IPv4 clients hit EC2, splitting traffic across two hosts until Pages is turned
+   off, at which point half of it dies. IPv6-only clients still reach an
+   IPv4-only host through their carrier's DNS64/NAT64.
+3. Change `www` from `CNAME lepiloff.github.io` to `CNAME dosebuddyapp.com`.
+4. **Do not touch** the `google-site-verification` TXT record.
+
+Wait for the TTL, confirm, then take the production certificate:
+
+```bash
+dig +short dosebuddyapp.com A          # expect the Elastic IP alone
+dig +short dosebuddyapp.com AAAA       # expect nothing
+dig +short www.dosebuddyapp.com
+
+cd /home/ubuntu/dosebuddy-site/deploy
+./init-cert.sh dosebuddyapp.com www.dosebuddyapp.com
+```
+
+`https://dosebuddyapp.com` is unreachable between the DNS change and this
+certificate — a few minutes. Accepted, given traffic is ≈0.
+
+## 4. Sign-off
+
+```bash
+./verify.sh dosebuddyapp.com                                     # must be failed 0
+docker compose run --rm --entrypoint certbot certbot renew --dry-run
+```
+
+The renewal dry run is not optional. `init-cert.sh` uses webroot HTTP-01
+precisely so renewal is automatic from day one; the dry run is what proves it.
+
+Then:
+
+- Delete `nginx/conf.d/20-rehearsal.conf`, delete the `new` A record, and remove
+  its certificate (`certbot delete --cert-name new.dosebuddyapp.com`).
+- Uncomment the `push` trigger in `.github/workflows/deploy.yml`.
+- Re-measure Lighthouse and LCP, compare against the top-level `README.md`
+  (`100/100/100/100`, LCP 1.7 s en / 1.8 s es). This is the CDN regression.
+- Search Console needs no change of address — same domain. Resubmit the sitemap
+  and run a Live Test.
+
+After a week of stable serving, raise HSTS from `max-age=300` to `31536000` in
+`nginx/snippets/landing.conf`. Not before: a year-long promise made on day one
+would make a rollback painful if GitHub's certificate had lapsed by then.
+
+---
+
+## Rollback
+
+Keep this available for the whole migration. **Pages stays enabled and the
+`CNAME` file stays in the repository** — the spec notes the file is no longer
+needed, which is true, but deleting it before Pages is retired kills the rollback.
+
+Restore at GoDaddy:
+
+```
+A     @      185.199.108.153
+A     @      185.199.109.153
+A     @      185.199.110.153
+A     @      185.199.111.153
+AAAA  @      2606:50c0:8000::153
+AAAA  @      2606:50c0:8001::153
+AAAA  @      2606:50c0:8002::153
+AAAA  @      2606:50c0:8003::153
+CNAME www    lepiloff.github.io
+```
+
+Live again in about ten minutes.
+
+**The rollback window is not open forever.** The Let's Encrypt certificate GitHub
+holds for the domain stops renewing once DNS points elsewhere. Rolling back in
+the first days is free; after a couple of weeks it means a window with no HTTPS
+while GitHub reissues. So the decision to stay is one to make within days.
+
+---
+
+## Known differences from Pages
+
+Two, both deliberate, both caught by `verify.sh` when it is run against Pages:
+
+- **`/README.md` and `/tool/prepare-assets.sh` answered 200 on Pages** and answer
+  404 here. Pages publishes the whole repository; this host publishes the site.
+  Neither path is linked or in `sitemap.xml`, and the README documents the
+  infrastructure, so this is a small improvement rather than a loss.
+- **`/CNAME` and `/.nojekyll` answered 200 on Pages** and answer 404 here. Both
+  are Pages plumbing, not content.
+
+Everything else — statuses, redirect targets, content types, `max-age=600` on
+HTML — is reproduced exactly. Images and fonts are the one intended upgrade, at
+30 days; CSS and JS deliberately stay at 600 s because they are hand-edited
+alongside the HTML and are not content-hashed.
+
+## Not part of this move
+
+- Content Security Policy. Every page carries a small inline script
+  (`index.html:126`, the anti-CLS language hint), so a CSP needs a sha256 hash
+  for it. Worth doing, but as its own commit: a CSP mistake must not look like a
+  migration failure.
+- Cloudflare. It would bring the CDN and IPv6 back and take ACME off our hands,
+  but it moves nameservers off GoDaddy — a second independent DNS operation that
+  does not belong in the same window as this one. Nothing here is wasted if it
+  happens later: under Full (strict) the origin still needs a valid certificate
+  and Let's Encrypt keeps working unchanged. Flexible mode is not an option, it
+  leaves Cloudflare→EC2 in clear text. It also makes Cloudflare a processor for
+  health data, which needs a DPA and a line in the privacy policy.
+- Moving the landing into `site/`. It stays at the repository root until Pages is
+  retired, because Pages can only publish from the root or `/docs`.
+- Postgres, Redis and the FastAPI skeleton — the next step of the build order
+  (spec §0.5 item 4), joining this same `docker-compose.yml`.
