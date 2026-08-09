@@ -27,9 +27,18 @@ services:
       - ./data/certbot/www:/var/www/certbot
     # Reload every six hours so a certificate renewed by the sidecar is picked
     # up without anyone having to remember to do it.
-    command: >-
-      /bin/sh -c 'while :; do sleep 6h & wait $${!}; nginx -s reload; done
-                  & nginx -g "daemon off;"'
+    #
+    # Exec form, single line, deliberately. Written as a YAML folded scalar this
+    # silently broke: a continuation line indented deeper than the first keeps
+    # its newline instead of folding, so the shell never reached nginx and the
+    # container sat there running nothing but the sleep loop, accepting
+    # connections through docker-proxy and dropping them.
+    #
+    # `exec` matters too: it makes nginx the container's main process, so if
+    # nginx dies the container dies and the restart policy applies. Without it
+    # the shell outlives nginx and the container stays "up" while serving
+    # nothing, which is the failure that is hardest to notice.
+    command: ["/bin/sh", "-c", "while :; do sleep 6h; nginx -s reload; done & exec nginx -g 'daemon off;'"]
     networks:
       - dosebuddy
 
@@ -40,7 +49,9 @@ services:
     volumes:
       - ./data/certbot/conf:/etc/letsencrypt
       - ./data/certbot/www:/var/www/certbot
-    entrypoint: >-
-      /bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'
+    # Exec form for the same reason as nginx above. `$$!` becomes `$!` after
+    # compose's escaping; waiting on the sleep rather than sleeping outright is
+    # what lets a stop signal land promptly instead of waiting out the timeout.
+    entrypoint: ["/bin/sh", "-c", "trap 'exit 0' TERM; while :; do certbot renew; sleep 12h & wait $$!; done"]
     networks:
       - dosebuddy
