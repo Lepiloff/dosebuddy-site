@@ -52,8 +52,21 @@ in_certbot() {
     docker run --rm -v "$PWD/$CONF_DIR:/etc/letsencrypt" "$@"
 }
 
+# "Real" means trusted by browsers, which rules out two impostors: the
+# placeholder this script writes, and a staging certificate. Staging is the
+# dangerous one — it is a complete, valid-looking certificate that no browser
+# trusts, and without this check the documented "staging first, then for real"
+# sequence would end with the second run reporting nothing to do and leaving
+# the untrusted certificate serving.
+is_staging() {
+    grep -q 'acme-staging' "$CONF_DIR/renewal/$1.conf" 2>/dev/null
+}
+
 is_real() {
-    [ -f "$CONF_DIR/live/$1/fullchain.pem" ] && [ ! -f "$CONF_DIR/live/$1/.dummy" ]
+    [ -f "$CONF_DIR/live/$1/fullchain.pem" ] || return 1
+    [ -f "$CONF_DIR/live/$1/.dummy" ] && return 1
+    is_staging "$1" && return 1
+    return 0
 }
 
 place_dummy() {
@@ -104,6 +117,10 @@ if [ "${PREPARE_ONLY:-0}" = "1" ]; then
     echo "  curl -sk --resolve dosebuddyapp.com:443:127.0.0.1 https://dosebuddyapp.com/ | head"
     echo "Re-run without PREPARE_ONLY once DNS and the security group are ready."
     exit 0
+fi
+
+if is_staging "$PRIMARY" && [ "${STAGING:-0}" != "1" ]; then
+    echo "==> Discarding the staging certificate for $PRIMARY"
 fi
 
 echo "==> Clearing the placeholder for $PRIMARY"
