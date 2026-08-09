@@ -22,6 +22,11 @@
 #                                  first run of a new hostname: production has a
 #                                  limit of 5 identical certificates per week,
 #                                  and a typo can burn through it.
+#
+#   PREPARE_ONLY=1 ./init-cert.sh ...   place the placeholders, start nginx, stop
+#                                  there. Lets the site be proved on the box over
+#                                  localhost before anything depends on DNS, a
+#                                  security group, or a Let's Encrypt request.
 
 set -euo pipefail
 
@@ -91,6 +96,15 @@ for _ in $(seq 30); do
     sleep 1
 done
 $COMPOSE exec -T nginx nginx -t
+
+if [ "${PREPARE_ONLY:-0}" = "1" ]; then
+    echo
+    echo "PREPARE_ONLY: nginx is up on placeholder certificates and nothing was"
+    echo "requested. The site can be checked on the box now:"
+    echo "  curl -sk --resolve dosebuddyapp.com:443:127.0.0.1 https://dosebuddyapp.com/ | head"
+    echo "Re-run without PREPARE_ONLY once DNS and the security group are ready."
+    exit 0
+fi
 
 echo "==> Clearing the placeholder for $PRIMARY"
 in_certbot --entrypoint sh certbot/certbot -c \
