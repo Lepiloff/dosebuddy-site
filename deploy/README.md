@@ -275,6 +275,42 @@ will not notice, because they install `requirements-dev.txt` directly. That is
 how three new runtime dependencies once got left out of the image while every
 check stayed green.
 
+## Backups
+
+Two layers, because they fail differently.
+
+**Logical, on the box** — `backup.sh`, nightly at 02:17 UTC, encrypted with
+`BACKUP_PASSPHRASE`, 14 days kept. A weekly job actually restores the newest
+dump into a scratch database and checks that tables came back.
+
+```bash
+./backup.sh dump      # take one now
+./backup.sh verify    # restore the newest and check it
+./backup.sh list
+```
+
+The verify job is the point. Backups do not usually fail by being absent; they
+fail by being written faithfully for a year and then not restoring. Checking
+that the file exists proves nothing, and neither does a restore that reports no
+error — an empty dump restores perfectly, which is why the check counts tables.
+
+This layer covers a bad migration, a mistaken delete, a corrupted table. It does
+**not** cover losing the instance, because it lives on the instance.
+
+**Physical, off the box — the owner's to set up.** EC2 → Elastic Block Store →
+Lifecycle Manager → create a snapshot policy for the instance's volume, daily,
+7 days retention. Entirely in the console: no credentials on the box, nothing to
+rotate, and it survives the machine.
+
+Shipping dumps to S3 would need an IAM user or an instance role. Worth doing
+eventually; snapshots cover the same gap today without putting a key on a box
+that holds article 9 data.
+
+> Two secrets in `deploy/.env` are unrecoverable and must be kept **off the box
+> as well**: `ENCRYPTION_KEY`, without which the encrypted columns are lost even
+> with an intact database, and `BACKUP_PASSPHRASE`, without which the dumps are
+> just noise. A backup whose passphrase died with the machine is not a backup.
+
 ## Rollback
 
 Keep this available for the whole migration. **Pages stays enabled and the
