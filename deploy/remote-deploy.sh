@@ -70,10 +70,18 @@ done
 # Fail the deploy if the api never becomes ready. Without this the job goes
 # green while the API answers 502 — the shape of outage that gets noticed by
 # users rather than by us.
-# Every deploy rebuilds the api image and orphans the previous layers. Nothing
-# reclaims them on its own, and the box shares one 20 GB volume with Postgres —
-# a disk that fills up presents as a database behaving strangely, not as "out of
-# space". Dangling images only, so nothing in use is touched.
+# A deploy that changes api/ leaves the previous image untagged, and nothing
+# reclaims it. One 20 GB volume is shared with Postgres, and a disk filling up
+# on this box presents as a database behaving strangely rather than as "out of
+# space" — cheap to prevent, tedious to diagnose.
+#
+# Dangling images only, so nothing in use is touched. Build cache is trimmed to
+# 1 GB rather than emptied: rebuilds on a 2 vCPU ARM box are slow enough that
+# the cache earns its space.
+#
+# (Note for anyone reading `docker system df` here: it reports these images as
+# 100% reclaimable while every one of them is in use. Shared layers confuse its
+# arithmetic. Trust `docker image prune` over that column.)
 echo "==> reclaiming disk"
 docker image prune -f | tail -1 | sed 's/^/    /'
 docker builder prune -f --keep-storage 1GB 2>/dev/null | tail -1 | sed 's/^/    /'
