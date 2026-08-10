@@ -10,6 +10,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+# Imported at module level, not inside verify(), deliberately.
+#
+# `google.auth.transport.requests` needs the `requests` package, which
+# google-auth does not pull in by default. Imported lazily, a missing dependency
+# surfaced as a 500 on the first real sign-in — past the build, past CI, past
+# the health check, at the worst possible moment. Up here it cannot get further
+# than starting the process.
+from google.auth.transport import requests as google_requests
+from google.oauth2 import id_token as google_id_token
+
 
 @dataclass(frozen=True)
 class GoogleIdentity:
@@ -35,9 +45,6 @@ class RealGoogleVerifier:
         self._client_id = client_id
 
     def verify(self, id_token: str) -> GoogleIdentity:
-        from google.auth.transport import requests as google_requests
-        from google.oauth2 import id_token as google_id_token
-
         try:
             claims = google_id_token.verify_oauth2_token(
                 id_token, google_requests.Request(), self._client_id

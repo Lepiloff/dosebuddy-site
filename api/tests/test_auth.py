@@ -179,3 +179,20 @@ async def test_sign_in_says_so_when_google_is_not_configured(api):
     )
     assert r.status_code == 503
     assert r.json()["detail"] == "google_sign_in_not_configured"
+
+
+async def test_the_real_verifier_wraps_failures_rather_than_leaking_them(api):
+    """Constructs the real verifier, not a stand-in.
+
+    The stand-in cannot catch a missing dependency, and that is exactly what got
+    through once: google.auth.transport.requests needs the `requests` package,
+    google-auth does not pull it in, and the import sat inside verify() — so it
+    surfaced as a 500 on the first real sign-in rather than at startup. This
+    exercises the import and the exception wrapping without any network: a
+    malformed token fails while being parsed.
+    """
+    from app.services.google import InvalidGoogleToken, RealGoogleVerifier
+
+    verifier = RealGoogleVerifier("some-client-id.apps.googleusercontent.com")
+    with pytest.raises(InvalidGoogleToken):
+        verifier.verify("this-is-not-a-jwt")
