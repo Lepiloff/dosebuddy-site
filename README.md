@@ -57,19 +57,20 @@ override with `APP_REPO=…`). Needs `imagemagick`, `curl` and `google-chrome`.
 | | |
 |---|---|
 | Repository | [Lepiloff/dosebuddy-site](https://github.com/Lepiloff/dosebuddy-site), public |
-| GitHub Pages | enabled, `main` / root, build **green** |
-| Custom domain | `dosebuddyapp.com`, picked up from the committed `CNAME` |
-| `lepiloff.github.io/dosebuddy-site` | 301 → `dosebuddyapp.com`, the `github.io` URL can never be indexed |
-| Serving correctly | verified against the Pages edge with the DNS bypassed |
-| **Live since** | 2026-07-31, HTTPS enforced, both locales serving |
+| **Served from** | **EC2, `t4g.small` in eu-central-1, since 2026-08-10** |
+| Stack | nginx + certbot in Docker — [`deploy/`](deploy/README.md) |
+| Custom domain | `dosebuddyapp.com`, apex canonical, `www` 301s to it |
+| TLS | Let's Encrypt, renewed by the certbot sidecar |
+| Acceptance | `deploy/verify.sh` — 30 of 30 against the live domain |
+| First live | 2026-07-31 on GitHub Pages, both locales |
 
-The site is live. Steps 1 and 2 below are kept as a record of how the domain
-was wired, in case it ever has to be redone.
+The site moved off GitHub Pages on 2026-08-10 keeping the domain and every URL
+identical. **Pages is still enabled and `CNAME` is still committed**, because
+that is the rollback; both go away only once the move has held. How to roll
+back, and how long that stays cheap, is in [`deploy/README.md`](deploy/README.md).
 
-**This is being moved to EC2** — same domain, same URLs — because the repository
-becomes the monorepo for the v1.1 backend. The stack, the cutover and the
-rollback live in [`deploy/README.md`](deploy/README.md). Until that cutover is
-done and verified, everything above remains how the site is actually served.
+Steps 1 and 2 below are the original Pages wiring, kept as the record of what a
+rollback restores.
 
 ---
 
@@ -293,7 +294,8 @@ until the visitor clicks, and the embed then uses `youtube-nocookie.com`.
 | Check | Result |
 |---|---|
 | Lighthouse mobile, `/` and `/es/` | 100 / 100 / 100 / 100 |
-| Largest Contentful Paint | 1.7 s en · 1.8 s es |
+| Largest Contentful Paint | 1.4 s both, on EC2 (was 1.7 s en · 1.8 s es on Pages) |
+| Time to first byte | 30–40 ms |
 | Cumulative Layout Shift | 0 |
 | W3C HTML validation, all three pages | clean |
 | Horizontal reflow, 320 → 1440 px, both languages | no overflow |
@@ -308,3 +310,9 @@ Re-run the Lighthouse check with the local server on:
 npx -y lighthouse@latest http://127.0.0.1:8765/ --view \
   --chrome-flags="--headless=new"
 ```
+
+The EC2 numbers above were measured from Spain, which is market #1 and so the
+number that matters most — but it is also 25 ms from the Frankfurt origin. They
+do **not** show what a US visitor sees. GitHub Pages served from a CDN and this
+does not, so if the loss shows up anywhere it will show up there, and nothing
+here has measured it.
