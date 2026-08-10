@@ -32,15 +32,18 @@ the cutover and record the numbers next to the ones in the top-level `README.md`
 ## Files
 
 ```
-docker-compose.yml         nginx + certbot
-nginx/conf.d/00-common.conf     http-level settings, TLS params, catch-all vhost
-nginx/conf.d/10-dosebuddyapp.conf   the four production server blocks
-nginx/conf.d/20-rehearsal.conf      TEMPORARY: new.dosebuddyapp.com, delete after cutover
-nginx/snippets/landing.conf     how the site is served; shared by both vhosts
+docker-compose.yml         nginx, certbot, postgres, redis, api
+env.example                what deploy/.env holds; .env itself is gitignored
+nginx/conf.d/00-common.conf        http-level settings, TLS params, catch-all vhost
+nginx/conf.d/10-dosebuddyapp.conf  the landing: four server blocks
+nginx/conf.d/20-api.conf           api.dosebuddyapp.com
+nginx/snippets/landing.conf        how the site is served
 site-exclude.txt           what never reaches the web root
 init-cert.sh               first certificate for a hostname
-verify.sh                  the acceptance test
+verify.sh                  the acceptance test for the landing
 ```
+
+The API itself lives in [`../api`](../api).
 
 ---
 
@@ -205,6 +208,65 @@ After a week of stable serving, raise HSTS from `max-age=300` to `31536000` in
 would make a rollback painful if GitHub's certificate had lapsed by then.
 
 ---
+
+## The API
+
+`api.dosebuddyapp.com`, served by the same nginx, proxied to uvicorn. It has its
+own hostname because that address ends up compiled into app builds that are
+already on people's phones, and because the landing's config then never has to
+be edited to change the API.
+
+**A dead API cannot take the landing down.** `20-api.conf` resolves its upstream
+through a variable with a `resolver` rather than naming the container in
+`proxy_pass`. With a literal name nginx resolves at config load, so a stopped
+api container makes nginx refuse to start — and that takes dosebuddyapp.com with
+it. Through a variable nginx starts regardless and the API host answers 502.
+Verified by stopping the api and restarting nginx cold: the landing still passed.
+
+First-time setup on a new box:
+
+```bash
+cd /home/ubuntu/dosebuddy-site/deploy
+
+# 1. Secrets. See env.example for what goes in and why the password cannot be
+#    changed by editing this file later.
+{ echo "POSTGRES_USER=dosebuddy"
+  echo "POSTGRES_DB=dosebuddy"
+  echo "POSTGRES_PASSWORD=$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 40)"
+} > .env
+chmod 600 .env
+
+# 2. Certificate, after `api` resolves to this box.
+./init-cert.sh api.dosebuddyapp.com
+
+# 3. Up.
+docker compose up -d --build
+```
+
+Postgres and Redis publish no ports; they are reachable only from the compose
+network. For a database holding article 9 health data that is the single most
+useful thing that can be said about it, so if a port ever needs publishing,
+treat that as a decision rather than a convenience.
+
+Day to day:
+
+```bash
+docker compose ps                      # api should read "healthy", not just "running"
+docker compose logs -f api
+docker compose run --rm -T api alembic upgrade head
+```
+
+`healthy` here means `/health/ready` answered 200, which means Postgres and Redis
+both replied. `running` on its own means only that the process started.
+
+To move a dependency: edit `api/requirements.txt`, then regenerate the lock the
+image installs from.
+
+```bash
+docker build -t dosebuddy-api:lock ../api
+docker run --rm dosebuddy-api:lock pip freeze \
+  | grep -viE '^(pip|setuptools|wheel)==' > ../api/requirements.lock.txt
+```
 
 ## Rollback
 
