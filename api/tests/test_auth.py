@@ -164,3 +164,18 @@ async def test_tokens_die_with_the_account(api, session):
 
     left = (await session.execute(select(RefreshToken))).scalars().all()
     assert left == []
+
+
+async def test_sign_in_says_so_when_google_is_not_configured(api):
+    """An unset GOOGLE_CLIENT_ID means there is no audience to verify against.
+    Answer plainly instead of throwing: this is the state a fresh deployment is
+    in until the OAuth client exists, and a 500 there sends someone hunting for
+    a bug that is not one."""
+    api.app.state.google_verifier = None
+
+    r = await api.post(
+        "/v1/auth/google",
+        json={"id_token": "x", "device": {"id": str(uuid.uuid4()), "platform": "android"}},
+    )
+    assert r.status_code == 503
+    assert r.json()["detail"] == "google_sign_in_not_configured"

@@ -65,6 +65,14 @@ async def sign_in_with_google(
     body: GoogleSignIn, request: Request, session: AsyncSession = Depends(get_session)
 ) -> TokenPair:
     verifier = request.app.state.google_verifier
+    if verifier is None:
+        # GOOGLE_CLIENT_ID is unset, so there is no audience to verify against
+        # and accepting anything would take a token Google issued for any other
+        # application. Say so plainly rather than failing with a 500.
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "google_sign_in_not_configured"
+        )
+
     try:
         identity: GoogleIdentity = verifier.verify(body.id_token)
     except InvalidGoogleToken:
