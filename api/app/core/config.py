@@ -41,6 +41,21 @@ class Settings(BaseSettings):
     db_pool_size: int = Field(default=5, ge=1)
     db_max_overflow: int = Field(default=5, ge=0)
 
+    # Signs access tokens and keys the pairing-code HMAC. No default: a shared
+    # fallback secret is worse than no secret, because it looks configured.
+    jwt_secret: str
+
+    # 32 bytes, base64. Read straight from the environment by
+    # app.core.crypto — a SQLAlchemy type decorator is built at import time and
+    # cannot reach settings. It is declared here anyway so a missing key fails
+    # at startup rather than on the first write of article 9 data.
+    encryption_key: str
+
+    # OAuth client id from Google Cloud, used as the audience when verifying an
+    # ID token. Without it any Google-issued token for any app would be
+    # accepted, which is the whole attack.
+    google_client_id: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:

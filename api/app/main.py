@@ -16,10 +16,11 @@ import redis.asyncio as aioredis
 import structlog
 from fastapi import APIRouter, FastAPI
 
-from app.api import health
+from app.api import auth, health, pairing
 from app.core.config import Settings, get_settings
 from app.core.logging import setup_logging
 from app.db.session import create_engine, create_sessionmaker
+from app.services.google import RealGoogleVerifier
 
 
 @asynccontextmanager
@@ -67,9 +68,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # and they must not move when the contract version does.
     app.include_router(health.router)
 
-    # The versioned surface the app talks to. Empty until part 5 is agreed.
+    # The versioned surface the app talks to.
     v1 = APIRouter(prefix=settings.api_prefix)
+    v1.include_router(auth.router)
+    v1.include_router(pairing.router)
     app.include_router(v1)
+
+    # Verifying a Google ID token is behind an interface so tests can drive the
+    # auth flow, including its failure paths, without a Google account and
+    # without network. Tests replace this after the app is built.
+    if settings.google_client_id:
+        app.state.google_verifier = RealGoogleVerifier(settings.google_client_id)
+    else:
+        app.state.google_verifier = None
 
     return app
 

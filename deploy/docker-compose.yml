@@ -113,6 +113,12 @@ services:
       REDIS_URL: redis://redis:6379/0
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       DOCS_ENABLED: ${DOCS_ENABLED:-false}
+      JWT_SECRET: ${JWT_SECRET}
+      # Losing this key means the encrypted columns are unreadable. It is not
+      # recoverable and not derivable — back it up wherever the box's own
+      # secrets are kept.
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
     depends_on:
       postgres:
         condition: service_healthy

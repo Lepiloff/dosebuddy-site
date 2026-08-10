@@ -263,10 +263,17 @@ To move a dependency: edit `api/requirements.txt`, then regenerate the lock the
 image installs from.
 
 ```bash
+rm ../api/requirements.lock.txt        # or the build reinstalls the old set
 docker build -t dosebuddy-api:lock ../api
 docker run --rm dosebuddy-api:lock pip freeze \
   | grep -viE '^(pip|setuptools|wheel)==' > ../api/requirements.lock.txt
 ```
+
+**Delete the lock first.** The build prefers it over `requirements.txt`, so
+regenerating without removing it just freezes the old set again — and the tests
+will not notice, because they install `requirements-dev.txt` directly. That is
+how three new runtime dependencies once got left out of the image while every
+check stayed green.
 
 ## Rollback
 

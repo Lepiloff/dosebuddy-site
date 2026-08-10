@@ -10,3 +10,8 @@ asyncpg>=0.30
 alembic>=1.14
 redis>=5.2
 structlog>=24.4
+
+# Auth and article 9 columns.
+pyjwt>=2.10
+cryptography>=44.0
+google-auth>=2.38

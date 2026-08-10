@@ -19,6 +19,24 @@ jobs:
     defaults:
       run:
         working-directory: api
+
+    # A real Postgres, not SQLite. Encrypted columns, a partial unique index and
+    # a sequence are not things a substitute can stand in for, and a suite that
+    # passes against one proves nothing about the schema that ships.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: dosebuddy_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+
+    env:
+      TEST_DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/dosebuddy_test
+
     steps:
       - uses: actions/checkout@v4
 
@@ -34,11 +52,25 @@ jobs:
       - name: Test
         run: python -m pytest
 
-      # The health tests use stand-ins so they can exercise the failure paths,
-      # which means nothing else checks that the real app can be constructed
-      # and imported. This does.
+      # The suite builds its schema from the models, so it cannot catch a broken
+      # migration — and the migration is what production runs. This step caught a
+      # real one: the enum type was created twice and the whole upgrade failed.
+      - name: The migration applies to an empty database
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/migration_check
+          REDIS_URL: redis://localhost:6379/0
+          JWT_SECRET: ci
+          ENCRYPTION_KEY: MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=
+        run: |
+          PGPASSWORD=postgres psql -h localhost -U postgres \
+            -c 'CREATE DATABASE migration_check'
+          alembic upgrade head
+          alembic downgrade base
+
       - name: The app builds with real settings
         env:
           DATABASE_URL: postgresql+asyncpg://u:p@localhost:5432/db
           REDIS_URL: redis://localhost:6379/0
+          JWT_SECRET: ci
+          ENCRYPTION_KEY: MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=
         run: python -c "from app.main import create_app; create_app()"
