@@ -1,15 +1,24 @@
-# nginx + certbot for dosebuddyapp.com.
+# The whole box: the landing, and the API behind it.
 #
 # Modelled on the stack already running canna (canna/docker-compose.yaml), so
-# there is nothing new to learn on the box. Postgres, Redis and the FastAPI api
-# join this file at the next step of the build order (spec 0.5 item 4); the
-# network is named accordingly rather than after the landing.
+# there is nothing new to learn here.
+#
+# Postgres and Redis publish no ports. They are reachable only from this
+# network, which is the single most useful thing that can be said about a
+# database holding article 9 health data. nginx is the only way in.
+#
+# Secrets come from deploy/.env, which is gitignored; deploy/env.example
+# documents it. See deploy/README.md for creating it.
 
 name: dosebuddy
 
 networks:
   dosebuddy:
     driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
 
 services:
   nginx:
@@ -53,5 +62,70 @@ services:
     # compose's escaping; waiting on the sleep rather than sleeping outright is
     # what lets a stop signal land promptly instead of waiting out the timeout.
     entrypoint: ["/bin/sh", "-c", "trap 'exit 0' TERM; while :; do certbot renew; sleep 12h & wait $$!; done"]
+    networks:
+      - dosebuddy
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: dosebuddy-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - dosebuddy
+
+  redis:
+    image: redis:7-alpine
+    container_name: dosebuddy-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - dosebuddy
+
+  api:
+    build:
+      context: ../api
+    image: dosebuddy-api:local
+    container_name: dosebuddy-api
+    restart: unless-stopped
+    environment:
+      ENVIRONMENT: production
+      # Composed here rather than written out in .env so the password exists in
+      # exactly one place and the two cannot drift apart.
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379/0
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DOCS_ENABLED: ${DOCS_ENABLED:-false}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # Readiness, not liveness: this is what the deploy waits on, and it is
+      # only true once Postgres and Redis actually answer.
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=4).status==200 else 1)"]
+      interval: 10s
+      timeout: 6s
+      retries: 6
+      start_period: 20s
     networks:
       - dosebuddy

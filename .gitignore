@@ -7,3 +7,12 @@
 
 # Certbot state on the server: private keys and account credentials.
 deploy/data/
+
+# The database password. deploy/env.example is the committed documentation.
+deploy/.env
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/

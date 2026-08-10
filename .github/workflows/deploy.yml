@@ -18,6 +18,7 @@ on:
       - 'fonts/**'
       - 'robots.txt'
       - 'sitemap.xml'
+      - 'api/**'
       - 'deploy/**'
       - '.github/workflows/deploy.yml'
   workflow_dispatch:
@@ -62,7 +63,10 @@ jobs:
               ./ /srv/dosebuddy/site/
 
             cd deploy
-            docker compose up -d
+            docker compose up -d --build
+
+            # Schema first, then the code that expects it.
+            docker compose run --rm -T api alembic upgrade head
 
             for _ in $(seq 30); do
               docker compose exec -T nginx nginx -t >/dev/null 2>&1 && break
@@ -74,9 +78,20 @@ jobs:
             # and leaves the previous config serving, which is the safe outcome.
             docker compose exec -T nginx nginx -t
             docker compose exec -T nginx nginx -s reload
+
+            # Fail the deploy if the api never becomes ready. Without this the
+            # job goes green while the API answers 502, which is the shape of
+            # outage that gets noticed by users rather than by us.
+            for _ in $(seq 30); do
+              state=$(docker inspect -f '{{.State.Health.Status}}' dosebuddy-api 2>/dev/null || echo missing)
+              [ "$state" = "healthy" ] && break
+              sleep 4
+            done
+            [ "$(docker inspect -f '{{.State.Health.Status}}' dosebuddy-api)" = "healthy" ] \
+              || { echo "api never became ready"; docker compose logs --tail=50 api; exit 1; }
           REMOTE
 
-      - name: Verify the deployed site
-        run: |
-          curl -fsS -o /dev/null https://dosebuddyapp.com/ \
-            || echo "::warning::apex not reachable yet — expected before the DNS cutover"
+      # Smoke test from outside, over the real DNS and the real certificate.
+      # api.dosebuddyapp.com joins this once its certificate exists.
+      - name: Smoke test
+        run: curl -fsS -o /dev/null https://dosebuddyapp.com/

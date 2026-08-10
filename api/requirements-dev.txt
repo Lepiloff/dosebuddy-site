@@ -1,0 +1,8 @@
+# Test-only dependencies. Kept out of the runtime image: a service holding
+# health data should not ship a test runner and its transitive tree to
+# production.
+-r requirements.txt
+
+pytest>=8.3
+pytest-asyncio>=0.25
+httpx>=0.28

@@ -1,0 +1,44 @@
+name: API tests
+
+# Separate from the deploy workflow on purpose: these run on every branch and
+# every pull request, while the deploy only ever runs from main. Tests that only
+# run at deploy time are tests that tell you too late.
+on:
+  push:
+    paths:
+      - 'api/**'
+      - '.github/workflows/api-tests.yml'
+  pull_request:
+    paths:
+      - 'api/**'
+      - '.github/workflows/api-tests.yml'
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: api
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: api/requirements-dev.txt
+
+      - name: Install
+        run: pip install -r requirements-dev.txt
+
+      - name: Test
+        run: python -m pytest
+
+      # The health tests use stand-ins so they can exercise the failure paths,
+      # which means nothing else checks that the real app can be constructed
+      # and imported. This does.
+      - name: The app builds with real settings
+        env:
+          DATABASE_URL: postgresql+asyncpg://u:p@localhost:5432/db
+          REDIS_URL: redis://localhost:6379/0
+        run: python -c "from app.main import create_app; create_app()"

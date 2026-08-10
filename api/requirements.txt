@@ -1,0 +1,12 @@
+# Runtime dependencies. Lower bounds only — the image build resolves and pins
+# them into requirements.lock.txt, which is what actually gets installed, so a
+# rebuild months from now produces the same image as today.
+fastapi>=0.115
+uvicorn[standard]>=0.34
+pydantic>=2.10
+pydantic-settings>=2.7
+sqlalchemy>=2.0.36
+asyncpg>=0.30
+alembic>=1.14
+redis>=5.2
+structlog>=24.4
