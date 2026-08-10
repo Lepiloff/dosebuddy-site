@@ -47,51 +47,28 @@ jobs:
           echo "${{ secrets.EC2_HOST_KEY }}" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
 
+      - name: Check out the deploy script
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: deploy/remote-deploy.sh
+          sparse-checkout-cone-mode: false
+
+      # The script is copied over and executed, never piped into `bash -s`.
+      # Piping it in means stdin is the script, and the first
+      # `docker compose exec -T` forwards stdin to the container and eats the
+      # rest of it — silently, with a zero exit. Copying it also means a change
+      # to the script takes effect on this run rather than the next one.
       - name: Deploy
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
         run: |
-          ssh "ubuntu@${EC2_HOST}" 'bash -euo pipefail -s' <<'REMOTE'
-            cd /home/ubuntu/dosebuddy-site
+          scp deploy/remote-deploy.sh "ubuntu@${EC2_HOST}:/tmp/remote-deploy.sh"
+          ssh "ubuntu@${EC2_HOST}" 'bash /tmp/remote-deploy.sh'
 
-            git fetch --prune origin
-            git reset --hard origin/main
-
-            # Publish only the site itself; see deploy/site-exclude.txt.
-            rsync -a --delete \
-              --exclude-from=deploy/site-exclude.txt \
-              ./ /srv/dosebuddy/site/
-
-            cd deploy
-            docker compose up -d --build
-
-            # Schema first, then the code that expects it.
-            docker compose run --rm -T api alembic upgrade head
-
-            for _ in $(seq 30); do
-              docker compose exec -T nginx nginx -t >/dev/null 2>&1 && break
-              sleep 1
-            done
-
-            # nginx reads its config from a bind mount, so `up -d` alone does not
-            # pick up a config change. Test first: a failed test aborts the deploy
-            # and leaves the previous config serving, which is the safe outcome.
-            docker compose exec -T nginx nginx -t
-            docker compose exec -T nginx nginx -s reload
-
-            # Fail the deploy if the api never becomes ready. Without this the
-            # job goes green while the API answers 502, which is the shape of
-            # outage that gets noticed by users rather than by us.
-            for _ in $(seq 30); do
-              state=$(docker inspect -f '{{.State.Health.Status}}' dosebuddy-api 2>/dev/null || echo missing)
-              [ "$state" = "healthy" ] && break
-              sleep 4
-            done
-            [ "$(docker inspect -f '{{.State.Health.Status}}' dosebuddy-api)" = "healthy" ] \
-              || { echo "api never became ready"; docker compose logs --tail=50 api; exit 1; }
-          REMOTE
-
-      # Smoke test from outside, over the real DNS and the real certificate.
-      # api.dosebuddyapp.com joins this once its certificate exists.
+      # Smoke test from outside, over the real DNS and the real certificates.
+      # Both matter: the landing is what users see, the api is what the app
+      # depends on, and a deploy that leaves either broken is not a success.
       - name: Smoke test
-        run: curl -fsS -o /dev/null https://dosebuddyapp.com/
+        run: |
+          curl -fsS -o /dev/null https://dosebuddyapp.com/
+          curl -fsS -o /dev/null https://api.dosebuddyapp.com/health
