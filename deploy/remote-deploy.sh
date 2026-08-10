@@ -70,6 +70,15 @@ done
 # Fail the deploy if the api never becomes ready. Without this the job goes
 # green while the API answers 502 — the shape of outage that gets noticed by
 # users rather than by us.
+# Every deploy rebuilds the api image and orphans the previous layers. Nothing
+# reclaims them on its own, and the box shares one 20 GB volume with Postgres —
+# a disk that fills up presents as a database behaving strangely, not as "out of
+# space". Dangling images only, so nothing in use is touched.
+echo "==> reclaiming disk"
+docker image prune -f | tail -1 | sed 's/^/    /'
+docker builder prune -f --keep-storage 1GB 2>/dev/null | tail -1 | sed 's/^/    /'
+df -h / | awk 'NR==2{print "    root: "$3" of "$2" used ("$5")"}'
+
 echo "==> api readiness"
 for _ in $(seq 30); do
     state=$(docker inspect -f '{{.State.Health.Status}}' dosebuddy-api 2>/dev/null || echo missing)
