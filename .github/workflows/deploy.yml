@@ -1,16 +1,26 @@
 name: Deploy landing to EC2
 
-# Manual only, on purpose. dosebuddyapp.com is still served by GitHub Pages, and
-# Pages publishes from this same branch — so until the DNS cutover is done and
-# verified, a push to main deploys to Pages and this workflow is the only way to
-# put anything on the EC2 box.
+# The cutover is done: dosebuddyapp.com is served from this box, verified at 30
+# of 30 by deploy/verify.sh, so a push to main is now the way the site ships.
 #
-# The `push` trigger below is uncommented as the last step of the cutover, once
-# deploy/verify.sh is green against the live names (deploy/README.md).
+# Paths are filtered because GitHub Pages still publishes from this branch as
+# the rollback, and a README edit has no business restarting anything.
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'index.html'
+      - '404.html'
+      - 'es/**'
+      - 'css/**'
+      - 'js/**'
+      - 'img/**'
+      - 'fonts/**'
+      - 'robots.txt'
+      - 'sitemap.xml'
+      - 'deploy/**'
+      - '.github/workflows/deploy.yml'
   workflow_dispatch:
-  # push:
-  #   branches: [main]
 
 concurrency:
   group: deploy-ec2
