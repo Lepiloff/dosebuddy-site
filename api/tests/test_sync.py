@@ -281,3 +281,80 @@ async def test_revoking_a_membership_stops_the_data(api):
                      headers=auth_header(owner))
 
     assert (await pull(api, caregiver))["changes"] == {}
+
+
+async def test_reminder_authority_moves_and_is_visible_over_sync(api, session):
+    """The load-bearing part is that it crosses in the *data*.
+
+    A device learns it lost authority by pulling and seeing an id that is not
+    its own. If that only arrived by push, a lost push would leave two phones
+    ringing for the same dose — which is the invariant, not a nicety."""
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+
+    from sqlalchemy import select
+
+    from app.db.models import Device
+
+    mine = (await session.execute(
+        select(Device).where(Device.account_id == uuid.UUID(owner["account_id"]))
+    )).scalars().first()
+
+    r = await api.post(
+        f"/v1/profiles/{pid}/reminder-authority",
+        headers=auth_header(owner),
+        json={"device_id": str(mine.id)},
+    )
+    assert r.status_code == 204
+
+    got = await pull(api, owner)
+    prof = [p for p in got["changes"]["profiles"] if p["id"] == pid][0]
+    assert prof["owner_device_id"] == str(mine.id)
+
+
+async def test_a_watcher_is_not_told_which_device_rings(api, session):
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+    caregiver = await _pair(api, owner, pid)
+
+    from sqlalchemy import select
+
+    from app.db.models import Device
+
+    mine = (await session.execute(
+        select(Device).where(Device.account_id == uuid.UUID(owner["account_id"]))
+    )).scalars().first()
+    await api.post(f"/v1/profiles/{pid}/reminder-authority",
+                   headers=auth_header(owner), json={"device_id": str(mine.id)})
+
+    prof = (await pull(api, caregiver))["changes"]["profiles"][0]
+    assert "owner_device_id" not in prof
+
+
+async def test_authority_cannot_be_taken_by_someone_else(api, session):
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+    stranger = await sign_in(api, f"stranger-{uuid.uuid4()}")
+
+    from sqlalchemy import select
+
+    from app.db.models import Device
+
+    theirs = (await session.execute(
+        select(Device).where(Device.account_id == uuid.UUID(stranger["account_id"]))
+    )).scalars().first()
+
+    r = await api.post(f"/v1/profiles/{pid}/reminder-authority",
+                       headers=auth_header(stranger), json={"device_id": str(theirs.id)})
+    assert r.status_code == 404
+
+
+async def test_authority_cannot_be_set_through_sync_push(api, session):
+    """Through the change stream it would be resolved by last-write-wins, and
+    two devices each believing they hold it is the state the invariant exists to
+    prevent."""
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+
+    p = profile(pid, at=ms() + 5000)
+    p["owner_device_id"] = str(uuid.uuid4())
+    await push(api, owner, profiles=[p])
+
+    prof = [x for x in (await pull(api, owner))["changes"]["profiles"] if x["id"] == pid][0]
+    assert prof["owner_device_id"] is None

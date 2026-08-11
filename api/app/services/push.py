@@ -71,3 +71,14 @@ class FcmPush:
         # reinstalled, or the device wiped. Worth a line, not an exception.
         log.warning("push.rejected", status=r.status_code, type=data.get("type"))
         return False
+
+
+def build_push(settings) -> Push:
+    """One place that decides which sender is in use.
+
+    Lives here rather than in the worker because the API sends too: handing
+    reminder authority to another device nudges the previous one to stop.
+    """
+    if settings.fcm_project_id and settings.fcm_credentials_path:
+        return FcmPush(settings.fcm_project_id, settings.fcm_credentials_path)
+    return LoggingPush()

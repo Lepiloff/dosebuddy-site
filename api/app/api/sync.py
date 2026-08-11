@@ -317,6 +317,12 @@ def _row_to_wire(entity: str, row) -> dict[str, Any]:
             "name": row.name,
             "color": row.color,
             "sort_order": row.sort_order,
+            # Which device arms the alarms for this profile (spec §1.4). This is
+            # the authoritative answer: a device that pulls and finds an id
+            # other than its own stops. The push sent when authority moves is
+            # only a nudge, and a nudge that is lost must not leave two phones
+            # ringing for one dose.
+            "owner_device_id": str(row.owner_device_id) if row.owner_device_id else None,
         }
     if entity == "medications":
         return {

@@ -17,7 +17,8 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import Caller, current_caller, get_session
@@ -251,3 +252,63 @@ async def heartbeat(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "device_not_found")
     device.last_seen_at = utcnow()
     await session.commit()
+
+
+class ReminderAuthorityIn(BaseModel):
+    device_id: uuid.UUID
+
+
+@router.post(
+    "/profiles/{profile_id}/reminder-authority", status_code=status.HTTP_204_NO_CONTENT
+)
+async def set_reminder_authority(
+    profile_id: uuid.UUID,
+    body: ReminderAuthorityIn,
+    request: Request,
+    caller: Caller = Depends(current_caller),
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    """Move the reminder authority for a profile to another device.
+
+    Exactly one device materialises alarms for a profile (spec §1.4), so this is
+    a deliberate handover — a phone being replaced, or a profile moving between
+    the phones of one account.
+
+    **Deliberately not part of sync push.** Authority set through the ordinary
+    change stream would be resolved by last-write-wins, and two devices that both
+    believe they hold it is precisely the state the invariant exists to prevent.
+    One endpoint, one writer, one answer.
+
+    The previous device is nudged by push, but correctness does not rest on that
+    push arriving: the authoritative signal is `owner_device_id` on the profile,
+    which every device sees on its next pull. A device that finds an id other
+    than its own stops arming alarms. Push only makes it happen sooner — and
+    since it can be lost, anything that depended on it would eventually leave two
+    phones ringing for one dose.
+    """
+    profile = await _owned_profile(session, caller, profile_id)
+
+    device = await session.get(Device, body.device_id)
+    if device is None or device.account_id != caller.account.id or device.revoked_at:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "device_not_found")
+
+    previous = profile.owner_device_id
+    if previous == device.id:
+        return
+
+    # A new server_seq, so the change reaches every device through the ordinary
+    # cursor rather than needing a delivery mechanism of its own.
+    await session.execute(
+        sa_update(Profile)
+        .where(Profile.id == profile.id)
+        .values(owner_device_id=device.id, server_seq=text("nextval('server_seq')"))
+    )
+    await session.commit()
+
+    if previous is not None:
+        old = await session.get(Device, previous)
+        if old is not None and old.push_token and old.revoked_at is None:
+            await request.app.state.push.send(
+                old.push_token,
+                {"type": "reminder_authority_lost", "profile_id": str(profile.id)},
+            )

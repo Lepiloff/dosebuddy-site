@@ -20,17 +20,11 @@ from app.core.config import get_settings
 from app.core.logging import setup_logging
 from app.db.session import create_engine, create_sessionmaker
 from app.services import alerts
-from app.services.push import FcmPush, LoggingPush, Push
+from app.services.push import Push, build_push
 
 SCAN_INTERVAL_SECONDS = 60
 
 log = structlog.get_logger(__name__)
-
-
-def build_push(settings) -> Push:
-    if settings.fcm_project_id and settings.fcm_credentials_path:
-        return FcmPush(settings.fcm_project_id, settings.fcm_credentials_path)
-    return LoggingPush()
 
 
 async def scan_once(sessionmaker, push: Push, now: datetime | None = None) -> int:
