@@ -78,6 +78,19 @@ ssh -i ~/.ssh/dosebuddy_ec2 ubuntu@<elastic-ip>
 sudo apt update && sudo apt install -y docker.io docker-compose-v2 rsync git
 sudo usermod -aG docker ubuntu       # log out and back in for this to take
 
+# Docker's default json-file driver has no size limit, and the alert worker
+# writes a line a minute forever. On a volume shared with Postgres that ends as
+# "the database is behaving strangely" rather than "the disk is full".
+# Applies to containers created afterwards, so existing ones pick it up on the
+# next deploy.
+sudo tee /etc/docker/daemon.json >/dev/null <<'"'"'JSON'"'"'
+{
+  "log-driver": "json-file",
+  "log-opts": { "max-size": "10m", "max-file": "3" }
+}
+JSON
+sudo systemctl restart docker
+
 sudo mkdir -p /srv/dosebuddy/site
 sudo chown ubuntu:ubuntu /srv/dosebuddy/site
 

@@ -1,0 +1,42 @@
+name: Monitor
+
+# Everything here is live and, until this existed, unwatched: nothing between
+# deploys noticed a container crash-looping, a disk filling, or — the one with a
+# deadline — a certificate renewal that silently stopped working. The renewal
+# fires at 30 days remaining; a failure there is invisible until the site goes
+# dark, because a certificate that is not being renewed still verifies perfectly
+# until the hour it expires.
+#
+# A failed run emails whoever owns the repository. That is the whole alerting
+# system, and for one box with no users it is the right size: no agent, no
+# service, nothing else to keep alive.
+
+on:
+  schedule:
+    # Every 30 minutes. GitHub runs scheduled jobs late under load, sometimes by
+    # a lot; that is fine for noticing an outage, and this is not a pager.
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+jobs:
+  live:
+    name: The site and the API are up
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The same acceptance test the migration was signed off with, so
+      # monitoring and correctness cannot drift apart into two definitions of
+      # "working". It also checks how many days are left on the certificate.
+      - name: Landing
+        run: ./deploy/verify.sh dosebuddyapp.com
+
+      - name: API
+        run: |
+          curl -fsS -o /dev/null https://api.dosebuddyapp.com/health
+
+          # Readiness, not liveness: this is the one that fails when Postgres or
+          # Redis has gone away, which is the outage worth hearing about.
+          ready=$(curl -fsS https://api.dosebuddyapp.com/health/ready)
+          echo "$ready"
+          echo "$ready" | grep -q '"status":"ready"'

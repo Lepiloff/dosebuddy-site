@@ -162,6 +162,23 @@ elif chain=$(echo | openssl s_client -connect "${PIN:-$HOST}:443" -servername "$
         printf '  ok    %-58s %s\n' "chain verifies" \
             "$(printf '%s' "$chain" | sed -n 's/^subject=.*CN *= *//p' | head -1)"
         pass=$((pass + 1))
+
+        # Days left, not just validity. certbot renews at 30 days remaining; a
+        # renewal that silently stops working leaves a certificate that still
+        # verifies perfectly right up until the site goes dark. Failing at 21
+        # gives three weeks to notice and fix it.
+        end=$(printf '%s' "$chain" | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)
+        if [ -n "$end" ]; then
+            left=$(( ( $(date -d "$end" +%s) - $(date +%s) ) / 86400 ))
+            if [ "$left" -lt 21 ]; then
+                printf '  FAIL  %-58s %s days left — renewal has not run\n' \
+                    "certificate is close to expiry" "$left"
+                fail=$((fail + 1))
+            else
+                printf '  ok    %-58s %s days left\n' "renewal is keeping up" "$left"
+                pass=$((pass + 1))
+            fi
+        fi
     else
         printf '  FAIL  %-58s %s\n' "chain does not verify" \
             "$(printf '%s' "$chain" | grep 'Verify return code' | head -1)"
