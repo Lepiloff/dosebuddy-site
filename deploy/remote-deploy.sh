@@ -26,7 +26,11 @@ git reset --hard origin/main
 
 # Publish only what deploy/site-include.txt names, and nothing else. The
 # trailing --exclude='*' is what makes it an allow-list rather than a suggestion.
-rsync -a --delete \
+# --delete-excluded, not just --delete. On its own, --delete protects excluded
+# files rather than removing them, so anything already in the web root that the
+# allow-list does not name would simply stay there — which is exactly how docs/
+# survived the first attempt at this fix and kept serving.
+rsync -a --delete --delete-excluded \
     --include-from=deploy/site-include.txt --exclude='*' \
     ./ "$WEB_ROOT/"
 
