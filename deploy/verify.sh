@@ -126,6 +126,10 @@ expect "https://$HOST/deploy/verify.sh"          404
 expect "https://$HOST/README.md"                 404
 expect "https://$HOST/tool/prepare-assets.sh"    404
 expect "https://$HOST/.git/config"               404
+# Internal design notes. These were served from the live domain for a day
+# because the web root was built from a blocklist and nobody extended it.
+expect "https://$HOST/docs/v1.1-api-contract.md"      404
+expect "https://$HOST/docs/v1.1-contract-decisions.md" 404
 
 # http -> https, and www -> apex. GitHub collapsed http://www straight to the
 # https apex in one hop; two hops would still work but would spend a redirect

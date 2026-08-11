@@ -24,8 +24,11 @@ cd "$REPO"
 git fetch --prune origin
 git reset --hard origin/main
 
-# Publish only the site itself; see deploy/site-exclude.txt.
-rsync -a --delete --exclude-from=deploy/site-exclude.txt ./ "$WEB_ROOT/"
+# Publish only what deploy/site-include.txt names, and nothing else. The
+# trailing --exclude='*' is what makes it an allow-list rather than a suggestion.
+rsync -a --delete \
+    --include-from=deploy/site-include.txt --exclude='*' \
+    ./ "$WEB_ROOT/"
 
 cd "$REPO/deploy"
 

@@ -1,0 +1,23 @@
+# What the web root is allowed to contain. An allow-list, deliberately.
+#
+# This began as an exclude list, and that was the wrong shape: anything added to
+# the repository later was published by default, and the person adding it had to
+# remember a file in deploy/ they had no reason to think about. docs/ was added
+# and served from dosebuddyapp.com/docs/ for a day — internal design notes on the
+# product's marketing domain, because nobody updated a blocklist.
+#
+# Inverted, the default is private. A new directory is not published until it is
+# named here, and the failure mode is "my file is missing" rather than "my file
+# is public".
+#
+# rsync filter syntax: `***` means the directory and everything under it.
+
+/index.html
+/404.html
+/robots.txt
+/sitemap.xml
+/es/***
+/css/***
+/js/***
+/img/***
+/fonts/***

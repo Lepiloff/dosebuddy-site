@@ -38,7 +38,7 @@ nginx/conf.d/00-common.conf        http-level settings, TLS params, catch-all vh
 nginx/conf.d/10-dosebuddyapp.conf  the landing: four server blocks
 nginx/conf.d/20-api.conf           api.dosebuddyapp.com
 nginx/snippets/landing.conf        how the site is served
-site-exclude.txt           what never reaches the web root
+site-include.txt           what the web root may contain (allow-list)
 init-cert.sh               first certificate for a hostname
 verify.sh                  the acceptance test for the landing
 ```
