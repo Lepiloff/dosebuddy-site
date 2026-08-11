@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     # accepted, which is the whole attack.
     google_client_id: str = ""
 
+    # Firebase project and a service account key file, for FCM. Empty means the
+    # alert loop logs what it would have sent instead of failing — a better
+    # state to deploy into than one that throws on the first missed dose.
+    fcm_project_id: str = ""
+    fcm_credentials_path: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -65,6 +65,32 @@ services:
     networks:
       - dosebuddy
 
+  # The alert loop, in its own process rather than a task inside the API.
+  # Every uvicorn worker would run its own copy of a background task and tell
+  # the same caregiver the same thing once per worker — invisible with one
+  # worker, a surprise the day there are two.
+  worker:
+    build:
+      context: ../api
+    image: dosebuddy-api:local
+    container_name: dosebuddy-worker
+    restart: unless-stopped
+    command: ["python", "-m", "app.worker"]
+    environment:
+      ENVIRONMENT: production
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379/0
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      JWT_SECRET: ${JWT_SECRET}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      FCM_PROJECT_ID: ${FCM_PROJECT_ID:-}
+      FCM_CREDENTIALS_PATH: ${FCM_CREDENTIALS_PATH:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - dosebuddy
+
   postgres:
     image: postgres:16-alpine
     container_name: dosebuddy-postgres

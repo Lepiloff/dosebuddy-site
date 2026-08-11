@@ -42,11 +42,19 @@ def schedule(sid: str, mid: str, at: int | None = None) -> dict:
 
 
 def dose(did: str, mid: str, pid: str, sid: str | None = None,
-         status: str = "pending", at: int | None = None) -> dict:
+         status: str = "pending", at: int | None = None,
+         planned: int | None = None) -> dict:
+    """`at` is when the row was last edited, `planned` is when the dose was due.
+
+    Separate on purpose. Conflating them means a dose planned an hour ago also
+    claims to have been edited an hour ago — which last-write-wins correctly
+    refuses, since the row on the server is newer.
+    """
     t = at or ms()
     return {"id": did, "created_at": t, "updated_at": t, "deleted_at": None,
             "schedule_id": sid, "medication_id": mid, "profile_id": pid,
-            "planned_at": t, "status": status, "action_at": None,
+            "planned_at": planned if planned is not None else t,
+            "status": status, "action_at": None,
             "snooze_count": 0, "snoozed_until": None, "dose_amount": 1.0}
 
 

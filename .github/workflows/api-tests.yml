@@ -67,6 +67,33 @@ jobs:
           alembic upgrade head
           alembic downgrade base
 
+      # The image installs from the lock file, so a dependency added to
+      # requirements.txt without regenerating it is simply absent in
+      # production — and no test notices, because tests install
+      # requirements-dev.txt directly. That shipped twice before this check.
+      - name: The lock file covers requirements.txt
+        run: |
+          pip install -r requirements.txt --dry-run --quiet --report /tmp/r.json
+          python - <<'EOF'
+          import json, re
+          needed = {
+              p["metadata"]["name"].lower().replace("_", "-")
+              for p in json.load(open("/tmp/r.json"))["install"]
+          }
+          locked = {
+              re.split(r"[=<>\[]", line, 1)[0].strip().lower().replace("_", "-")
+              for line in open("requirements.lock.txt")
+              if line.strip() and not line.startswith("#")
+          }
+          missing = needed - locked
+          if missing:
+              raise SystemExit(
+                  f"requirements.lock.txt is stale, missing: {sorted(missing)}\n"
+                  "Regenerate it — see deploy/README.md."
+              )
+          print(f"lock covers all {len(needed)} resolved packages")
+          EOF
+
       - name: The app builds with real settings
         env:
           DATABASE_URL: postgresql+asyncpg://u:p@localhost:5432/db

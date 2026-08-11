@@ -15,3 +15,7 @@ structlog>=24.4
 pyjwt>=2.10
 cryptography>=44.0
 google-auth[requests]>=2.38
+
+# FCM, from the worker. Declared rather than imported lazily: the same shape of
+# omission already shipped once and surfaced only on the first real sign-in.
+httpx>=0.28

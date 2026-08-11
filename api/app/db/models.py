@@ -193,6 +193,17 @@ class ProfileMembership(Base):
     )
     role: Mapped[Role] = mapped_column(Enum(Role, name="role"))
 
+    # How long after a dose is reported missed before the watcher hears about
+    # it. On the link rather than global: one caregiver wants to know at once,
+    # another only if it is really being forgotten, and both are right.
+    dose_alert_after_minutes: Mapped[int] = mapped_column(Integer, default=30)
+
+    # How long a profile's device may stay silent before that silence is itself
+    # reported. Long enough to sit out a night with no connection, short enough
+    # that a phone switched off on Monday is not first noticed on Wednesday.
+    # A guess until there is real usage to tune it against.
+    stale_alert_after_hours: Mapped[int] = mapped_column(Integer, default=12)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -361,3 +372,55 @@ class StockEvent(Base, SyncMixin):
     server_seq: Mapped[int] = mapped_column(
         BigInteger, server_default=text(f"nextval('{SERVER_SEQ}')"), index=True
     )
+
+
+class AlertKind(str, enum.Enum):
+    """Two signals, and collapsing them would be a lie in one direction or the
+    other (contract §5).
+
+    `dose_missed` means the profile's device reported a dose as missed.
+    `profile_stale` means that device has said nothing for too long — which is
+    not the same thing and must not be dressed up as it. Alerting on silence
+    cries wolf; staying quiet lets a real miss pass unnoticed exactly when the
+    phone is off, which is the case worth worrying about.
+    """
+
+    dose_missed = "dose_missed"
+    profile_stale = "profile_stale"
+
+
+class AlertDelivery(Base):
+    """One row per alert actually sent, so it cannot be sent twice.
+
+    In the database rather than in Redis on purpose: Redis is allowed to lose
+    its contents, and the cost of losing this is a caregiver woken again for
+    something they already saw. It doubles as the record of what we told whom,
+    which is the sort of question that gets asked after the fact.
+    """
+
+    __tablename__ = "alert_deliveries"
+    __table_args__ = (
+        Index(
+            "uq_alert_once",
+            "account_id",
+            "kind",
+            "subject_id",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), index=True
+    )
+    profile_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("profiles.id", ondelete="CASCADE"), index=True
+    )
+    kind: Mapped[AlertKind] = mapped_column(Enum(AlertKind, name="alert_kind"))
+
+    # The dose for dose_missed; for profile_stale, the window it belongs to, so
+    # a device offline for a week produces one alert a day rather than one every
+    # time the scan runs.
+    subject_id: Mapped[str] = mapped_column(String(64))
+
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
