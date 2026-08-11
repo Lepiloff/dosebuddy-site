@@ -47,6 +47,34 @@ jobs:
           echo "${{ secrets.EC2_HOST_KEY }}" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
 
+      - uses: actions/checkout@v4
+
+      # The CSP allows the inline script by hash. Edit that script without
+      # regenerating the hash and the browser silently drops it — the page still
+      # renders, the language hint just stops working and nothing reports it.
+      # Cheaper to fail here than to discover it from a CLS regression.
+      - name: The CSP hash matches the inline script
+        run: |
+          python - <<'EOF'
+          import re, hashlib, base64, pathlib, sys
+          conf = pathlib.Path("deploy/nginx/snippets/landing.conf").read_text()
+          declared = set(re.findall(r"'(sha256-[A-Za-z0-9+/=]+)'", conf))
+          actual = set()
+          for f in ("index.html", "es/index.html", "404.html"):
+              for m in re.finditer(r"<script>(.*?)</script>",
+                                   pathlib.Path(f).read_text(), re.S):
+                  d = hashlib.sha256(m.group(1).encode()).digest()
+                  actual.add("sha256-" + base64.b64encode(d).decode())
+          missing = actual - declared
+          if missing:
+              sys.exit(
+                  "CSP hash is stale. The inline script changed but "
+                  "deploy/nginx/snippets/landing.conf was not updated.\n"
+                  f"Add: {sorted(missing)}"
+              )
+          print(f"{len(actual)} inline script(s), all allowed by the CSP")
+          EOF
+
       - name: Check out the deploy script
         uses: actions/checkout@v4
         with:
