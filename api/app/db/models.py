@@ -1,12 +1,11 @@
 """Server tables.
 
-Two kinds live here. The mirror of the device model comes later, with the sync
-endpoints; what exists now is what the device never had — accounts, devices,
-sessions, membership and pairing.
+Two kinds live here.
 
-`profiles` is the exception: pairing is about sharing a profile, so the row has
-to exist before pairing can be built. Its fields are the device's, because the
-device is the source of truth (spec §0.5) and the server repeats it.
+What the device never had — accounts, devices, sessions, membership, pairing.
+And the mirror of the device model — profiles, medications, schedules,
+dose_events, stock_events — whose fields are the device's, because the device is
+the source of truth (spec §0.5) and the server repeats rather than redefines.
 """
 
 from __future__ import annotations
@@ -17,12 +16,15 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     DateTime,
     Enum,
+    Float,
     ForeignKey,
     Index,
     Integer,
     String,
+    Text,
     text,
 )
 from sqlalchemy.dialects.postgresql import UUID
@@ -224,4 +226,133 @@ class PairingCode(Base):
     redeemed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     redeemed_by_account_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("accounts.id", ondelete="SET NULL"), nullable=True
+    )
+
+
+# ---------------------------------------------------------------------------
+# The mirror of the device model
+#
+# Fields are the device's, taken from lib/core/db/tables.dart. The device is the
+# source of truth (spec §0.5) and the server repeats it — including the parts
+# that look odd here, like times kept as JSON text, because reformatting them
+# would mean a second implementation of something the device already decided.
+#
+# Two decisions worth stating, because both look like mistakes otherwise.
+#
+# **Timestamps are BIGINT milliseconds, not timestamptz.** That is what the
+# device stores and what crosses the wire. Converting in and out of a database
+# type buys nothing and is exactly where an hour goes missing at a DST boundary.
+#
+# **Enum-valued columns are TEXT, not Postgres enums.** A Postgres enum would
+# reject a value it does not know — and the value that arrives tomorrow comes
+# from a newer client, relayed through here to an older one. The server must
+# store what it is given; deciding whether a value is understood is the
+# client's job, which is why the app track deliberately left CHECK off these
+# columns too (05d §3).
+# ---------------------------------------------------------------------------
+
+
+class SyncMixin:
+    """The v1.0 sync-ready foundation (spec §4.4), unchanged."""
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    created_at_ms: Mapped[int] = mapped_column(BigInteger)
+    updated_at_ms: Mapped[int] = mapped_column(BigInteger)
+    deleted_at_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+
+class Medication(Base, SyncMixin):
+    __tablename__ = "medications"
+
+    profile_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("profiles.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(EncryptedString)
+    notes: Mapped[str | None] = mapped_column(EncryptedString, nullable=True)
+    dosage_text: Mapped[str | None] = mapped_column(EncryptedString, nullable=True)
+
+    dose_amount: Mapped[float] = mapped_column(Float, default=1)
+    form: Mapped[str] = mapped_column(String(32))
+    pack_size: Mapped[float | None] = mapped_column(Float, nullable=True)
+    refill_threshold_days: Mapped[int] = mapped_column(Integer, default=3)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # The device's photo_path is a local path and never crosses (contract §4.5);
+    # this is the S3 key it maps to.
+    photo_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    # current_stock is deliberately absent: it is a cache of the stock journal
+    # sum, and a derived value on the wire is a second source of truth.
+
+    server_seq: Mapped[int] = mapped_column(
+        BigInteger, server_default=text(f"nextval('{SERVER_SEQ}')"), index=True
+    )
+
+
+class Schedule(Base, SyncMixin):
+    __tablename__ = "schedules"
+
+    medication_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("medications.id", ondelete="CASCADE"), index=True
+    )
+    type: Mapped[str] = mapped_column(String(32))
+
+    # Stored and returned verbatim. The server never expands a schedule into
+    # doses — the device does (spec §3.4), and a second calendar implementation
+    # would disagree with the first at a DST boundary, quietly.
+    times: Mapped[str] = mapped_column(Text)
+    days_of_week: Mapped[str | None] = mapped_column(Text, nullable=True)
+    interval_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    start_date: Mapped[str] = mapped_column(String(10))
+    end_date: Mapped[str | None] = mapped_column(String(10), nullable=True)
+
+    server_seq: Mapped[int] = mapped_column(
+        BigInteger, server_default=text(f"nextval('{SERVER_SEQ}')"), index=True
+    )
+
+
+class DoseEvent(Base, SyncMixin):
+    __tablename__ = "dose_events"
+
+    schedule_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("schedules.id", ondelete="SET NULL"), nullable=True
+    )
+    medication_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("medications.id", ondelete="CASCADE"), index=True
+    )
+    profile_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("profiles.id", ondelete="CASCADE"), index=True
+    )
+
+    planned_at_ms: Mapped[int] = mapped_column(BigInteger, index=True)
+
+    # Not monotonic: missed can return to pending when the intake window is
+    # widened, and taken can return to pending from the calendar. Nothing here
+    # may assume it only moves forward (05d §1.1а).
+    status: Mapped[str] = mapped_column(String(32), index=True)
+
+    action_at_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    snooze_count: Mapped[int] = mapped_column(Integer, default=0)
+    snoozed_until_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    dose_amount: Mapped[float] = mapped_column(Float)
+
+    server_seq: Mapped[int] = mapped_column(
+        BigInteger, server_default=text(f"nextval('{SERVER_SEQ}')"), index=True
+    )
+
+
+class StockEvent(Base, SyncMixin):
+    __tablename__ = "stock_events"
+
+    medication_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("medications.id", ondelete="CASCADE"), index=True
+    )
+    delta: Mapped[float] = mapped_column(Float)
+    reason: Mapped[str] = mapped_column(String(32))
+    dose_event_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("dose_events.id", ondelete="SET NULL"), nullable=True
+    )
+
+    server_seq: Mapped[int] = mapped_column(
+        BigInteger, server_default=text(f"nextval('{SERVER_SEQ}')"), index=True
     )
