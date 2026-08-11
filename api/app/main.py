@@ -16,7 +16,7 @@ import redis.asyncio as aioredis
 import structlog
 from fastapi import APIRouter, FastAPI
 
-from app.api import auth, health, pairing
+from app.api import auth, errors, health, pairing, sync
 from app.core.config import Settings, get_settings
 from app.core.logging import setup_logging
 from app.db.session import create_engine, create_sessionmaker
@@ -62,6 +62,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url="/openapi.json" if settings.docs_enabled else None,
     )
     app.state.settings = settings
+    errors.install(app)
 
     # Operational endpoints sit at the root, outside the versioned contract:
     # they answer to the deploy and to monitoring, not to the mobile client,
@@ -72,6 +73,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     v1 = APIRouter(prefix=settings.api_prefix)
     v1.include_router(auth.router)
     v1.include_router(pairing.router)
+    v1.include_router(sync.router)
     app.include_router(v1)
 
     # Verifying a Google ID token is behind an interface so tests can drive the

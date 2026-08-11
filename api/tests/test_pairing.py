@@ -103,7 +103,7 @@ async def test_an_expired_code_is_refused(api, session):
 
     r = await api.post("/v1/pairing/redeem", headers=auth_header(caregiver), json={"code": code})
     assert r.status_code == 400
-    assert r.json()["detail"] == "invalid_code"
+    assert r.json()["error"]["code"] == "invalid_code"
 
 
 async def test_wrong_used_and_expired_are_indistinguishable(api, session):
@@ -114,7 +114,7 @@ async def test_wrong_used_and_expired_are_indistinguishable(api, session):
         "/v1/pairing/redeem", headers=auth_header(caregiver), json={"code": "ZZZ-999"}
     )
     assert r.status_code == 400
-    assert r.json()["detail"] == "invalid_code"
+    assert r.json()["error"]["code"] == "invalid_code"
 
 
 async def test_ownership_cannot_be_handed_out(api, session):
@@ -125,7 +125,7 @@ async def test_ownership_cannot_be_handed_out(api, session):
         json={"profile_id": str(profile_id), "role": "owner"},
     )
     assert r.status_code == 400
-    assert r.json()["detail"] == "role_not_grantable"
+    assert r.json()["error"]["code"] == "role_not_grantable"
 
 
 async def test_someone_elses_profile_is_a_404_not_a_403(api, session):

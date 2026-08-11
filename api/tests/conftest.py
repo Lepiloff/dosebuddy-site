@@ -188,7 +188,14 @@ def auth_header(pair: dict) -> dict:
 async def make_profile(session, account_id: str, name: str = "Profile") -> uuid.UUID:
     """Profiles arrive over sync, which is not built yet, so tests create them
     directly rather than pretending an endpoint exists."""
-    profile = Profile(id=uuid.uuid4(), owner_account_id=uuid.UUID(account_id), name=name)
+    now = int(__import__("time").time() * 1000)
+    profile = Profile(
+        id=uuid.uuid4(),
+        owner_account_id=uuid.UUID(account_id),
+        name=name,
+        created_at_ms=now,
+        updated_at_ms=now,
+    )
     session.add(profile)
     await session.commit()
     return profile.id

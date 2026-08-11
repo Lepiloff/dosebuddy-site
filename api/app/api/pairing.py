@@ -63,7 +63,7 @@ async def _owned_profile(session: AsyncSession, caller: Caller, profile_id: uuid
             select(Profile).where(
                 Profile.id == profile_id,
                 Profile.owner_account_id == caller.account.id,
-                Profile.deleted_at.is_(None),
+                Profile.deleted_at_ms.is_(None),
             )
         )
     ).scalar_one_or_none()
@@ -139,7 +139,7 @@ async def redeem(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid_code")
 
     profile = await session.get(Profile, code.profile_id)
-    if profile is None or profile.deleted_at is not None:
+    if profile is None or profile.deleted_at_ms is not None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid_code")
 
     if profile.owner_account_id == caller.account.id:

@@ -1,0 +1,113 @@
+"""Wire shapes for sync.
+
+Field names are the contract's, which are the device's. Where the column here
+is named differently — `updated_at_ms` against the wire's `updated_at` — the
+alias lives in one place rather than being remembered at each call site.
+
+Every float is declared `allow_inf_nan=False`, and that is not belt-and-braces.
+The app track has to reject NaN when deserialising because SQLite stores it as
+NULL and NULL is meaningful in these columns — a NaN would silently switch stock
+tracking off. The same reasoning applies harder here: this server is the relay,
+so a NaN accepted from one buggy client is a NaN handed to every other device on
+the account. Rejecting at the boundary where data enters the shared store is
+cheaper than every reader defending itself.
+"""
+
+from __future__ import annotations
+
+import uuid
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class SyncBase(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    id: uuid.UUID
+    created_at: int = Field(alias="created_at")
+    updated_at: int
+    deleted_at: int | None = None
+
+
+class ProfileIn(SyncBase):
+    name: str = Field(max_length=200)
+    color: int = 0
+    sort_order: int = 0
+    # is_elder_mode is not on the wire: it describes a device, not a profile.
+
+
+class MedicationIn(SyncBase):
+    profile_id: uuid.UUID
+    name: str = Field(max_length=200)
+    notes: str | None = Field(default=None, max_length=2000)
+    dosage_text: str | None = Field(default=None, max_length=200)
+    dose_amount: float = Field(default=1, allow_inf_nan=False)
+    form: str = Field(max_length=32)
+    pack_size: float | None = Field(default=None, allow_inf_nan=False)
+    refill_threshold_days: int = 3
+    is_active: bool = True
+    photo_key: str | None = Field(default=None, max_length=255)
+    # current_stock is not on the wire: it is a cache of the stock journal sum.
+
+
+class ScheduleIn(SyncBase):
+    medication_id: uuid.UUID
+    type: str = Field(max_length=32)
+    # Verbatim. The server stores and returns these without parsing them.
+    times: str
+    days_of_week: str | None = None
+    interval_days: int | None = None
+    start_date: str = Field(max_length=10)
+    end_date: str | None = Field(default=None, max_length=10)
+
+
+class DoseEventIn(SyncBase):
+    schedule_id: uuid.UUID | None = None
+    medication_id: uuid.UUID
+    profile_id: uuid.UUID
+    planned_at: int
+    status: str = Field(max_length=32)
+    action_at: int | None = None
+    snooze_count: int = 0
+    snoozed_until: int | None = None
+    dose_amount: float = Field(allow_inf_nan=False)
+
+
+class StockEventIn(SyncBase):
+    medication_id: uuid.UUID
+    delta: float = Field(allow_inf_nan=False)
+    reason: str = Field(max_length=32)
+    dose_event_id: uuid.UUID | None = None
+
+
+class Changes(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    profiles: list[ProfileIn] = []
+    medications: list[MedicationIn] = []
+    schedules: list[ScheduleIn] = []
+    dose_events: list[DoseEventIn] = []
+    stock_events: list[StockEventIn] = []
+
+
+class PushIn(BaseModel):
+    changes: Changes = Changes()
+
+
+class Rejected(BaseModel):
+    id: uuid.UUID
+    entity: str
+    code: str
+
+
+class PushOut(BaseModel):
+    cursor: str
+    # Per record, not per batch: one row the caller had no business sending must
+    # not throw away the rest of a batch that was fine.
+    rejected: list[Rejected] = []
+
+
+class PullOut(BaseModel):
+    cursor: str
+    has_more: bool
+    changes: dict[str, list[dict]]

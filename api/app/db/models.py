@@ -148,9 +148,14 @@ class Profile(Base):
     # happens to sit on the profile row for historical reasons, and syncing it
     # would push one phone's large-text UI onto every device on the account.
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Milliseconds, like every other mirrored table. These began as timestamptz
+    # — profiles were built for pairing, before sync existed — and that made
+    # last-write-wins compare a device clock against a database type. The
+    # comparison would not have failed loudly; it would have picked the wrong
+    # winner.
+    created_at_ms: Mapped[int] = mapped_column(BigInteger)
+    updated_at_ms: Mapped[int] = mapped_column(BigInteger)
+    deleted_at_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     # Cursor ordering. Server-assigned, never the device's clock: phone clocks
     # run backwards, and equal milliseconds at a page boundary lose rows

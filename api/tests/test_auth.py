@@ -93,7 +93,7 @@ async def test_replaying_a_rotated_token_kills_the_whole_device_session(api, ses
 
     replay = await api.post("/v1/auth/refresh", json={"refresh_token": pair["refresh_token"]})
     assert replay.status_code == 401
-    assert replay.json()["detail"] == "refresh_token_reused"
+    assert replay.json()["error"]["code"] == "refresh_token_reused"
 
     # The token handed out a moment ago is dead too.
     after = await api.post("/v1/auth/refresh", json={"refresh_token": fresh["refresh_token"]})
@@ -122,7 +122,7 @@ async def test_a_revoked_device_is_refused_on_every_request(api, session):
 
     r = await api.post("/v1/auth/logout", headers=auth_header(pair))
     assert r.status_code == 401
-    assert r.json()["detail"] == "device_revoked"
+    assert r.json()["error"]["code"] == "device_revoked"
 
 
 async def test_the_same_device_id_under_another_account_is_refused(api):
@@ -178,7 +178,7 @@ async def test_sign_in_says_so_when_google_is_not_configured(api):
         json={"id_token": "x", "device": {"id": str(uuid.uuid4()), "platform": "android"}},
     )
     assert r.status_code == 503
-    assert r.json()["detail"] == "google_sign_in_not_configured"
+    assert r.json()["error"]["code"] == "google_sign_in_not_configured"
 
 
 async def test_the_real_verifier_wraps_failures_rather_than_leaking_them(api):
