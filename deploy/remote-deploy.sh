@@ -28,10 +28,20 @@ git reset --hard origin/main
 rsync -a --delete --exclude-from=deploy/site-exclude.txt ./ "$WEB_ROOT/"
 
 cd "$REPO/deploy"
-docker compose up -d --build
 
-# Schema first, then the code that expects it.
+# Build without starting anything, so the migration can run before the new code
+# does. Started first, a container that expects a column the database has not
+# grown yet fails on every request until the migration catches up — and the
+# worker did exactly that, loudly, for the length of one deploy.
+#
+# The other order is the safe one: additive migrations leave the *old* code
+# working, so the brief overlap is old-code-on-new-schema rather than the
+# reverse.
+docker compose build
+
 docker compose run --rm -T api alembic upgrade head
+
+docker compose up -d
 
 for _ in $(seq 30); do
     docker compose exec -T nginx nginx -t >/dev/null 2>&1 && break
@@ -67,9 +77,6 @@ for name in $(docker compose exec -T nginx nginx -T 2>/dev/null \
     echo "    ok: $name"
 done
 
-# Fail the deploy if the api never becomes ready. Without this the job goes
-# green while the API answers 502 — the shape of outage that gets noticed by
-# users rather than by us.
 # A deploy that changes api/ leaves the previous image untagged, and nothing
 # reclaims it. One 20 GB volume is shared with Postgres, and a disk filling up
 # on this box presents as a database behaving strangely rather than as "out of
@@ -87,6 +94,9 @@ docker image prune -f | tail -1 | sed 's/^/    /'
 docker builder prune -f --keep-storage 1GB 2>/dev/null | tail -1 | sed 's/^/    /'
 df -h / | awk 'NR==2{print "    root: "$3" of "$2" used ("$5")"}'
 
+# Fail the deploy if the api never becomes ready. Without this the job goes
+# green while the API answers 502 — the shape of outage that gets noticed by
+# users rather than by us.
 echo "==> api readiness"
 for _ in $(seq 30); do
     state=$(docker inspect -f '{{.State.Health.Status}}' dosebuddy-api 2>/dev/null || echo missing)
@@ -100,3 +110,17 @@ if [ "$state" != "healthy" ]; then
     exit 1
 fi
 echo "    ok: api is ready"
+
+# The worker has no health check to gate on — it holds no port — so the useful
+# question is whether it is still the process that started. A crash loop shows
+# up as a restart count climbing, and an alert loop that is quietly dead looks
+# exactly like one with nothing to report.
+echo "==> worker"
+running=$(docker inspect -f '{{.State.Running}}' dosebuddy-worker 2>/dev/null || echo false)
+restarts=$(docker inspect -f '{{.RestartCount}}' dosebuddy-worker 2>/dev/null || echo 0)
+if [ "$running" != "true" ]; then
+    echo "    worker is not running"
+    docker compose logs --tail=50 worker
+    exit 1
+fi
+echo "    ok: worker running (restarts since creation: $restarts)"
