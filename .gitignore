@@ -11,6 +11,10 @@ deploy/data/
 # The database password. deploy/env.example is the committed documentation.
 deploy/.env
 
+# Service account keys. Never in git — a key in history stays valid until it is
+# revoked in the console, which nobody remembers to do.
+deploy/secrets/
+
 # Python
 __pycache__/
 *.py[cod]

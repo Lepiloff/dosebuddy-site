@@ -85,6 +85,11 @@ services:
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
       FCM_PROJECT_ID: ${FCM_PROJECT_ID:-}
       FCM_CREDENTIALS_PATH: ${FCM_CREDENTIALS_PATH:-}
+    volumes:
+      # Read-only, and only the worker gets it: the API never sends a push, so
+      # there is no reason for the credential to be reachable from the process
+      # that handles requests from the internet.
+      - ./secrets:/run/secrets:ro
     depends_on:
       postgres:
         condition: service_healthy
