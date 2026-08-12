@@ -324,6 +324,45 @@ that holds article 9 data.
 > with an intact database, and `BACKUP_PASSPHRASE`, without which the dumps are
 > just noise. A backup whose passphrase died with the machine is not a backup.
 
+## The FCM credential
+
+Caregiver alerts are detected without it — the worker says plainly that nothing
+was delivered — and sent with it.
+
+Use a service account scoped to messaging, not the Firebase Admin SDK key the
+console offers first: that one is full project administrator, and this file sits
+on a box holding article 9 data. Cloud Console → IAM → Service Accounts → create
+one with **Firebase Cloud Messaging API Admin**, then add a JSON key.
+
+```bash
+# On the box. The image runs as uid 10001 — deliberately not root — so the
+# credential has to belong to that user, not to ubuntu.
+mkdir -p deploy/secrets && chmod 755 deploy/secrets
+# copy the JSON to deploy/secrets/fcm.json, then:
+sudo chown 10001:10001 deploy/secrets/fcm.json
+sudo chmod 400 deploy/secrets/fcm.json
+```
+
+Then in `.env`:
+
+```
+FCM_PROJECT_ID=dosebuddy-cfa04
+FCM_CREDENTIALS_PATH=/run/secrets/fcm.json
+```
+
+Mounted read-only into the worker and nowhere else: the API never sends a push,
+so the credential has no business being reachable from the process that answers
+the internet.
+
+To prove it works without a device, send to a deliberately invalid registration
+token. `INVALID_ARGUMENT` means Google authenticated the request and rejected
+only the token — which is the part being tested. `401` or `403` means the
+credential or the API is the problem.
+
+> **Deleting a key file does not revoke the key.** It stays valid until it is
+> deleted in the console, and any copy — a backup, a synced folder, a trash can
+> — still works. Revoke first, delete second.
+
 ## Rollback
 
 Keep this available for the whole migration. **Pages stays enabled and the
