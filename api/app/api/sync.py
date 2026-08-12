@@ -25,11 +25,13 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy import text as sql_text
+from sqlalchemy import tuple_ as sa_tuple
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import Caller, current_caller, get_session
-from app.api.schemas import Changes, PullOut, PushIn, PushOut, Rejected
+from app.api.schemas import Changes, Outcome, PullOut, PushIn, PushOut
 from app.db.models import (
     SERVER_SEQ,
     DoseEvent,
@@ -119,37 +121,51 @@ NEXT_SEQ = sql_text(f"nextval('{SERVER_SEQ}')")
 
 
 async def _upsert(session: AsyncSession, model, values: dict[str, Any]) -> None:
-    """Insert, or update only when the incoming row is not older.
+    """Insert, or update only when the incoming write is genuinely newer.
 
-    Last-write-wins on the device's `updated_at`, whole record at a time. Merging
-    field by field would produce states that existed on no device — a medication
-    with one phone's dose and another's form — and for two phones in one family
-    editing the same row at the same moment, the merge is imaginary while the
-    damage is real.
+    Last-write-wins on the whole record. Merging field by field would produce
+    states that existed on no device — a medication with one phone's dose and
+    another's form — and for two phones editing the same row at the same moment
+    the merge is imaginary while the damage is real.
+
+    Newer is decided by **(updated_at, origin_device_id, op_seq)**, not by
+    `updated_at` alone, and that matters twice over.
+
+    Two edits to one row inside a single millisecond are ordinary. Comparing
+    timestamps only, the second is either dropped as a duplicate (strictly
+    greater) or applied while a genuine resend is also applied (greater or
+    equal) — one loses data, the other churns. With the operation's own
+    identity in the comparison, a resend is an exact tie and does nothing,
+    while a second edit carries a higher op_seq and lands.
+
+    It also makes a tie between two devices deterministic rather than a race
+    settled by whichever request arrived last.
     """
     stmt = insert(model).values(**values, server_seq=NEXT_SEQ)
+    excluded = stmt.excluded
     stmt = stmt.on_conflict_do_update(
         index_elements=[model.id],
         set_={
-            **{k: getattr(stmt.excluded, k) for k in values if k != "id"},
+            **{k: getattr(excluded, k) for k in values if k != "id"},
             "server_seq": NEXT_SEQ,
         },
-        # Strictly greater, not >=. The app track builds at-least-once delivery,
-        # so the same record arrives again after any interruption; with >= that
-        # resend rewrote identical values, took a new server_seq and pushed the
-        # row out to every other device for nothing. Equal timestamps mean the
-        # same version, so there is nothing to apply.
-        where=stmt.excluded.updated_at_ms > model.updated_at_ms,
+        where=sa_tuple(
+            excluded.updated_at_ms, excluded.origin_device_id, excluded.op_seq
+        ) > sa_tuple(model.updated_at_ms, model.origin_device_id, model.op_seq),
     )
     await session.execute(stmt)
 
 
-def _sync_values(row) -> dict[str, Any]:
+def _sync_values(row, device_id: uuid.UUID) -> dict[str, Any]:
     return {
         "id": row.id,
         "created_at_ms": row.created_at,
         "updated_at_ms": row.updated_at,
         "deleted_at_ms": row.deleted_at,
+        # From the token, never the body: a device must not write under another
+        # device's identity, and the tie-breaker would be meaningless if it could.
+        "origin_device_id": device_id,
+        "op_seq": row.op_seq,
     }
 
 
@@ -169,122 +185,128 @@ async def push(
         # Refused whole rather than truncated. A partially applied batch leaves
         # the client believing it sent everything, and the missing rows are only
         # noticed as data that quietly never arrived.
-        raise HTTPException(
-            status.HTTP_413_CONTENT_TOO_LARGE,
-            "batch_too_large",
-        )
+        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "batch_too_large")
 
     profiles = await visible_profiles(session, caller)
     mine = owned_ids(profiles)
-    rejected: list[Rejected] = []
+    rejected: list[Outcome] = []
+    retry: list[Outcome] = []
+    dev = caller.device_id
 
     def refuse(entity: str, row_id: uuid.UUID, code: str) -> None:
-        rejected.append(Rejected(id=row_id, entity=entity, code=code))
+        """Final. Sending this again will not help."""
+        rejected.append(Outcome(id=row_id, entity=entity, code=code))
 
-    # Order matters twice over: foreign keys need parents first, and a
-    # medication arriving in the same batch as its schedule has to exist before
-    # the schedule can be checked against it.
+    def later(entity: str, row_id: uuid.UUID, code: str) -> None:
+        """Not the client's fault. The same record will land once its parent has."""
+        retry.append(Outcome(id=row_id, entity=entity, code=code))
+
+    async def apply(entity: str, model, row_id: uuid.UUID, values: dict[str, Any]) -> None:
+        # A savepoint per record, so one failure does not poison the batch. A
+        # foreign key that is not there yet is the common case — the parent is
+        # simply on a later page or a later push — and it is recoverable, so it
+        # is reported as retry rather than as the client having done something
+        # wrong.
+        try:
+            async with session.begin_nested():
+                await _upsert(session, model, values)
+        except IntegrityError:
+            later(entity, row_id, "missing_parent")
+        except SQLAlchemyError:
+            later(entity, row_id, "conflict")
+
+    # Parents before children: foreign keys need it, and a medication arriving
+    # in the same batch as its schedule has to exist before the schedule can be
+    # checked against it.
     for p in changes.profiles:
         if p.id in profiles and p.id not in mine:
             refuse("profiles", p.id, "forbidden_role")
             continue
-        await _upsert(
-            session,
-            Profile,
-            {
-                **_sync_values(p),
-                "owner_account_id": caller.account.id,
-                "name": p.name,
-                "color": p.color,
-                "sort_order": p.sort_order,
-            },
-        )
+        await apply("profiles", Profile, p.id, {
+            **_sync_values(p, dev),
+            "owner_account_id": caller.account.id,
+            "name": p.name,
+            "color": p.color,
+            "sort_order": p.sort_order,
+        })
         mine.add(p.id)
 
     for m in changes.medications:
         if m.profile_id not in mine:
             refuse("medications", m.id, "forbidden_role")
             continue
-        await _upsert(
-            session,
-            Medication,
-            {
-                **_sync_values(m),
-                "profile_id": m.profile_id,
-                "name": m.name,
-                "notes": m.notes,
-                "dosage_text": m.dosage_text,
-                "dose_amount": m.dose_amount,
-                "form": m.form,
-                "pack_size": m.pack_size,
-                "refill_threshold_days": m.refill_threshold_days,
-                "is_active": m.is_active,
-                "photo_key": m.photo_key,
-            },
-        )
+        await apply("medications", Medication, m.id, {
+            **_sync_values(m, dev),
+            "profile_id": m.profile_id,
+            "name": m.name,
+            "notes": m.notes,
+            "dosage_text": m.dosage_text,
+            "dose_amount": m.dose_amount,
+            "form": m.form,
+            "pack_size": m.pack_size,
+            "refill_threshold_days": m.refill_threshold_days,
+            "is_active": m.is_active,
+            "photo_key": m.photo_key,
+        })
 
     med_owner = await _medication_profiles(session, changes)
 
-    for s in changes.schedules:
-        if med_owner.get(s.medication_id) not in mine:
-            refuse("schedules", s.id, "forbidden_role")
+    for sc in changes.schedules:
+        owner_profile = med_owner.get(sc.medication_id)
+        if owner_profile is None:
+            later("schedules", sc.id, "missing_parent")
             continue
-        await _upsert(
-            session,
-            Schedule,
-            {
-                **_sync_values(s),
-                "medication_id": s.medication_id,
-                "type": s.type,
-                "times": s.times,
-                "days_of_week": s.days_of_week,
-                "interval_days": s.interval_days,
-                "start_date": s.start_date,
-                "end_date": s.end_date,
-            },
-        )
+        if owner_profile not in mine:
+            refuse("schedules", sc.id, "forbidden_role")
+            continue
+        await apply("schedules", Schedule, sc.id, {
+            **_sync_values(sc, dev),
+            "medication_id": sc.medication_id,
+            "type": sc.type,
+            "times": sc.times,
+            "days_of_week": sc.days_of_week,
+            "interval_days": sc.interval_days,
+            "start_date": sc.start_date,
+            "end_date": sc.end_date,
+        })
 
     for d in changes.dose_events:
         if d.profile_id not in mine:
             refuse("dose_events", d.id, "forbidden_role")
             continue
-        await _upsert(
-            session,
-            DoseEvent,
-            {
-                **_sync_values(d),
-                "schedule_id": d.schedule_id,
-                "medication_id": d.medication_id,
-                "profile_id": d.profile_id,
-                "planned_at_ms": d.planned_at,
-                "status": d.status,
-                "action_at_ms": d.action_at,
-                "snooze_count": d.snooze_count,
-                "snoozed_until_ms": d.snoozed_until,
-                "dose_amount": d.dose_amount,
-            },
-        )
+        await apply("dose_events", DoseEvent, d.id, {
+            **_sync_values(d, dev),
+            "schedule_id": d.schedule_id,
+            "medication_id": d.medication_id,
+            "profile_id": d.profile_id,
+            "planned_at_ms": d.planned_at,
+            "status": d.status,
+            "action_at_ms": d.action_at,
+            "snooze_count": d.snooze_count,
+            "snoozed_until_ms": d.snoozed_until,
+            "dose_amount": d.dose_amount,
+        })
 
     for e in changes.stock_events:
-        if med_owner.get(e.medication_id) not in mine:
+        owner_profile = med_owner.get(e.medication_id)
+        if owner_profile is None:
+            later("stock_events", e.id, "missing_parent")
+            continue
+        if owner_profile not in mine:
             refuse("stock_events", e.id, "forbidden_role")
             continue
-        await _upsert(
-            session,
-            StockEvent,
-            {
-                **_sync_values(e),
-                "medication_id": e.medication_id,
-                "delta": e.delta,
-                "reason": e.reason,
-                "dose_event_id": e.dose_event_id,
-            },
-        )
+        await apply("stock_events", StockEvent, e.id, {
+            **_sync_values(e, dev),
+            "medication_id": e.medication_id,
+            "delta": e.delta,
+            "reason": e.reason,
+            "dose_event_id": e.dose_event_id,
+        })
 
     await session.commit()
 
     high = (await session.execute(sql_text("SELECT last_value FROM server_seq"))).scalar_one()
-    return PushOut(cursor=encode_cursor(int(high)), rejected=rejected)
+    return PushOut(cursor=encode_cursor(int(high)), rejected=rejected, retry=retry)
 
 
 async def _medication_profiles(session: AsyncSession, changes: Changes) -> dict[uuid.UUID, uuid.UUID]:

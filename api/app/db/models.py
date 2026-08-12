@@ -162,6 +162,10 @@ class Profile(Base):
     updated_at_ms: Mapped[int] = mapped_column(BigInteger)
     deleted_at_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
+    # Same write identity as every other mirrored table; see SyncMixin.
+    origin_device_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    op_seq: Mapped[int] = mapped_column(BigInteger, default=0)
+
     # Cursor ordering. Server-assigned, never the device's clock: phone clocks
     # run backwards, and equal milliseconds at a page boundary lose rows
     # silently and forever.
@@ -274,12 +278,29 @@ class PairingCode(Base):
 
 
 class SyncMixin:
-    """The v1.0 sync-ready foundation (spec §4.4), unchanged."""
+    """The v1.0 sync-ready foundation (spec §4.4), plus the identity of the write.
+
+    `updated_at` alone cannot order writes. Two edits to one row inside a single
+    millisecond are ordinary — a tap and its follow-up — and a rule that treats
+    equal timestamps as the same write drops the second one in silence. It also
+    cannot break a tie between two devices deterministically.
+
+    So every write carries who made it and its position in that device's own
+    monotonic sequence, which owes nothing to a clock. The comparison
+    (updated_at, origin_device_id, op_seq) then does two jobs at once: it orders
+    writes, and it makes a resend an exact tie — recognised as the repeat it is,
+    rather than applied again.
+    """
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     created_at_ms: Mapped[int] = mapped_column(BigInteger)
     updated_at_ms: Mapped[int] = mapped_column(BigInteger)
     deleted_at_ms: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    # Taken from the authenticated caller, never from the body: a device must
+    # not be able to write under another device's identity.
+    origin_device_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    op_seq: Mapped[int] = mapped_column(BigInteger, default=0)
 
 
 class Medication(Base, SyncMixin):

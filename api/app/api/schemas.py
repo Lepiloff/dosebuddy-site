@@ -28,6 +28,11 @@ class SyncBase(BaseModel):
     updated_at: int
     deleted_at: int | None = None
 
+    # The device's own monotonic counter for this write. Not a clock, so two
+    # edits inside one millisecond are still distinguishable, and a resend is an
+    # exact repeat rather than a new write that happens to look identical.
+    op_seq: int = Field(ge=0)
+
 
 class ProfileIn(SyncBase):
     name: str = Field(max_length=200)
@@ -94,17 +99,28 @@ class PushIn(BaseModel):
     changes: Changes = Changes()
 
 
-class Rejected(BaseModel):
+class Outcome(BaseModel):
     id: uuid.UUID
     entity: str
     code: str
 
 
 class PushOut(BaseModel):
+    """Three outcomes per record, expressed as two lists.
+
+    Anything absent from both was applied — the common case, and the one not
+    worth a line each in a batch of a thousand.
+
+    `rejected` is final: sending it again changes nothing, and the client should
+    stop and surface it. `retry` is not the client's fault — a parent that has
+    not arrived yet, a conflict — and the same record sent later will succeed.
+    Collapsing the two would make a client either give up on something
+    recoverable or loop forever on something that never will be.
+    """
+
     cursor: str
-    # Per record, not per batch: one row the caller had no business sending must
-    # not throw away the rest of a batch that was fine.
-    rejected: list[Rejected] = []
+    rejected: list[Outcome] = []
+    retry: list[Outcome] = []
 
 
 class PullOut(BaseModel):

@@ -29,8 +29,17 @@ from tests.conftest import FakeGoogle, FakeRedis, make_settings  # noqa: E402
 from app.main import create_app  # noqa: E402
 
 
+import itertools
+
+_ops = itertools.count(1)
+
+
 def ms() -> int:
     return int(datetime.now(timezone.utc).timestamp() * 1000)
+
+
+def op() -> int:
+    return next(_ops)
 
 
 def show(title: str, payload) -> None:
@@ -73,30 +82,30 @@ async def main() -> None:
         push_body = {
             "changes": {
                 "profiles": [{
-                    "id": pid, "created_at": t, "updated_at": t, "deleted_at": None,
+                    "id": pid, "created_at": t, "updated_at": t, "deleted_at": None, "op_seq": op(),
                     "name": "Mum", "color": 4283215696, "sort_order": 0,
                 }],
                 "medications": [{
-                    "id": mid, "created_at": t, "updated_at": t, "deleted_at": None,
+                    "id": mid, "created_at": t, "updated_at": t, "deleted_at": None, "op_seq": op(),
                     "profile_id": pid, "name": "Enalapril", "notes": None,
                     "dosage_text": "10 mg", "dose_amount": 1.0, "form": "tablet",
                     "pack_size": 30.0, "refill_threshold_days": 3, "is_active": True,
                     "photo_key": None,
                 }],
                 "schedules": [{
-                    "id": sid, "created_at": t, "updated_at": t, "deleted_at": None,
+                    "id": sid, "created_at": t, "updated_at": t, "deleted_at": None, "op_seq": op(),
                     "medication_id": mid, "type": "fixed_times",
                     "times": "[\"09:00\",\"21:00\"]", "days_of_week": None,
                     "interval_days": None, "start_date": "2026-08-01", "end_date": None,
                 }],
                 "dose_events": [{
-                    "id": did, "created_at": t, "updated_at": t, "deleted_at": None,
+                    "id": did, "created_at": t, "updated_at": t, "deleted_at": None, "op_seq": op(),
                     "schedule_id": sid, "medication_id": mid, "profile_id": pid,
                     "planned_at": t, "status": "pending", "action_at": None,
                     "snooze_count": 0, "snoozed_until": None, "dose_amount": 1.0,
                 }],
                 "stock_events": [{
-                    "id": eid, "created_at": t, "updated_at": t, "deleted_at": None,
+                    "id": eid, "created_at": t, "updated_at": t, "deleted_at": None, "op_seq": op(),
                     "medication_id": mid, "delta": 30.0, "reason": "manual",
                     "dose_event_id": None,
                 }],
@@ -111,7 +120,7 @@ async def main() -> None:
         other = await sign_in("stranger-example")
         sh = {"Authorization": f"Bearer {other['access_token']}"}
         bad = await c.post("/v1/sync/push", headers=sh, json={"changes": {"medications": [
-            {"id": str(uuid.uuid4()), "created_at": t, "updated_at": t, "deleted_at": None,
+            {"id": str(uuid.uuid4()), "created_at": t, "updated_at": t, "deleted_at": None, "op_seq": op(),
              "profile_id": pid, "name": "Not mine", "form": "tablet", "dose_amount": 1.0}
         ]}})
         show("POST /v1/sync/push — отказ по конкретной записи", bad.json())

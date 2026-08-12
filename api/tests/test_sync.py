@@ -5,6 +5,7 @@ receive, and about what happens when two devices disagree. A push that works and
 a pull that returns rows is the easy half.
 """
 
+import itertools
 import time
 import uuid
 
@@ -19,16 +20,25 @@ def ms() -> int:
     return int(time.time() * 1000)
 
 
+_ops = itertools.count(1)
+
+
+def op() -> int:
+    """A device's monotonic counter. Independent of the clock, which is the
+    point: two edits in one millisecond still differ."""
+    return next(_ops)
+
+
 def profile(pid: str, name: str = "Someone", at: int | None = None) -> dict:
     t = at or ms()
-    return {"id": pid, "created_at": t, "updated_at": t, "deleted_at": None,
+    return {"id": pid, "created_at": t, "updated_at": t, "deleted_at": None, "op_seq": op(),
             # A real Android colour: unsigned ARGB, past the top of int32.
             "name": name, "color": 4283215696, "sort_order": 0}
 
 
 def medication(mid: str, pid: str, name: str = "Aspirin", at: int | None = None, **kw) -> dict:
     t = at or ms()
-    return {"id": mid, "created_at": t, "updated_at": t, "deleted_at": None,
+    return {"id": mid, "created_at": t, "updated_at": t, "deleted_at": None, "op_seq": op(),
             "profile_id": pid, "name": name, "form": "tablet", "dose_amount": 1.0,
             "notes": None, "dosage_text": None, "pack_size": None,
             "refill_threshold_days": 3, "is_active": True, "photo_key": None, **kw}
@@ -36,7 +46,7 @@ def medication(mid: str, pid: str, name: str = "Aspirin", at: int | None = None,
 
 def schedule(sid: str, mid: str, at: int | None = None) -> dict:
     t = at or ms()
-    return {"id": sid, "created_at": t, "updated_at": t, "deleted_at": None,
+    return {"id": sid, "created_at": t, "updated_at": t, "deleted_at": None, "op_seq": op(),
             "medication_id": mid, "type": "fixed_times", "times": '["09:00","21:00"]',
             "days_of_week": None, "interval_days": None, "start_date": "2026-08-01",
             "end_date": None}
@@ -52,7 +62,7 @@ def dose(did: str, mid: str, pid: str, sid: str | None = None,
     refuses, since the row on the server is newer.
     """
     t = at or ms()
-    return {"id": did, "created_at": t, "updated_at": t, "deleted_at": None,
+    return {"id": did, "created_at": t, "updated_at": t, "deleted_at": None, "op_seq": op(),
             "schedule_id": sid, "medication_id": mid, "profile_id": pid,
             "planned_at": planned if planned is not None else t,
             "status": status, "action_at": None,
@@ -370,18 +380,63 @@ async def test_a_real_android_colour_survives(api):
     assert prof["color"] == 4283215696
 
 
-async def test_resending_the_same_record_changes_nothing(api):
-    """The app track builds at-least-once delivery, so the same rows arrive
-    again after any interruption. A resend that rewrote identical values would
-    take a new server_seq and push the row out to every other device."""
+async def test_resending_the_same_operation_changes_nothing(api):
+    """At-least-once delivery means the same rows arrive again after any
+    interruption. A resend carries the same op_seq, so it is an exact tie and
+    does nothing — no rewrite, no new server_seq, no needless delivery to every
+    other device."""
     owner, pid, mid, _, _ = await _owner_with_data(api)
 
+    same = medication(mid, pid, "Aspirin")
+    await push(api, owner, medications=[same])
     first = await pull(api, owner)
-    med = [m for m in first["changes"]["medications"] if m["id"] == mid][0]
 
-    await push(api, owner, medications=[medication(mid, pid, med["name"], at=med["updated_at"])])
+    # Byte for byte the same operation, as a retry would be.
+    await push(api, owner, medications=[same])
 
     assert (await pull(api, owner, first["cursor"]))["changes"] == {}
+
+
+async def test_two_edits_in_one_millisecond_both_land(api):
+    """The case that made timestamp-only comparison wrong. A tap and its
+    follow-up share a millisecond routinely, and treating equal timestamps as
+    the same write drops the second in silence."""
+    owner, pid, mid, _, _ = await _owner_with_data(api)
+    t = ms() + 10_000
+
+    first_edit = medication(mid, pid, "Before", at=t)
+    second_edit = medication(mid, pid, "After", at=t)   # same ms, later op_seq
+    assert first_edit["updated_at"] == second_edit["updated_at"]
+    assert second_edit["op_seq"] > first_edit["op_seq"]
+
+    await push(api, owner, medications=[first_edit])
+    await push(api, owner, medications=[second_edit])
+
+    med = [m for m in (await pull(api, owner))["changes"]["medications"]
+           if m["id"] == mid][0]
+    assert med["name"] == "After"
+
+
+async def test_a_child_without_its_parent_is_retryable_not_rejected(api):
+    """A parent that has not arrived yet is not the client's fault, and telling
+    it otherwise would make it give up on something that will succeed."""
+    owner, pid, _, _, _ = await _owner_with_data(api)
+
+    out = await push(api, owner, schedules=[schedule(str(uuid.uuid4()), str(uuid.uuid4()))])
+
+    assert out["rejected"] == []
+    assert out["retry"][0]["code"] == "missing_parent"
+
+
+async def test_a_forbidden_record_is_rejected_not_retried(api):
+    """Final, because sending it again will never help."""
+    owner, pid, _, _, _ = await _owner_with_data(api)
+    caregiver = await _pair(api, owner, pid)
+
+    out = await push(api, caregiver, medications=[medication(str(uuid.uuid4()), pid)])
+
+    assert out["retry"] == []
+    assert out["rejected"][0]["code"] == "forbidden_role"
 
 
 async def test_an_oversized_batch_is_refused_whole(api):
