@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select, update
@@ -18,9 +19,11 @@ from app.core.security import (
     new_refresh_token,
 )
 from app.db.models import Account, Device, Profile, ProfileMembership, RefreshToken, utcnow
+from app.core.observability import redact
 from app.services.google import GoogleIdentity, InvalidGoogleToken
 
 router = APIRouter(tags=["auth"])
+log = structlog.get_logger(__name__)
 
 
 class DeviceIn(BaseModel):
@@ -75,7 +78,17 @@ async def sign_in_with_google(
 
     try:
         identity: GoogleIdentity = verifier.verify(body.id_token)
-    except InvalidGoogleToken:
+    except InvalidGoogleToken as exc:
+        # The caller still learns only that the token was rejected: telling them
+        # whether it expired or had the wrong audience tells an attacker the
+        # same. But the reason is recorded here, along with the audience we
+        # expect, because "wrong audience" and "expired" look identical from
+        # outside and are a day apart to debug.
+        log.warning(
+            "auth.google_rejected",
+            reason=redact(str(exc)),
+            expected_audience=request.app.state.settings.google_client_id or "(unset)",
+        )
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid_google_token") from None
 
     account = (

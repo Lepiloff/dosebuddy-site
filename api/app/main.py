@@ -19,6 +19,7 @@ from fastapi import APIRouter, FastAPI
 from app.api import auth, errors, health, pairing, sync
 from app.core.config import Settings, get_settings
 from app.core.logging import setup_logging
+from app.core.observability import RequestLog
 from app.db.session import create_engine, create_sessionmaker
 from app.services.google import RealGoogleVerifier
 from app.services.push import build_push
@@ -63,6 +64,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url="/openapi.json" if settings.docs_enabled else None,
     )
     app.state.settings = settings
+    app.add_middleware(RequestLog)
     app.state.push = build_push(settings)
     errors.install(app)
 

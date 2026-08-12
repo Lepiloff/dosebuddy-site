@@ -196,3 +196,35 @@ async def test_the_real_verifier_wraps_failures_rather_than_leaking_them(api):
     verifier = RealGoogleVerifier("some-client-id.apps.googleusercontent.com")
     with pytest.raises(InvalidGoogleToken):
         verifier.verify("this-is-not-a-jwt")
+
+
+async def test_a_rejected_token_is_explained_in_the_log_not_the_response(api, caplog):
+    """The caller learns only that it was rejected — telling them whether it
+    expired or had the wrong audience tells an attacker the same. The reason has
+    to be somewhere, though, or the first integration failure is undebuggable
+    from both ends at once."""
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        r = await api.post(
+            "/v1/auth/google",
+            json={"id_token": "never-issued",
+                  "device": {"id": str(uuid.uuid4()), "platform": "android"}},
+        )
+
+    assert r.status_code == 401
+    assert r.json()["error"]["code"] == "invalid_google_token"
+    assert "expired" not in r.text and "audience" not in r.text
+
+    assert any("auth.google_rejected" in rec.getMessage() for rec in caplog.records)
+
+
+async def test_a_token_never_reaches_the_log():
+    """An exception message that echoes the credential would put a live token in
+    a file that outlives it."""
+    from app.core.observability import redact
+
+    jwt = "eyJhbGciOiJSUzI1NiIsImtpZCI6IngifQ.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJlX2hlcmU"
+    cleaned = redact(f"Token has wrong audience {jwt}, expected other")
+    assert jwt not in cleaned
+    assert "<token>" in cleaned
