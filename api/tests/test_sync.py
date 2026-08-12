@@ -22,7 +22,8 @@ def ms() -> int:
 def profile(pid: str, name: str = "Someone", at: int | None = None) -> dict:
     t = at or ms()
     return {"id": pid, "created_at": t, "updated_at": t, "deleted_at": None,
-            "name": name, "color": 0, "sort_order": 0}
+            # A real Android colour: unsigned ARGB, past the top of int32.
+            "name": name, "color": 4283215696, "sort_order": 0}
 
 
 def medication(mid: str, pid: str, name: str = "Aspirin", at: int | None = None, **kw) -> dict:
@@ -358,3 +359,51 @@ async def test_authority_cannot_be_set_through_sync_push(api, session):
 
     prof = [x for x in (await pull(api, owner))["changes"]["profiles"] if x["id"] == pid][0]
     assert prof["owner_device_id"] is None
+
+
+async def test_a_real_android_colour_survives(api):
+    """0xFF2A9D8F is 4283215696 — past int32, and perfectly ordinary on a phone.
+    The column was INTEGER until a generated example used a real one."""
+    owner, pid, _, _, _ = await _owner_with_data(api)
+
+    prof = [p for p in (await pull(api, owner))["changes"]["profiles"] if p["id"] == pid][0]
+    assert prof["color"] == 4283215696
+
+
+async def test_resending_the_same_record_changes_nothing(api):
+    """The app track builds at-least-once delivery, so the same rows arrive
+    again after any interruption. A resend that rewrote identical values would
+    take a new server_seq and push the row out to every other device."""
+    owner, pid, mid, _, _ = await _owner_with_data(api)
+
+    first = await pull(api, owner)
+    med = [m for m in first["changes"]["medications"] if m["id"] == mid][0]
+
+    await push(api, owner, medications=[medication(mid, pid, med["name"], at=med["updated_at"])])
+
+    assert (await pull(api, owner, first["cursor"]))["changes"] == {}
+
+
+async def test_an_oversized_batch_is_refused_whole(api):
+    """Truncating would leave the client believing it sent everything, and the
+    missing rows are only noticed later as data that never arrived."""
+    owner, pid, _, _, _ = await _owner_with_data(api)
+
+    many = [medication(str(uuid.uuid4()), pid, f"m{i}") for i in range(1001)]
+    r = await api.post("/v1/sync/push", headers=auth_header(owner),
+                       json={"changes": {"medications": many}})
+    assert r.status_code == 413
+    assert r.json()["error"]["code"] == "batch_too_large"
+
+
+async def test_the_role_tells_a_device_whether_to_ring(api):
+    """Without it a watcher cannot tell a shared profile from one of its own
+    that nobody has claimed, and would arm alarms for someone else's doses."""
+    owner, pid, _, _, _ = await _owner_with_data(api)
+    caregiver = await _pair(api, owner, pid)
+
+    mine = [p for p in (await pull(api, owner))["changes"]["profiles"] if p["id"] == pid][0]
+    theirs = [p for p in (await pull(api, caregiver))["changes"]["profiles"] if p["id"] == pid][0]
+
+    assert mine["role"] == "owner"
+    assert theirs["role"] == "with_alerts"

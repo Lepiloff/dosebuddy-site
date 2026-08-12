@@ -22,7 +22,7 @@ import base64
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy import text as sql_text
 from sqlalchemy.dialects.postgresql import insert
@@ -44,6 +44,11 @@ from app.db.models import (
 router = APIRouter(tags=["sync"])
 
 PAGE_SIZE = 500
+
+# nginx caps the body at 2 MB (deploy/nginx/conf.d/20-api.conf); this caps the
+# record count, which is the limit a client can actually plan against. Both are
+# stated in the contract so a batch is sized rather than discovered.
+MAX_PUSH_RECORDS = 1000
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +134,12 @@ async def _upsert(session: AsyncSession, model, values: dict[str, Any]) -> None:
             **{k: getattr(stmt.excluded, k) for k in values if k != "id"},
             "server_seq": NEXT_SEQ,
         },
-        where=stmt.excluded.updated_at_ms >= model.updated_at_ms,
+        # Strictly greater, not >=. The app track builds at-least-once delivery,
+        # so the same record arrives again after any interruption; with >= that
+        # resend rewrote identical values, took a new server_seq and pushed the
+        # row out to every other device for nothing. Equal timestamps mean the
+        # same version, so there is nothing to apply.
+        where=stmt.excluded.updated_at_ms > model.updated_at_ms,
     )
     await session.execute(stmt)
 
@@ -149,10 +159,24 @@ async def push(
     caller: Caller = Depends(current_caller),
     session: AsyncSession = Depends(get_session),
 ) -> PushOut:
+    changes: Changes = body.changes
+
+    total = sum(
+        len(getattr(changes, name))
+        for name in ("profiles", "medications", "schedules", "dose_events", "stock_events")
+    )
+    if total > MAX_PUSH_RECORDS:
+        # Refused whole rather than truncated. A partially applied batch leaves
+        # the client believing it sent everything, and the missing rows are only
+        # noticed as data that quietly never arrived.
+        raise HTTPException(
+            status.HTTP_413_CONTENT_TOO_LARGE,
+            "batch_too_large",
+        )
+
     profiles = await visible_profiles(session, caller)
     mine = owned_ids(profiles)
     rejected: list[Rejected] = []
-    changes: Changes = body.changes
 
     def refuse(entity: str, row_id: uuid.UUID, code: str) -> None:
         rejected.append(Rejected(id=row_id, entity=entity, code=code))
@@ -291,7 +315,7 @@ async def _medication_profiles(session: AsyncSession, changes: Changes) -> dict[
 # profile the caller merely watches — schedules and stock_events are absent from
 # the table entirely, which is the point.
 WATCHER_FIELDS = {
-    "profiles": ("id", "name"),
+    "profiles": ("id", "name", "role"),
     "medications": ("id", "profile_id", "name", "form"),
     "dose_events": (
         "id",
@@ -304,7 +328,7 @@ WATCHER_FIELDS = {
 }
 
 
-def _row_to_wire(entity: str, row) -> dict[str, Any]:
+def _row_to_wire(entity: str, row, role: Role | None = None) -> dict[str, Any]:
     common = {
         "id": str(row.id),
         "updated_at": getattr(row, "updated_at_ms", None),
@@ -323,6 +347,20 @@ def _row_to_wire(entity: str, row) -> dict[str, Any]:
             # only a nudge, and a nudge that is lost must not leave two phones
             # ringing for one dose.
             "owner_device_id": str(row.owner_device_id) if row.owner_device_id else None,
+            # The caller's own role on this profile. Not a column — role lives
+            # on the (account ↔ profile) link — but the client cannot decide
+            # anything without it, and the thing it decides is P0.
+            #
+            # Without it, a watcher sees a profile with no owner_device_id and
+            # cannot tell that from a profile of its own that nobody has claimed
+            # yet, so it would arm alarms for someone else's doses. The rule it
+            # enables has no ambiguous branch:
+            #
+            #   role != owner                      never arm
+            #   role == owner, owner_device_id nil claim authority, then arm
+            #   role == owner, id == this device   arm
+            #   role == owner, id == another       do not arm
+            "role": role.value if role else None,
         }
     if entity == "medications":
         return {
@@ -443,7 +481,7 @@ async def pull(
         else:
             role = Role.owner
 
-        wire = _row_to_wire(entity, row)
+        wire = _row_to_wire(entity, row, role)
         if role is not Role.owner:
             projected = _project(entity, wire)
             if projected is None:

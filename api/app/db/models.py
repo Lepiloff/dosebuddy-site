@@ -141,7 +141,12 @@ class Profile(Base):
     )
 
     name: Mapped[str] = mapped_column(EncryptedString)
-    color: Mapped[int] = mapped_column(Integer, default=0)
+
+    # BIGINT, not INTEGER. An Android colour is unsigned ARGB — 0xFF2A9D8F is
+    # 4283215696, past the top of int32 — and SQLite stores it happily on the
+    # device. Synthetic zeros in the tests hid this; the first profile with a
+    # colour would have failed the whole push.
+    color: Mapped[int] = mapped_column(BigInteger, default=0)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
 
     # is_elder_mode is deliberately absent. It is a property of a device that
