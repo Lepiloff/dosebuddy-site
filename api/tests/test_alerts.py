@@ -11,7 +11,14 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import select
 
-from app.db.models import AlertDelivery, AlertKind, AlertState, Device, ProfileMembership
+from app.db.models import (
+    AlertDelivery,
+    AlertKind,
+    AlertState,
+    Device,
+    Profile,
+    ProfileMembership,
+)
 from app.services import alerts
 from app.services.push import Delivery
 from app.worker import scan_once
@@ -54,9 +61,28 @@ class FailingPush:
         return Delivery.ok
 
 
+async def _owner_device(session, owner) -> Device:
+    return (
+        await session.execute(
+            select(Device).where(Device.account_id == uuid.UUID(owner["account_id"]))
+        )
+    ).scalars().first()
+
+
 async def _with_watcher(api, session, role="with_alerts"):
     owner, pid, mid, sid, did = await _owner_with_data(api)
     caregiver = await _pair(api, owner, pid, role)
+
+    # The owner's phone claims reminder authority, as a real one does on first
+    # run. Without it the profile has no reminding device, and staleness — which
+    # is about that device specifically — has nothing to be about.
+    owners_phone = await _owner_device(session, owner)
+    r = await api.post(
+        f"/v1/profiles/{pid}/reminder-authority",
+        headers=auth_header(owner),
+        json={"device_id": str(owners_phone.id)},
+    )
+    assert r.status_code in (200, 204), r.text
 
     # A push token, or there is nobody to send to.
     device = (
@@ -152,11 +178,7 @@ async def test_silence_is_reported_separately_from_a_miss(api, session, db_engin
     off", and dressing one up as the other is a lie in whichever direction."""
     owner, caregiver, pid, mid, sid, did = await _with_watcher(api, session)
 
-    owner_device = (
-        await session.execute(
-            select(Device).where(Device.account_id == uuid.UUID(owner["account_id"]))
-        )
-    ).scalars().first()
+    owner_device = await _owner_device(session, owner)
     owner_device.last_seen_at = datetime.now(timezone.utc) - timedelta(hours=48)
     await session.commit()
 
@@ -178,11 +200,7 @@ async def test_a_night_of_silence_is_not_reported(api, session, db_engine):
     """
     owner, caregiver, pid, mid, sid, did = await _with_watcher(api, session)
 
-    owner_device = (
-        await session.execute(
-            select(Device).where(Device.account_id == uuid.UUID(owner["account_id"]))
-        )
-    ).scalars().first()
+    owner_device = await _owner_device(session, owner)
     owner_device.last_seen_at = datetime.now(timezone.utc) - timedelta(hours=14)
     await session.commit()
 
@@ -201,11 +219,7 @@ async def test_syncing_counts_as_being_seen(api, session, db_engine):
     """
     owner, caregiver, pid, mid, sid, did = await _with_watcher(api, session)
 
-    owner_device = (
-        await session.execute(
-            select(Device).where(Device.account_id == uuid.UUID(owner["account_id"]))
-        )
-    ).scalars().first()
+    owner_device = await _owner_device(session, owner)
     owner_device.last_seen_at = datetime.now(timezone.utc) - timedelta(hours=48)
     await session.commit()
 
@@ -223,11 +237,7 @@ async def test_a_profile_that_has_never_synced_is_not_stale(api, session, db_eng
     one gone quiet. Greeting a new caregiver with an alarm would be wrong."""
     owner, caregiver, pid, mid, sid, did = await _with_watcher(api, session)
 
-    owner_device = (
-        await session.execute(
-            select(Device).where(Device.account_id == uuid.UUID(owner["account_id"]))
-        )
-    ).scalars().first()
+    owner_device = await _owner_device(session, owner)
     owner_device.last_seen_at = None
     await session.commit()
 
@@ -424,3 +434,133 @@ async def test_a_new_caregiver_is_not_told_the_whole_history(api, session, db_en
     pusher = RecordingPush()
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
     assert await scan_once(maker, pusher, now=datetime.now(timezone.utc)) == 0
+
+
+# ---------------------------------------------------------------------------
+# Which device, and which profile — the two ways this signal went quiet
+# ---------------------------------------------------------------------------
+
+
+async def test_a_second_device_does_not_mask_the_silent_one(api, session, db_engine):
+    """Only the device that arms the alarms counts.
+
+    This asked the owner's account for its most recently seen device, so a
+    tablet still signed in kept the answer fresh while the phone that actually
+    reminds their parent lay dead. The signal said all was well in exactly the
+    case it exists to catch.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    owner, caregiver, pid, mid, sid, did = await _with_watcher(api, session)
+
+    profile = await session.get(Profile, uuid.UUID(pid))
+    reminding = await session.get(Device, profile.owner_device_id)
+    assert reminding is not None, "the fixture must have claimed authority"
+
+    # The phone that reminds has been silent for two days.
+    reminding.last_seen_at = datetime.now(timezone.utc) - timedelta(hours=48)
+
+    # A second device on the same account, syncing happily.
+    session.add(
+        Device(
+            id=uuid.uuid4(),
+            account_id=uuid.UUID(owner["account_id"]),
+            platform="android",
+            last_seen_at=datetime.now(timezone.utc),
+        )
+    )
+    await session.commit()
+
+    pusher = RecordingPush()
+    await scan_once(async_sessionmaker(db_engine, expire_on_commit=False), pusher)
+
+    kinds = {p["type"] for _, p in pusher.sent}
+    assert "profile_stale" in kinds, "the reminding phone is silent and nobody was told"
+
+
+async def test_two_watched_profiles_each_get_their_own_stale_alert(api, session, db_engine):
+    """One caregiver, two parents, two alerts.
+
+    The uniqueness key left out the profile, and for profile_stale the subject
+    is only a date — so the first profile scanned took the key for the day and
+    the second was deduplicated into silence. The more people a caregiver looks
+    after, the more the key hid.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    owner_a, caregiver, pid_a, *_ = await _with_watcher(api, session)
+
+    # The same caregiver takes on a second profile, from a different owner.
+    owner_b, pid_b, mid_b, sid_b, did_b = await _owner_with_data(api)
+    phone_b = await _owner_device(session, owner_b)
+    await api.post(f"/v1/profiles/{pid_b}/reminder-authority",
+                   headers=auth_header(owner_b), json={"device_id": str(phone_b.id)})
+    code = (await api.post("/v1/pairing/codes", headers=auth_header(owner_b),
+                           json={"profile_id": pid_b, "role": "with_alerts"})).json()["code"]
+    await api.post("/v1/pairing/redeem", headers=auth_header(caregiver),
+                   json={"code": code})
+
+    # And the caregiver has a device to be told on.
+    cg_device = (await session.execute(
+        select(Device).where(Device.account_id == uuid.UUID(caregiver["account_id"]))
+    )).scalars().first()
+    cg_device.push_token = "token-" + caregiver["account_id"][:8]
+
+    stale = datetime.now(timezone.utc) - timedelta(hours=48)
+    session.expire_all()
+    for pid in (pid_a, pid_b):
+        profile = await session.get(Profile, uuid.UUID(pid))
+        assert profile.owner_device_id is not None, f"{pid} never claimed authority"
+        device = await session.get(Device, profile.owner_device_id)
+        device.last_seen_at = stale
+    await session.commit()
+
+    pusher = RecordingPush()
+    await scan_once(async_sessionmaker(db_engine, expire_on_commit=False), pusher)
+
+    told_about = {p["profile_id"] for _, p in pusher.sent if p["type"] == "profile_stale"}
+    assert told_about == {pid_a, pid_b}, f"only heard about {told_about}"
+
+    # And the two do not replace each other on the phone.
+    assert len(set(pusher.collapse)) == len(pusher.collapse)
+
+
+async def test_an_alert_with_nobody_to_tell_waits_instead_of_spinning(api, session, db_engine):
+    """No push token is not a failed attempt, but it must not be a free one.
+
+    `next_attempt_at` was left alone, so the row was selected, locked and
+    released on every pass for the whole of its TTL — several hundred times to
+    discover the same absence. Nor may it burn attempts: those are for sends
+    that were tried, and using them up here would exhaust the alert before a
+    device ever appears.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    owner, caregiver, pid, mid, sid, did = await _with_watcher(api, session)
+
+    # The caregiver has signed in but has no device registered for push.
+    cg_device = (await session.execute(
+        select(Device).where(Device.account_id == uuid.UUID(caregiver["account_id"]))
+    )).scalars().first()
+    cg_device.push_token = None
+    await session.commit()
+
+    await push(api, owner, dose_events=[
+        dose(did, mid, pid, sid, "missed", at=ms() + 1000, planned=ms() - 3600_000)
+    ])
+
+    maker = async_sessionmaker(db_engine, expire_on_commit=False)
+    t0 = datetime.now(timezone.utc)
+    assert await scan_once(maker, RecordingPush(), now=t0) == 0
+
+    d = await _only_delivery(session)
+    assert d.attempts == 0, "nothing was attempted, so nothing may be counted"
+    assert d.next_attempt_at > t0, "it would be re-locked on every pass for its whole TTL"
+    assert d.state == AlertState.pending.value
+
+    # A pass a minute later leaves it alone entirely.
+    later = t0 + timedelta(minutes=1)
+    assert await scan_once(maker, RecordingPush(), now=later) == 0
+    again = await _only_delivery(session)
+    assert again.attempts == 0
+    assert again.next_attempt_at == d.next_attempt_at

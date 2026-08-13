@@ -56,18 +56,27 @@ async def scan_once(sessionmaker, push: Push, now: datetime | None = None) -> in
         await alerts.expire(session, now)
         await session.commit()
 
-        for delivery_id in await alerts.due(session, now):
+        pending = await alerts.due(session, now)
+        # Tokens for the whole batch in one query, rather than one per delivery.
+        by_account = await alerts.tokens_by_account(
+            session, await alerts.accounts_of(session, pending)
+        )
+
+        for delivery_id in pending:
             delivery = await alerts.take(session, delivery_id, now)
             if delivery is None:
                 # Another worker has it, or has already finished with it.
                 continue
 
-            tokens = await alerts.tokens_for(session, delivery.account_id)
+            tokens = by_account.get(delivery.account_id, ())
             if not tokens:
                 # Nobody to tell right now. Not a failure of this attempt — the
                 # caregiver may simply not have opened the app yet — so it waits
-                # rather than burning one of the alert's attempts. Committed
-                # anyway, to drop the lock rather than hold it for the pass.
+                # rather than burning one of the alert's attempts. It has to be
+                # pushed forward, though: leaving next_attempt_at alone had the
+                # row picked up, locked and released on every pass for its whole
+                # TTL, which is several hundred times to learn the same thing.
+                alerts.defer(delivery, now, alerts.NO_TOKEN_WAIT)
                 await session.commit()
                 continue
 

@@ -24,7 +24,8 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import cast as sa_cast
-from sqlalchemy import func, select
+from sqlalchemy import column as sa_column
+from sqlalchemy import func, literal as sa_literal, select, union_all
 from sqlalchemy import text as sql_text
 from sqlalchemy import true as sa_true
 from sqlalchemy import tuple_ as sa_tuple
@@ -444,44 +445,59 @@ def _project(entity: str, wire: dict[str, Any]) -> dict[str, Any] | None:
     return {k: v for k, v in wire.items() if k in allowed or k in ("updated_at", "deleted_at")}
 
 
-def page_query(model, key_column, ids, since: int):
-    """One ordered index range per key, merged — never a filtered scan.
-
-    The obvious spelling, `WHERE key IN (...) AND server_seq > :since ORDER BY
-    server_seq LIMIT n`, cannot walk an index on `(key, server_seq)` and keep the
-    ordering, so Postgres falls back to one of two bad plans and picks between
-    them on estimates. Measured on 745k dose events across 600 profiles:
-
-      - dense key: walks the `server_seq` index and discards. 11,920 rows thrown
-        away to return 500. The waste is proportional to how small a share of the
-        table the caller owns, so it grows with *other people's* data — the one
-        thing a tenant cannot do anything about.
-      - sparse key: reads every row the key has and then sorts. The LIMIT stops
-        nothing, so a caregiver's first pull materialises their whole history
-        before the first page can be returned.
-
-    Expanding the keys into a LATERAL takes the choice away. Every branch is an
-    ordered range scan on `(key, server_seq)` that stops at the limit, so the
-    work is bounded by keys × PAGE_SIZE and no longer depends on the size of the
-    table. Same 500 rows, 2.3 ms against 10.2 ms, and flat as the table grows.
-
-    Module level rather than a closure so that test_pull_plan.py can assert the
-    plan of the statement production actually runs, not of a copy of it.
-    """
-    wanted = func.unnest(sa_cast(list(ids), ARRAY(PgUUID(as_uuid=True)))).alias("wanted")
+def _key_branch(entity: str, model, key_column, ids, since: int):
+    """`(server_seq, entity, id)` for one entity — keys only, no row bodies."""
+    wanted = func.unnest(
+        sa_cast(list(ids), ARRAY(PgUUID(as_uuid=True)))
+    ).alias(f"wanted_{entity}")
     page = (
-        select(model)
+        select(model.server_seq.label("server_seq"), model.id.label("id"))
         .where(key_column == wanted.column, model.server_seq > since)
         .order_by(model.server_seq)
         .limit(PAGE_SIZE + 1)
-        .lateral("page")
+        .lateral(f"page_{entity}")
     )
-    row = aliased(model, page)
     return (
-        select(row)
+        select(
+            page.c.server_seq,
+            sa_literal(entity).label("entity"),
+            page.c.id,
+        )
         .select_from(wanted)
         .join(page, sa_true())
-        .order_by(row.server_seq)
+    )
+
+
+def feed_query(plan, since: int):
+    """The page boundary, decided once across every entity.
+
+    `plan` is a sequence of `(entity, model, key_column, ids)`.
+
+    Fetching each entity separately and cutting afterwards was correct but paid
+    for far more than it kept: every entity returned up to PAGE_SIZE rows *per
+    visible profile*, all of them fully hydrated — encrypted names, notes, the
+    lot — and then Python threw away everything past the first 500. A caregiver
+    watching four profiles moved around twelve thousand rows to be sent five
+    hundred, and the excess grew with both the number of profiles and the number
+    of entities.
+
+    So the boundary is decided on keys alone: `(server_seq, entity, id)` is
+    narrow, Postgres merges the branches and stops at the limit, and only the
+    rows that survived the cut are then read in full. What crosses the wire is
+    unchanged — same rows, same order, same cursor — which is what the pull
+    tests assert.
+    """
+    branches = [
+        _key_branch(entity, model, key_column, ids, since)
+        for entity, model, key_column, ids in plan
+        if ids
+    ]
+    if not branches:
+        return None
+    keys = branches[0] if len(branches) == 1 else union_all(*branches)
+    return (
+        select(keys.subquery().alias("feed"))
+        .order_by(sa_column("server_seq"))
         .limit(PAGE_SIZE + 1)
     )
 
@@ -504,39 +520,56 @@ async def pull(
     mine = owned_ids(profiles)
     all_ids = set(profiles)
 
-    # Every table draws from one sequence, so rows are merged and then cut at a
+    # Every table draws from one sequence, so the whole stream is cut at one
     # global boundary. Cutting per table would advance the cursor past rows in
     # another table that had not been sent yet — and those rows would never be
     # seen again, because the cursor only moves forward.
-    collected: list[tuple[int, str, Any]] = []
-
-    async def gather(entity: str, model, profile_column, ids: set[uuid.UUID]) -> None:
-        if not ids:
-            return
-        rows = (
-            await session.execute(page_query(model, profile_column, ids, since))
-        ).scalars()
-        for r in rows:
-            collected.append((r.server_seq, entity, r))
-
-    await gather("profiles", Profile, Profile.id, all_ids)
-    await gather("medications", Medication, Medication.profile_id, all_ids)
-    await gather("dose_events", DoseEvent, DoseEvent.profile_id, all_ids)
+    plan: list[tuple[str, Any, Any, set[uuid.UUID]]] = [
+        ("profiles", Profile, Profile.id, all_ids),
+        ("medications", Medication, Medication.profile_id, all_ids),
+        ("dose_events", DoseEvent, DoseEvent.profile_id, all_ids),
+    ]
     # Schedules and stock events reach only the owner, and they hang off a
     # medication rather than a profile, so the visible set is resolved through it.
     if mine:
-        med_ids = (
-            await session.execute(
-                select(Medication.id).where(Medication.profile_id.in_(mine))
-            )
-        ).scalars().all()
+        med_ids = set(
+            (
+                await session.execute(
+                    select(Medication.id).where(Medication.profile_id.in_(mine))
+                )
+            ).scalars()
+        )
         if med_ids:
-            await gather("schedules", Schedule, Schedule.medication_id, set(med_ids))
-            await gather("stock_events", StockEvent, StockEvent.medication_id, set(med_ids))
+            plan.append(("schedules", Schedule, Schedule.medication_id, med_ids))
+            plan.append(("stock_events", StockEvent, StockEvent.medication_id, med_ids))
 
-    collected.sort(key=lambda t: t[0])
-    has_more = len(collected) > PAGE_SIZE
-    page = collected[:PAGE_SIZE]
+    feed = feed_query(plan, since)
+    keys = list((await session.execute(feed)).all()) if feed is not None else []
+
+    has_more = len(keys) > PAGE_SIZE
+    wanted_keys = keys[:PAGE_SIZE]
+
+    # Only now are the rows themselves read, and only the ones that survived the
+    # cut. Reading them before deciding the boundary meant hydrating up to a
+    # page per entity per profile and discarding almost all of it.
+    models = {entity: model for entity, model, _key, _ids in plan}
+    by_entity: dict[str, list[uuid.UUID]] = {}
+    for _seq, entity, row_id in wanted_keys:
+        by_entity.setdefault(entity, []).append(row_id)
+
+    loaded: dict[tuple[str, uuid.UUID], Any] = {}
+    for entity, ids in by_entity.items():
+        model = models[entity]
+        for row in (
+            await session.execute(select(model).where(model.id.in_(ids)))
+        ).scalars():
+            loaded[(entity, row.id)] = row
+
+    page = [
+        (seq, entity, loaded[(entity, row_id)])
+        for seq, entity, row_id in wanted_keys
+        if (entity, row_id) in loaded
+    ]
 
     changes: dict[str, list[dict]] = {}
     for _seq, entity, row in page:

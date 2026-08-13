@@ -22,7 +22,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.dialects import postgresql
 
-from app.api.sync import PAGE_SIZE, page_query
+from app.api.sync import PAGE_SIZE, feed_query
 from app.db.models import DoseEvent
 
 pytestmark = pytest.mark.asyncio
@@ -102,7 +102,9 @@ async def seed(session, heavy: int = 0) -> list[uuid.UUID]:
 
 
 async def plan_for(session, ids) -> str:
-    stmt = page_query(DoseEvent, DoseEvent.profile_id, ids, since=0)
+    stmt = feed_query(
+        [("dose_events", DoseEvent, DoseEvent.profile_id, set(ids))], since=0
+    )
     sql = stmt.compile(
         dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
     )
@@ -117,7 +119,8 @@ async def test_the_pull_walks_the_composite_index_and_stops_at_the_page(session)
     assert "ix_dose_events_profile_id_server_seq" in plan, plan
     # Both halves of the key in one condition is the whole point: filtering on
     # one and ordering by the other is what produced the bad plans.
-    assert "profile_id = wanted.wanted" in plan and "server_seq > 0" in plan, plan
+    assert "profile_id = wanted_dose_events.wanted_dose_events" in plan, plan
+    assert "server_seq > 0" in plan, plan
 
 
 async def test_the_pull_discards_nothing_it_has_read(session):

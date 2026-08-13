@@ -475,9 +475,16 @@ class AlertDelivery(Base):
 
     __tablename__ = "alert_deliveries"
     __table_args__ = (
+        # `profile_id` is part of the key, and leaving it out silently cost
+        # people. For `profile_stale` the subject is a date, so without it one
+        # caregiver looking after two parents received a single alert a day
+        # between them — the second parent's phone could be dead for a week and
+        # never be mentioned. The more profiles someone watches, the more the
+        # key hid, which is exactly backwards.
         Index(
             "uq_alert_once",
             "account_id",
+            "profile_id",
             "kind",
             "subject_id",
             unique=True,

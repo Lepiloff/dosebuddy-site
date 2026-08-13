@@ -14,6 +14,7 @@ the phone is off — the case most worth catching.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -77,16 +78,33 @@ async def _watchers(session: AsyncSession) -> list[ProfileMembership]:
 
 
 async def tokens_for(session: AsyncSession, account_id: uuid.UUID) -> tuple[str, ...]:
+    return (await tokens_by_account(session, [account_id])).get(account_id, ())
+
+
+async def tokens_by_account(
+    session: AsyncSession, account_ids: Sequence[uuid.UUID]
+) -> dict[uuid.UUID, tuple[str, ...]]:
+    """Push tokens for many accounts at once.
+
+    One query for the whole scan rather than one per watched profile. The
+    per-account form is kept for single callers, and is this with a list of one.
+    """
+    if not account_ids:
+        return {}
     rows = (
         await session.execute(
-            select(Device.push_token).where(
-                Device.account_id == account_id,
+            select(Device.account_id, Device.push_token).where(
+                Device.account_id.in_(set(account_ids)),
                 Device.revoked_at.is_(None),
                 Device.push_token.is_not(None),
             )
         )
-    ).scalars()
-    return tuple(t for t in rows if t)
+    ).all()
+    out: dict[uuid.UUID, list[str]] = {}
+    for account_id, token in rows:
+        if token:
+            out.setdefault(account_id, []).append(token)
+    return {k: tuple(v) for k, v in out.items()}
 
 
 async def find_missed_dose_alerts(session: AsyncSession, now: datetime) -> list[Alert]:
@@ -97,69 +115,105 @@ async def find_missed_dose_alerts(session: AsyncSession, now: datetime) -> list[
     not synced, and guessing would produce alerts about people who took their
     medication perfectly well.
     """
-    alerts: list[Alert] = []
+    watchers = await _watchers(session)
+    if not watchers:
+        return []
 
-    for m in await _watchers(session):
+    # Three queries for the whole scan, not three per watched profile. The
+    # per-membership threshold still applies — it is configurable, so the widest
+    # window is fetched and each membership's own cutoff applied in Python. That
+    # keeps the query count flat as families are added.
+    floor_ms = int((now - TTL[AlertKind.dose_missed]).timestamp() * 1000)
+    widest_ms = int(
+        (now - timedelta(minutes=min(m.dose_alert_after_minutes for m in watchers)))
+        .timestamp() * 1000
+    )
+
+    rows = (
+        await session.execute(
+            select(DoseEvent.profile_id, DoseEvent.id, DoseEvent.planned_at_ms).where(
+                DoseEvent.profile_id.in_({m.profile_id for m in watchers}),
+                DoseEvent.status == MISSED,
+                DoseEvent.deleted_at_ms.is_(None),
+                DoseEvent.planned_at_ms <= widest_ms,
+                DoseEvent.planned_at_ms >= floor_ms,
+            )
+        )
+    ).all()
+
+    missed: dict[uuid.UUID, list[tuple[uuid.UUID, int]]] = {}
+    for profile_id, dose_id, planned in rows:
+        missed.setdefault(profile_id, []).append((dose_id, planned))
+
+    tokens = await tokens_by_account(session, [m.account_id for m in watchers])
+
+    alerts: list[Alert] = []
+    for m in watchers:
         cutoff_ms = int(
             (now - timedelta(minutes=m.dose_alert_after_minutes)).timestamp() * 1000
         )
-        # And no older than the alert stays worth sending. Without a floor, the
-        # first scan after a caregiver is added raises one alert per missed dose
-        # in the profile's whole history — a phone full of notifications about
-        # last spring, and the one about this morning buried among them. The
-        # same window that decides an alert is too old to deliver decides it is
-        # too old to raise.
-        floor_ms = int((now - TTL[AlertKind.dose_missed]).timestamp() * 1000)
-        doses = (
-            await session.execute(
-                select(DoseEvent.id).where(
-                    DoseEvent.profile_id == m.profile_id,
-                    DoseEvent.status == MISSED,
-                    DoseEvent.deleted_at_ms.is_(None),
-                    DoseEvent.planned_at_ms <= cutoff_ms,
-                    DoseEvent.planned_at_ms >= floor_ms,
-                )
-            )
-        ).scalars()
-
-        tokens = await tokens_for(session, m.account_id)
-        for dose_id in doses:
+        for dose_id, planned in missed.get(m.profile_id, ()):
+            if planned > cutoff_ms:
+                continue
             alerts.append(
                 Alert(
                     account_id=m.account_id,
                     profile_id=m.profile_id,
                     kind=AlertKind.dose_missed,
                     subject_id=str(dose_id),
-                    push_tokens=tokens,
+                    push_tokens=tokens.get(m.account_id, ()),
                 )
             )
     return alerts
 
 
 async def find_stale_profile_alerts(session: AsyncSession, now: datetime) -> list[Alert]:
-    """Profiles whose device has gone quiet.
+    """Profiles whose reminding device has gone quiet.
 
-    The subject is the day the silence falls in, not the profile, so a phone
-    that stays off for a week produces one alert a day rather than one for every
-    scan — the uniqueness of the delivery record does the throttling.
+    The subject is the day the silence falls in, so a phone that stays off for a
+    week produces one alert a day rather than one for every scan — the
+    uniqueness of the delivery record does the throttling.
+
+    **Which device is the whole point.** This asked the owner's *account* for its
+    most recently seen device, so any second device — a tablet, an old phone
+    still signed in — kept the answer fresh while the phone that actually arms
+    the alarms sat dead in a coat pocket. The signal reported "all is well"
+    precisely in the case it exists to catch. Only `owner_device_id` matters:
+    that is the one device materialising reminders (spec §1.4), and its silence
+    is the only silence that means nobody is being reminded.
+
+    A profile with no `owner_device_id` raises nothing. No device has claimed
+    authority, so no alarms are being armed at all — which is worse than stale,
+    and a different signal than this one. Worth having; not by pretending it is
+    this.
     """
-    alerts: list[Alert] = []
+    watchers = await _watchers(session)
+    if not watchers:
+        return []
 
-    for m in await _watchers(session):
-        threshold = now - timedelta(hours=m.stale_alert_after_hours)
-
-        owner_seen = (
+    # One query for every reminding device, not one per watched profile.
+    seen = dict(
+        (
             await session.execute(
-                select(Device.last_seen_at)
-                .join(Profile, Profile.owner_account_id == Device.account_id)
-                .where(Profile.id == m.profile_id, Device.revoked_at.is_(None))
-                .order_by(Device.last_seen_at.desc().nullslast())
-                .limit(1)
+                select(Profile.id, Device.last_seen_at)
+                .join(Device, Profile.owner_device_id == Device.id)
+                .where(
+                    Profile.id.in_({m.profile_id for m in watchers}),
+                    Device.revoked_at.is_(None),
+                )
             )
-        ).scalar_one_or_none()
+        ).all()
+    )
+    tokens = await tokens_by_account(session, [m.account_id for m in watchers])
+
+    alerts: list[Alert] = []
+    for m in watchers:
+        threshold = now - timedelta(hours=m.stale_alert_after_hours)
+        owner_seen = seen.get(m.profile_id)
 
         # Never seen at all is not stale: the profile has simply not started
-        # syncing yet, and greeting a new caregiver with an alarm is wrong.
+        # syncing yet, and greeting a new caregiver with an alarm is wrong. Nor
+        # is a profile whose device never claimed authority — see the docstring.
         if owner_seen is None or owner_seen >= threshold:
             continue
 
@@ -169,7 +223,7 @@ async def find_stale_profile_alerts(session: AsyncSession, now: datetime) -> lis
                 profile_id=m.profile_id,
                 kind=AlertKind.profile_stale,
                 subject_id=now.date().isoformat(),
-                push_tokens=await tokens_for(session, m.account_id),
+                push_tokens=tokens.get(m.account_id, ()),
             )
         )
     return alerts
@@ -195,6 +249,19 @@ BACKOFF = (
 )
 MAX_ATTEMPTS = len(BACKOFF) + 1
 
+# How long to wait when the caregiver has no device to be told on. Not an
+# attempt — nothing was tried, and burning the alert's attempts on the absence
+# of a phone would use them up before one appears. Without this the row was
+# re-selected, locked and released every single scan for the whole of its TTL:
+# several hundred passes to discover, each time, that there is still nobody to
+# tell.
+NO_TOKEN_WAIT = timedelta(minutes=5)
+
+
+def defer(delivery: AlertDelivery, now: datetime, wait: timedelta) -> None:
+    """Put a delivery aside without counting an attempt against it."""
+    delivery.next_attempt_at = now + wait
+
 
 async def claim(session: AsyncSession, alert: Alert, now: datetime) -> bool:
     """Register the alert exactly once, due immediately.
@@ -216,7 +283,9 @@ async def claim(session: AsyncSession, alert: Alert, now: datetime) -> bool:
             next_attempt_at=now,
             expires_at=now + TTL[alert.kind],
         )
-        .on_conflict_do_nothing(index_elements=["account_id", "kind", "subject_id"])
+        .on_conflict_do_nothing(
+            index_elements=["account_id", "profile_id", "kind", "subject_id"]
+        )
         .returning(AlertDelivery.id)
     )
     claimed = (await session.execute(stmt)).scalar_one_or_none()
@@ -271,8 +340,15 @@ async def take(
 
 
 def collapse_key(delivery: AlertDelivery) -> str:
-    """What makes two deliveries of one alert land as one notification."""
-    return f"{delivery.kind.value}:{delivery.subject_id}"
+    """What makes two deliveries of one alert land as one notification.
+
+    The profile is in the key for the same reason it is in the unique index: for
+    `profile_stale` the subject is only a date, so a key without it would have
+    FCM replace one parent's alert with another's on the caregiver's phone. The
+    replacement is silent, and the alert it swallowed is the one about the
+    parent nobody has heard from.
+    """
+    return f"{delivery.kind.value}:{delivery.profile_id}:{delivery.subject_id}"
 
 
 def payload_for(delivery: AlertDelivery) -> dict[str, str]:
@@ -359,3 +435,24 @@ async def expire(session: AsyncSession, now: datetime) -> int:
         .values(state=AlertState.expired.value)
     )
     return result.rowcount or 0
+
+
+async def accounts_of(
+    session: AsyncSession, delivery_ids: Sequence[uuid.UUID]
+) -> list[uuid.UUID]:
+    """Which accounts a batch of deliveries is addressed to.
+
+    So the loop can fetch every token it will need in one query instead of one
+    per delivery, before it starts locking rows.
+    """
+    if not delivery_ids:
+        return []
+    return list(
+        (
+            await session.execute(
+                select(AlertDelivery.account_id)
+                .where(AlertDelivery.id.in_(set(delivery_ids)))
+                .distinct()
+            )
+        ).scalars()
+    )
