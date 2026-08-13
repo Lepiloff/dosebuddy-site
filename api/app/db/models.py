@@ -208,10 +208,19 @@ class ProfileMembership(Base):
     dose_alert_after_minutes: Mapped[int] = mapped_column(Integer, default=30)
 
     # How long a profile's device may stay silent before that silence is itself
-    # reported. Long enough to sit out a night with no connection, short enough
-    # that a phone switched off on Monday is not first noticed on Wednesday.
-    # A guess until there is real usage to tune it against.
-    stale_alert_after_hours: Mapped[int] = mapped_column(Integer, default=12)
+    # reported.
+    #
+    # This was 12 hours, which a phone in Doze reaches most nights without
+    # anything being wrong — the caregiver would have been woken most mornings,
+    # and an alert that is usually false is one the caregiver learns to swipe
+    # away before reading. 36 hours sits out a night, a weekend at a relative's
+    # and a day with no signal, and still catches a phone that is genuinely off
+    # or lost within two of its owner's mornings.
+    #
+    # It says the app has not been in touch, and nothing more: a missed dose is
+    # `dose_missed` and only ever comes from the device saying so. Silence is not
+    # evidence of a missed dose, and the wording on the device must not imply it.
+    stale_alert_after_hours: Mapped[int] = mapped_column(Integer, default=36)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
+from datetime import datetime, timedelta, timezone
 
 import jwt
 from fastapi import Depends, HTTPException, Request, status
@@ -15,6 +16,10 @@ from app.core.security import read_access_token
 from app.db.models import Account, Device
 
 bearer = HTTPBearer(auto_error=False)
+
+# How precisely "last seen" is worth recording. The only reader compares it
+# against a threshold in the tens of hours.
+SEEN_RESOLUTION = timedelta(minutes=5)
 
 
 async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
@@ -62,5 +67,18 @@ async def current_caller(
     ).scalar_one_or_none()
     if device is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "device_revoked")
+
+    # `profile_stale` reads this column to decide whether a phone has gone quiet,
+    # so it has to mean "last talked to us" — not "last refreshed a token", which
+    # is what it meant when only auth and pairing touched it. A device can sync
+    # all day on one access token, and did: staleness was measured against an
+    # event the app has no reason to produce.
+    #
+    # Throttled, because at the resolution that matters — hours — a write per
+    # request would be a row lock and a WAL record to sharpen nothing.
+    now = datetime.now(timezone.utc)
+    if device.last_seen_at is None or now - device.last_seen_at > SEEN_RESOLUTION:
+        device.last_seen_at = now
+        await session.commit()
 
     return Caller(account=account, device_id=device_id)

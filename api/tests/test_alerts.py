@@ -132,7 +132,7 @@ async def test_silence_is_reported_separately_from_a_miss(api, session, db_engin
             select(Device).where(Device.account_id == uuid.UUID(owner["account_id"]))
         )
     ).scalars().first()
-    owner_device.last_seen_at = datetime.now(timezone.utc) - timedelta(hours=20)
+    owner_device.last_seen_at = datetime.now(timezone.utc) - timedelta(hours=48)
     await session.commit()
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -142,6 +142,55 @@ async def test_silence_is_reported_separately_from_a_miss(api, session, db_engin
 
     kinds = {p["type"] for _, p in pusher.sent}
     assert kinds == {"profile_stale"}
+
+
+async def test_a_night_of_silence_is_not_reported(api, session, db_engine):
+    """An idle Android phone stops talking to the network for hours at a time.
+
+    At the old twelve-hour threshold that was indistinguishable from a phone
+    switched off, so the caregiver would have been told most mornings — and an
+    alert that is usually wrong is one they learn to dismiss unread.
+    """
+    owner, caregiver, pid, mid, sid, did = await _with_watcher(api, session)
+
+    owner_device = (
+        await session.execute(
+            select(Device).where(Device.account_id == uuid.UUID(owner["account_id"]))
+        )
+    ).scalars().first()
+    owner_device.last_seen_at = datetime.now(timezone.utc) - timedelta(hours=14)
+    await session.commit()
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    pusher = RecordingPush()
+    assert await scan_once(async_sessionmaker(db_engine, expire_on_commit=False), pusher) == 0
+
+
+async def test_syncing_counts_as_being_seen(api, session, db_engine):
+    """Staleness must mean "has not been in touch", not "has not signed in".
+
+    It read `last_seen_at`, which only auth and pairing wrote. A device can sync
+    all day on one access token and never touch either, so a phone doing exactly
+    what it should was on course to be reported silent.
+    """
+    owner, caregiver, pid, mid, sid, did = await _with_watcher(api, session)
+
+    owner_device = (
+        await session.execute(
+            select(Device).where(Device.account_id == uuid.UUID(owner["account_id"]))
+        )
+    ).scalars().first()
+    owner_device.last_seen_at = datetime.now(timezone.utc) - timedelta(hours=48)
+    await session.commit()
+
+    # A plain pull: no sign-in, no refresh, nothing but the work the app does.
+    assert (await api.get("/v1/sync/pull", headers=auth_header(owner))).status_code == 200
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    pusher = RecordingPush()
+    assert await scan_once(async_sessionmaker(db_engine, expire_on_commit=False), pusher) == 0
 
 
 async def test_a_profile_that_has_never_synced_is_not_stale(api, session, db_engine):
