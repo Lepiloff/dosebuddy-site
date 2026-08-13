@@ -294,6 +294,30 @@ async def test_revoking_a_membership_stops_the_data(api):
     assert (await pull(api, caregiver))["changes"] == {}
 
 
+async def test_a_revoked_profile_disappears_from_roles(api):
+    """Withdrawn consent has to be visible, not merely silent.
+
+    Stopping the flow is not enough on its own: the caregiver's device keeps
+    whatever it was sent, and health data outliving the consent it was shared
+    under is the thing the whole arrangement is supposed to prevent. Nothing
+    ever said "this is gone" — the rows simply stopped arriving, which is
+    indistinguishable from a quiet week.
+
+    The roles map makes it observable: the profile is there on one pull and
+    absent on the next, and absence is the instruction to delete.
+    """
+    owner, pid, mid, _, _ = await _owner_with_data(api)
+    caregiver = await _pair(api, owner, pid)
+    assert (await pull(api, caregiver))["roles"] == {pid: "with_alerts"}
+
+    await api.delete(f"/v1/profiles/{pid}/members/{caregiver['account_id']}",
+                     headers=auth_header(owner))
+
+    after = await pull(api, caregiver)
+    assert after["roles"] == {}, "the caregiver must be able to see that access ended"
+    assert after["changes"] == {}
+
+
 async def test_reminder_authority_moves_and_is_visible_over_sync(api, session):
     """The load-bearing part is that it crosses in the *data*.
 
