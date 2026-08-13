@@ -67,6 +67,59 @@ jobs:
           alembic upgrade head
           alembic downgrade base
 
+      # The suite builds its schema from the models; production runs the
+      # migrations. Both passing separately says nothing about them agreeing,
+      # and they did not: three columns carried a redundant index in production
+      # that no test could see, because no test ever looked at the migrated
+      # schema. A drift that is only cosmetic today is how a real one hides
+      # tomorrow.
+      - name: The models and the migrations describe the same schema
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/from_migrations
+          REDIS_URL: redis://localhost:6379/0
+          JWT_SECRET: ci
+          ENCRYPTION_KEY: MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=
+          TEST_DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/from_models
+        run: |
+          for db in from_migrations from_models; do
+            PGPASSWORD=postgres psql -h localhost -U postgres -c "CREATE DATABASE $db"
+          done
+          alembic upgrade head
+          python - <<'EOF'
+          import asyncio, os
+          from sqlalchemy.ext.asyncio import create_async_engine
+          from app.db.session import Base
+          # Importing Base alone leaves its metadata empty: the tables register
+          # on it when the model classes are imported, and without this the
+          # comparison would build nothing and compare nothing.
+          import app.db.models  # noqa: F401
+
+          async def build():
+              engine = create_async_engine(os.environ["TEST_DATABASE_URL"])
+              async with engine.begin() as conn:
+                  await conn.exec_driver_sql(
+                      "CREATE SEQUENCE IF NOT EXISTS server_seq")
+                  await conn.run_sync(Base.metadata.create_all)
+              await engine.dispose()
+
+          asyncio.run(build())
+          EOF
+          # alembic_version exists only in the migrated one, by definition.
+          q="SELECT tablename||' '||indexdef FROM pg_indexes
+             WHERE schemaname='public' AND tablename<>'alembic_version' ORDER BY 1"
+          for db in from_migrations from_models; do
+            PGPASSWORD=postgres psql -h localhost -U postgres -d $db -Atc "$q" \
+              | sed "s/$db//" > /tmp/$db.txt
+          done
+          if ! diff -u /tmp/from_models.txt /tmp/from_migrations.txt; then
+            echo
+            echo "The migrated schema differs from the one the models describe."
+            echo "Left: models (what the tests run against)."
+            echo "Right: migrations (what production runs)."
+            exit 1
+          fi
+          echo "models and migrations agree on all $(wc -l < /tmp/from_models.txt) indexes"
+
       # The image installs from the lock file, so a dependency added to
       # requirements.txt without regenerating it is simply absent in
       # production — and no test notices, because tests install
