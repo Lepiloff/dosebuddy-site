@@ -308,7 +308,11 @@ async def set_reminder_authority(
     if previous is not None:
         old = await session.get(Device, previous)
         if old is not None and old.push_token and old.revoked_at is None:
+            # Not retried and not recorded, unlike an alert. This only nudges a
+            # device to stop ringing sooner than its next sync would tell it, so
+            # losing the nudge costs one duplicate reminder, not a missed dose.
             await request.app.state.push.send(
                 old.push_token,
                 {"type": "reminder_authority_lost", "profile_id": str(profile.id)},
+                f"reminder_authority_lost:{profile.id}",
             )

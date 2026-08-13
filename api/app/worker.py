@@ -28,28 +28,59 @@ log = structlog.get_logger(__name__)
 
 
 async def scan_once(sessionmaker, push: Push, now: datetime | None = None) -> int:
+    """Detect, then deliver. Two phases, and the split is the point.
+
+    They used to be one: claim a row and send in the same breath, with the claim
+    written as `sent_at`. A send that FCM refused therefore left a row claiming
+    delivery, so the alert was lost, unretried and — because the record lied —
+    not even findable afterwards. For a product whose whole purpose is telling a
+    family that a dose was missed, that is the wrong way to fail.
+
+    Now the claim only says the alert exists and is owed. Delivery is a separate
+    pass over what is owed, with its own attempts and backoff, and a caregiver
+    is not woken twice because the retry carries a collapse key.
+
+    Returns the number of alerts delivered in this pass.
+    """
     now = now or datetime.now(timezone.utc)
-    sent = 0
+    delivered = 0
 
     async with sessionmaker() as session:
         found = await alerts.find_missed_dose_alerts(session, now)
         found += await alerts.find_stale_profile_alerts(session, now)
-
         for alert in found:
-            # Claim before sending: if the process dies between the two, the
-            # alert is lost rather than repeated. A caregiver who is told twice
-            # about one dose starts ignoring the third.
-            if not await alerts.claim(session, alert):
-                continue
-            await session.commit()
+            await alerts.claim(session, alert, now)
 
-            for token in alert.push_tokens:
-                if await push.send(token, alert.payload()):
-                    sent += 1
-
+        # Before delivering, not after: an alert that stopped being useful while
+        # the worker was down should be retired, not sent late.
+        await alerts.expire(session, now)
         await session.commit()
 
-    return sent
+        for delivery_id in await alerts.due(session, now):
+            delivery = await alerts.take(session, delivery_id, now)
+            if delivery is None:
+                # Another worker has it, or has already finished with it.
+                continue
+
+            tokens = await alerts.tokens_for(session, delivery.account_id)
+            if not tokens:
+                # Nobody to tell right now. Not a failure of this attempt — the
+                # caregiver may simply not have opened the app yet — so it waits
+                # rather than burning one of the alert's attempts. Committed
+                # anyway, to drop the lock rather than hold it for the pass.
+                await session.commit()
+                continue
+
+            outcome = await alerts.deliver(push, delivery, tokens)
+            alerts.record(delivery, outcome, now)
+            if delivery.state == alerts.AlertState.sent.value:
+                delivered += 1
+
+            # Committed per delivery. A crash halfway through a batch must not
+            # replay the sends that already happened.
+            await session.commit()
+
+    return delivered
 
 
 async def main() -> None:

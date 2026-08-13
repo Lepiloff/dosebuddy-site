@@ -441,13 +441,36 @@ class AlertKind(str, enum.Enum):
     profile_stale = "profile_stale"
 
 
+class AlertState(str, enum.Enum):
+    """Where an alert has got to.
+
+    `sent_at` alone could not express this. It was written before the send was
+    attempted, so a row saying "delivered" was the only trace of an alert that
+    FCM had refused — and after the fact there was no way to even find the ones
+    that had been lost.
+    """
+
+    pending = "pending"
+    sent = "sent"
+    # Attempts exhausted. The alert is lost, but visibly so.
+    given_up = "given_up"
+    # Outlived its usefulness before it could be delivered. Telling a caregiver
+    # at noon about a dose missed at breakfast is help; telling them on Thursday
+    # about Monday is noise they cannot act on.
+    expired = "expired"
+
+
 class AlertDelivery(Base):
-    """One row per alert actually sent, so it cannot be sent twice.
+    """One row per alert raised, carrying how far it has got.
 
     In the database rather than in Redis on purpose: Redis is allowed to lose
     its contents, and the cost of losing this is a caregiver woken again for
     something they already saw. It doubles as the record of what we told whom,
     which is the sort of question that gets asked after the fact.
+
+    The unique index still makes an alert unrepeatable, so detection can run
+    every minute and raise the same alert every time without consequence. What
+    changed is that claiming it no longer counts as delivering it.
     """
 
     __tablename__ = "alert_deliveries"
@@ -459,6 +482,9 @@ class AlertDelivery(Base):
             "subject_id",
             unique=True,
         ),
+        # The loop's only query: what is due now. Ordered so the index answers
+        # it without reading rows that are waiting out their backoff.
+        Index("ix_alert_deliveries_due", "state", "next_attempt_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
@@ -475,4 +501,24 @@ class AlertDelivery(Base):
     # time the scan runs.
     subject_id: Mapped[str] = mapped_column(String(64))
 
-    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    state: Mapped[str] = mapped_column(String(32), default=AlertState.pending.value)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+
+    # When to try next. Set to now on creation, pushed out by backoff on each
+    # failure, so one query serves both the first attempt and every retry.
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+    # After this the alert is no longer worth delivering; see AlertState.expired.
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    # Why the last attempt failed. Kept because "the alerts stopped arriving" is
+    # not a question that can be answered from an empty table.
+    last_error: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
+    # Null until something was actually delivered. It used to be written before
+    # the attempt, which made it a record of intent wearing the name of a fact.
+    sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
