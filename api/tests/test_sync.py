@@ -462,3 +462,50 @@ async def test_the_role_tells_a_device_whether_to_ring(api):
 
     assert mine["role"] == "owner"
     assert theirs["role"] == "with_alerts"
+
+
+async def test_every_pull_says_which_profiles_are_whose(api):
+    """The routing answer, present whether or not anything changed.
+
+    A row names its profile, but the profile row itself may be pages behind it —
+    order is by server_seq, so a profile last edited months ago sorts far behind
+    this morning's doses. Without this map the client would have to guess from
+    the shape of a row, and the cost of guessing wrong is an alarm on the wrong
+    phone.
+    """
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+    caregiver = await _pair(api, owner, pid, "with_alerts")
+
+    mine = (await api.get("/v1/sync/pull", headers=auth_header(owner))).json()
+    assert mine["roles"] == {pid: "owner"}
+
+    theirs = (await api.get("/v1/sync/pull", headers=auth_header(caregiver))).json()
+    assert theirs["roles"] == {pid: "with_alerts"}
+
+    # And on a pull that carries no changes at all.
+    empty = await api.get(
+        f"/v1/sync/pull?cursor={theirs['cursor']}", headers=auth_header(caregiver)
+    )
+    assert empty.json()["changes"] == {}
+    assert empty.json()["roles"] == {pid: "with_alerts"}
+
+
+async def test_an_owned_dose_may_have_no_schedule(api):
+    """Absence of schedule_id does not mean the row is somebody else's.
+
+    It is nullable on an owned row — a dose taken outside any schedule has none —
+    so routing a row by whether the field is present would send an owner's own
+    ad-hoc doses down the watched path, and stop their reminders.
+    """
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+    ad_hoc = str(uuid.uuid4())
+
+    r = await push(api, owner, dose_events=[
+        {**dose(ad_hoc, mid, pid, sid, "taken"), "schedule_id": None}
+    ])
+    assert r["rejected"] == [] and r["retry"] == []
+
+    pulled = (await api.get("/v1/sync/pull", headers=auth_header(owner))).json()
+    row = [d for d in pulled["changes"]["dose_events"] if d["id"] == ad_hoc][0]
+    assert row["schedule_id"] is None
+    assert pulled["roles"][pid] == "owner"

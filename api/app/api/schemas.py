@@ -127,3 +127,19 @@ class PullOut(BaseModel):
     cursor: str
     has_more: bool
     changes: dict[str, list[dict]]
+
+    # Every profile the caller can see, and their role on it. Present on every
+    # response, not only when something changed.
+    #
+    # The client has to know, for each row, whether it belongs to a profile they
+    # own or one they merely watch — the two go to different places, and getting
+    # it wrong arms an alarm on the wrong phone (spec §1.4). The profile row
+    # carries `role`, but it may not be in the same page: order is by server_seq,
+    # so a profile last touched months ago sorts far behind doses from this
+    # morning. Deriving the answer from the shape of a row instead — "no
+    # schedule_id, so it must be watched" — reads a field that is legitimately
+    # null on an owned row too.
+    #
+    # A map, so the answer is always there and never depends on arrival order.
+    # It is small: a family has a handful of profiles, not thousands.
+    roles: dict[str, str] = {}

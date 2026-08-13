@@ -494,8 +494,12 @@ async def pull(
 ) -> PullOut:
     since = decode_cursor(cursor)
     profiles = await visible_profiles(session, caller)
+    # Sent on every response, including this one. A caller who can see nothing
+    # gets an empty map, which is the honest answer rather than a missing field.
+    roles = {str(pid): role.value for pid, role in profiles.items()}
+
     if not profiles:
-        return PullOut(cursor=encode_cursor(since), has_more=False, changes={})
+        return PullOut(cursor=encode_cursor(since), has_more=False, changes={}, roles=roles)
 
     mine = owned_ids(profiles)
     all_ids = set(profiles)
@@ -554,4 +558,6 @@ async def pull(
         changes.setdefault(entity, []).append(wire)
 
     new_cursor = page[-1][0] if page else since
-    return PullOut(cursor=encode_cursor(new_cursor), has_more=has_more, changes=changes)
+    return PullOut(
+        cursor=encode_cursor(new_cursor), has_more=has_more, changes=changes, roles=roles
+    )
