@@ -315,4 +315,7 @@ async def set_reminder_authority(
                 old.push_token,
                 {"type": "reminder_authority_lost", "profile_id": str(profile.id)},
                 f"reminder_authority_lost:{profile.id}",
+                # An hour. The next sync tells the device the same thing from
+                # the data, so a nudge that arrives a day late is noise.
+                3600,
             )

@@ -34,10 +34,12 @@ class RecordingPush:
     def __init__(self):
         self.sent: list[tuple[str, dict]] = []
         self.collapse: list[str] = []
+        self.ttl: list[int] = []
 
-    async def send(self, token: str, data: dict, collapse: str) -> Delivery:
+    async def send(self, token: str, data: dict, collapse: str, ttl_seconds: int) -> Delivery:
         self.sent.append((token, data))
         self.collapse.append(collapse)
+        self.ttl.append(ttl_seconds)
         return Delivery.ok
 
 
@@ -53,7 +55,7 @@ class FailingPush:
         self.outcome = outcome
         self.attempts = 0
 
-    async def send(self, token: str, data: dict, collapse: str) -> Delivery:
+    async def send(self, token: str, data: dict, collapse: str, ttl_seconds: int) -> Delivery:
         self.attempts += 1
         if self.remaining > 0:
             self.remaining -= 1
@@ -564,3 +566,30 @@ async def test_an_alert_with_nobody_to_tell_waits_instead_of_spinning(api, sessi
     again = await _only_delivery(session)
     assert again.attempts == 0
     assert again.next_attempt_at == d.next_attempt_at
+
+
+async def test_each_signal_keeps_its_own_ttl_at_fcm(api, session, db_engine):
+    """FCM must not give up sooner than the server does.
+
+    One flat six-hour TTL went to every message, so `profile_stale` — which the
+    server keeps for a day — was dropped by FCM after six hours. The server had
+    already recorded it sent and would never retry, so a phone switched off
+    overnight simply never heard, and nothing anywhere recorded a loss.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    owner, caregiver, pid, mid, sid, did = await _with_watcher(api, session)
+    await push(api, owner, dose_events=[
+        dose(did, mid, pid, sid, "missed", at=ms() + 1000, planned=ms() - 3600_000)
+    ])
+    owner_device = await _owner_device(session, owner)
+    owner_device.last_seen_at = datetime.now(timezone.utc) - timedelta(hours=48)
+    await session.commit()
+
+    pusher = RecordingPush()
+    await scan_once(async_sessionmaker(db_engine, expire_on_commit=False), pusher)
+
+    ttl_of = {p["type"]: t for (_, p), t in zip(pusher.sent, pusher.ttl)}
+    assert ttl_of["dose_missed"] == int(alerts.TTL[AlertKind.dose_missed].total_seconds())
+    assert ttl_of["profile_stale"] == int(alerts.TTL[AlertKind.profile_stale].total_seconds())
+    assert ttl_of["profile_stale"] != ttl_of["dose_missed"], "one figure for both is the bug"

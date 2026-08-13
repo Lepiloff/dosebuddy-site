@@ -373,8 +373,14 @@ async def deliver(push, delivery: AlertDelivery, tokens: tuple[str, ...]) -> Del
     tokens are dead" decide what happens next, and a single retryable failure is
     enough to keep the alert alive.
     """
+    # The same TTL the server uses for this signal. If FCM's were shorter it
+    # would drop the message while the server still counted it delivered — a
+    # loss with no trace on either side.
+    ttl_seconds = int(TTL[delivery.kind].total_seconds())
     outcomes = [
-        await push.send(token, payload_for(delivery), collapse_key(delivery))
+        await push.send(
+            token, payload_for(delivery), collapse_key(delivery), ttl_seconds
+        )
         for token in tokens
     ]
     if Delivery.ok in outcomes:

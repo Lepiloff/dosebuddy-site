@@ -36,7 +36,9 @@ class Delivery(enum.Enum):
 
 
 class Push(Protocol):
-    async def send(self, token: str, data: dict[str, str], collapse: str) -> Delivery: ...
+    async def send(
+        self, token: str, data: dict[str, str], collapse: str, ttl_seconds: int
+    ) -> Delivery: ...
 
 
 class LoggingPush:
@@ -47,7 +49,9 @@ class LoggingPush:
     through the attempts of every alert raised before configuration.
     """
 
-    async def send(self, token: str, data: dict[str, str], collapse: str) -> Delivery:
+    async def send(
+        self, token: str, data: dict[str, str], collapse: str, ttl_seconds: int
+    ) -> Delivery:
         log.warning("push.not_configured", type=data.get("type"), token_suffix=token[-6:])
         return Delivery.retry
 
@@ -69,12 +73,13 @@ class FcmPush:
     content through Google for the sake of some text on a lock screen.
     """
 
-    def __init__(self, project_id: str, credentials_path: str, ttl_seconds: int = 21600):
+    def __init__(self, project_id: str, credentials_path: str):
         self._project_id = project_id
         self._credentials_path = credentials_path
-        self._ttl_seconds = ttl_seconds
 
-    async def send(self, token: str, data: dict[str, str], collapse: str) -> Delivery:
+    async def send(
+        self, token: str, data: dict[str, str], collapse: str, ttl_seconds: int
+    ) -> Delivery:
         creds = service_account.Credentials.from_service_account_file(
             self._credentials_path,
             scopes=["https://www.googleapis.com/auth/firebase.messaging"],
@@ -92,9 +97,15 @@ class FcmPush:
                 # and a caregiver woken twice learns to ignore the third time.
                 "collapse_key": collapse,
                 "priority": "high",
-                # FCM drops it rather than delivering something stale if the
-                # phone has been off longer than the alert stays useful.
-                "ttl": f"{self._ttl_seconds}s",
+                # How long FCM should hold it for a phone that is off, rather
+                # than delivering something stale. Per signal, not one figure
+                # for all: this was a flat six hours, so `profile_stale` — which
+                # is about a day — was dropped by FCM after six. The server had
+                # already recorded it sent and would never retry, so a phone off
+                # overnight simply never heard. Same number as the server's own
+                # TTL, and it has to stay that way: FCM giving up sooner is a
+                # loss the server cannot see.
+                "ttl": f"{ttl_seconds}s",
             },
         }
 
