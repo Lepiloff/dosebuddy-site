@@ -306,8 +306,13 @@ class SyncMixin:
 class Medication(Base, SyncMixin):
     __tablename__ = "medications"
 
+    # (key, server_seq), not two separate indexes: pull filters on the key and
+    # orders by the sequence in one go, and an index that serves only half of
+    # that leaves Postgres discarding rows or sorting them. See 0007.
+    __table_args__ = (Index("ix_medications_profile_id_server_seq", "profile_id", "server_seq"),)
+
     profile_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("profiles.id", ondelete="CASCADE"), index=True
+        ForeignKey("profiles.id", ondelete="CASCADE")
     )
     name: Mapped[str] = mapped_column(EncryptedString)
     notes: Mapped[str | None] = mapped_column(EncryptedString, nullable=True)
@@ -334,8 +339,12 @@ class Medication(Base, SyncMixin):
 class Schedule(Base, SyncMixin):
     __tablename__ = "schedules"
 
+    __table_args__ = (
+        Index("ix_schedules_medication_id_server_seq", "medication_id", "server_seq"),
+    )
+
     medication_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("medications.id", ondelete="CASCADE"), index=True
+        ForeignKey("medications.id", ondelete="CASCADE")
     )
     type: Mapped[str] = mapped_column(String(32))
 
@@ -356,6 +365,10 @@ class Schedule(Base, SyncMixin):
 class DoseEvent(Base, SyncMixin):
     __tablename__ = "dose_events"
 
+    __table_args__ = (
+        Index("ix_dose_events_profile_id_server_seq", "profile_id", "server_seq"),
+    )
+
     schedule_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("schedules.id", ondelete="SET NULL"), nullable=True
     )
@@ -363,7 +376,7 @@ class DoseEvent(Base, SyncMixin):
         ForeignKey("medications.id", ondelete="CASCADE"), index=True
     )
     profile_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("profiles.id", ondelete="CASCADE"), index=True
+        ForeignKey("profiles.id", ondelete="CASCADE")
     )
 
     planned_at_ms: Mapped[int] = mapped_column(BigInteger, index=True)
@@ -386,8 +399,12 @@ class DoseEvent(Base, SyncMixin):
 class StockEvent(Base, SyncMixin):
     __tablename__ = "stock_events"
 
+    __table_args__ = (
+        Index("ix_stock_events_medication_id_server_seq", "medication_id", "server_seq"),
+    )
+
     medication_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("medications.id", ondelete="CASCADE"), index=True
+        ForeignKey("medications.id", ondelete="CASCADE")
     )
     delta: Mapped[float] = mapped_column(Float)
     reason: Mapped[str] = mapped_column(String(32))

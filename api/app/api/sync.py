@@ -23,12 +23,17 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import cast as sa_cast
+from sqlalchemy import func, select
 from sqlalchemy import text as sql_text
+from sqlalchemy import true as sa_true
 from sqlalchemy import tuple_ as sa_tuple
+from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.api.deps import Caller, current_caller, get_session
 from app.api.schemas import Changes, Outcome, PullOut, PushIn, PushOut
@@ -439,6 +444,48 @@ def _project(entity: str, wire: dict[str, Any]) -> dict[str, Any] | None:
     return {k: v for k, v in wire.items() if k in allowed or k in ("updated_at", "deleted_at")}
 
 
+def page_query(model, key_column, ids, since: int):
+    """One ordered index range per key, merged — never a filtered scan.
+
+    The obvious spelling, `WHERE key IN (...) AND server_seq > :since ORDER BY
+    server_seq LIMIT n`, cannot walk an index on `(key, server_seq)` and keep the
+    ordering, so Postgres falls back to one of two bad plans and picks between
+    them on estimates. Measured on 745k dose events across 600 profiles:
+
+      - dense key: walks the `server_seq` index and discards. 11,920 rows thrown
+        away to return 500. The waste is proportional to how small a share of the
+        table the caller owns, so it grows with *other people's* data — the one
+        thing a tenant cannot do anything about.
+      - sparse key: reads every row the key has and then sorts. The LIMIT stops
+        nothing, so a caregiver's first pull materialises their whole history
+        before the first page can be returned.
+
+    Expanding the keys into a LATERAL takes the choice away. Every branch is an
+    ordered range scan on `(key, server_seq)` that stops at the limit, so the
+    work is bounded by keys × PAGE_SIZE and no longer depends on the size of the
+    table. Same 500 rows, 2.3 ms against 10.2 ms, and flat as the table grows.
+
+    Module level rather than a closure so that test_pull_plan.py can assert the
+    plan of the statement production actually runs, not of a copy of it.
+    """
+    wanted = func.unnest(sa_cast(list(ids), ARRAY(PgUUID(as_uuid=True)))).alias("wanted")
+    page = (
+        select(model)
+        .where(key_column == wanted.column, model.server_seq > since)
+        .order_by(model.server_seq)
+        .limit(PAGE_SIZE + 1)
+        .lateral("page")
+    )
+    row = aliased(model, page)
+    return (
+        select(row)
+        .select_from(wanted)
+        .join(page, sa_true())
+        .order_by(row.server_seq)
+        .limit(PAGE_SIZE + 1)
+    )
+
+
 @router.get("/sync/pull", response_model=PullOut)
 async def pull(
     cursor: str | None = Query(default=None),
@@ -463,12 +510,7 @@ async def pull(
         if not ids:
             return
         rows = (
-            await session.execute(
-                select(model)
-                .where(model.server_seq > since, profile_column.in_(ids))
-                .order_by(model.server_seq)
-                .limit(PAGE_SIZE + 1)
-            )
+            await session.execute(page_query(model, profile_column, ids, since))
         ).scalars()
         for r in rows:
             collected.append((r.server_seq, entity, r))
