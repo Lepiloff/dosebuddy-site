@@ -76,6 +76,19 @@ async def scan_once(sessionmaker, push: Push, now: datetime | None = None) -> in
                 # pushed forward, though: leaving next_attempt_at alone had the
                 # row picked up, locked and released on every pass for its whole
                 # TTL, which is several hundred times to learn the same thing.
+                #
+                # Said out loud, because staying quiet about it hid a real
+                # failure for two days: a caregiver whose device never
+                # registered a token looks, from every server-side view, exactly
+                # like a caregiver with nothing to be told. The alert sat here
+                # until it expired and nobody learned why the phone was silent.
+                log.warning(
+                    "alert.no_recipient",
+                    account_id=str(delivery.account_id),
+                    profile_id=str(delivery.profile_id),
+                    kind=delivery.kind.value,
+                    waiting_since=delivery.expires_at.isoformat(),
+                )
                 alerts.defer(delivery, now, alerts.NO_TOKEN_WAIT)
                 await session.commit()
                 continue
