@@ -1,0 +1,102 @@
+# A throwaway copy of the server, on a laptop.
+#
+#   cd deploy
+#   cp env.sandbox.example .env.sandbox
+#   docker compose -f docker-compose.sandbox.yml --env-file .env.sandbox up -d
+#   # the API is on http://<your-lan-ip>:8000/v1 — reachable from a phone
+#   docker compose -f docker-compose.sandbox.yml --env-file .env.sandbox down -v
+#
+# Separate from docker-compose.yml rather than an override of it, because the
+# two differ in the things that matter: no nginx, no certbot, no TLS, and the
+# API published directly. An override that quietly removed TLS from the real
+# file would be one flag away from doing it in production.
+#
+# `down -v` destroys the data. That is the point: this exists so that a test
+# which would be unwelcome against real data has somewhere to run.
+#
+# What this is NOT: it does not prove anything about production. Same images,
+# but no nginx in front, no real certificates, and a database that started
+# empty. It is for the tests you would not want to run against live data —
+# large pushes, deliberate conflicts, an account you intend to delete.
+
+name: dosebuddy-sandbox
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - sandbox-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ../api
+    image: dosebuddy-api:local
+    environment:
+      ENVIRONMENT: local
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      # On here, unlike production: the whole point of a sandbox is being able
+      # to see the surface you are testing against.
+      DOCS_ENABLED: "true"
+      LOG_LEVEL: DEBUG
+    # Published on every interface, so a phone on the same wifi can reach it.
+    # Acceptable here and nowhere else: this database holds nothing real.
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    command: >-
+      sh -c "alembic upgrade head &&
+             exec uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000"
+    # The worker waits on this, not merely on the container existing. The API
+    # migrates before it serves, so "answering" is the only reliable signal that
+    # the schema is there — and a worker that starts first spends its first
+    # minute logging that profile_memberships does not exist.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  worker:
+    image: dosebuddy-api:local
+    environment:
+      ENVIRONMENT: local
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      LOG_LEVEL: DEBUG
+      # Left empty deliberately: the alert loop then logs what it would have
+      # sent instead of sending it. Set both to test real delivery to a phone.
+      FCM_PROJECT_ID: ${FCM_PROJECT_ID:-}
+      FCM_CREDENTIALS_PATH: ${FCM_CREDENTIALS_PATH:-}
+    volumes:
+      - ./secrets:/run/secrets:ro
+    depends_on:
+      api: {condition: service_healthy}
+    command: ["python", "-m", "app.worker"]
+
+volumes:
+  sandbox-db:

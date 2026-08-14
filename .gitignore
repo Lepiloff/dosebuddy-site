@@ -23,3 +23,6 @@ __pycache__/
 
 # Local test venv. CI installs from requirements-dev.txt.
 api/.venv/
+
+# Sandbox env: throwaway values, but still generated per machine.
+deploy/.env.sandbox
