@@ -28,7 +28,16 @@ from app.core.security import (
     mint_sync_token,
     new_pairing_code,
 )
-from app.db.models import Device, PairingCode, Profile, ProfileMembership, Role, utcnow
+from app.db.models import (
+    Device,
+    DoseEvent,
+    Medication,
+    PairingCode,
+    Profile,
+    ProfileMembership,
+    Role,
+    utcnow,
+)
 
 router = APIRouter(tags=["pairing"])
 
@@ -79,6 +88,42 @@ async def _owned_profile(session: AsyncSession, caller: Caller, profile_id: uuid
         # which is enough to enumerate other people's.
         raise HTTPException(status.HTTP_404_NOT_FOUND, "profile_not_found")
     return profile
+
+
+async def _resend_profile(session: AsyncSession, profile_id: uuid.UUID) -> None:
+    """Put a profile's rows back at the head of the change feed.
+
+    Pull hands out changes newer than the caller's cursor, and the cursor is one
+    number covering every profile at once. So granting access to a profile whose
+    rows are all older than the new watcher's cursor delivered **nothing** — not
+    late, never. The membership was live, `roles` named the profile, and
+    `changes` came back empty, which from the device is indistinguishable from
+    "no changes". A caregiver added to someone who had been using the app for a
+    while — the ordinary way this happens — got an empty profile for ever.
+
+    Raising the sequence makes the grant look like what it is: rows this account
+    has not seen. Devices already watching the profile receive them again, which
+    costs them nothing — `updated_at` is untouched, so the upsert is a no-op.
+
+    Only the three entities a watcher can actually receive (see
+    `sync.WATCHER_FIELDS`). Schedules and stock events reach the owner alone, and
+    the owner has them already; bumping those would re-send rows nobody is
+    missing and make the owner's device recompute its alarms for nothing.
+
+    `nextval` per row rather than one value for all of them: the cursor after a
+    page is the largest sequence in it, so rows sharing a number that straddles
+    the page boundary would be skipped and never offered again.
+    """
+    for model, key in (
+        (Profile, Profile.id),
+        (Medication, Medication.profile_id),
+        (DoseEvent, DoseEvent.profile_id),
+    ):
+        await session.execute(
+            sa_update(model)
+            .where(key == profile_id)
+            .values(server_seq=text("nextval('server_seq')"))
+        )
 
 
 @router.post("/pairing/codes", response_model=IssuedCode)
@@ -162,7 +207,10 @@ async def redeem(
     ).scalar_one_or_none()
 
     if existing is not None:
-        # Re-pairing with a different role is a legitimate way to change it.
+        # Re-pairing with a different role is a legitimate way to change it. No
+        # resend: this account could already see the profile, so its devices
+        # have the rows. Every non-owner role sees the same fields — the role
+        # decides who gets alerted, not what crosses the wire.
         existing.role = code.role
     else:
         session.add(
@@ -170,6 +218,8 @@ async def redeem(
                 profile_id=profile.id, account_id=caller.account.id, role=code.role
             )
         )
+        # Visibility just widened, so the feed has to carry the profile again.
+        await _resend_profile(session, profile.id)
 
     code.redeemed_at = now
     code.redeemed_by_account_id = caller.account.id

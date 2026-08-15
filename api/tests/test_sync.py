@@ -124,6 +124,85 @@ async def test_the_cursor_only_returns_what_is_new(api):
     assert len(after["changes"]["medications"]) == 1
 
 
+async def test_a_profile_granted_after_the_cursor_moved_still_arrives(api):
+    """The ordinary order, and it delivered nothing at all.
+
+    A caregiver is added to someone who has been using the app for a while, so
+    the caregiver's device has already pulled and its cursor stands past every
+    row of the profile it is about to be given. Pull returns changes newer than
+    the cursor, and that cursor is one number for all profiles, so the grant
+    handed over an empty feed — for ever, not just late.
+
+    Found on the live run: `roles` named the profile, `changes` was empty, and
+    the device could not tell that from having nothing to do.
+    """
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+
+    # The caregiver has been using the app in their own right, so their cursor
+    # stands past the profile they are about to be given. Their *own* data is
+    # what moves it: a caregiver who can see nothing keeps a cursor of zero, and
+    # that is why pairing a brand-new account never showed this.
+    caregiver = await sign_in(api, f"cg-{uuid.uuid4()}")
+    await push(api, caregiver, profiles=[profile(str(uuid.uuid4()), "Their own")])
+    ahead = (await pull(api, caregiver))["cursor"]
+
+    code = (await api.post("/v1/pairing/codes", headers=auth_header(owner),
+                           json={"profile_id": pid, "role": "with_alerts"})).json()["code"]
+    await api.post("/v1/pairing/redeem", headers=auth_header(caregiver), json={"code": code})
+
+    got = await pull(api, caregiver, ahead)
+    assert {e["id"] for e in got["changes"]["profiles"]} == {pid}
+    assert {e["id"] for e in got["changes"]["medications"]} == {mid}
+    assert {e["id"] for e in got["changes"]["dose_events"]} == {did}
+    assert got["roles"][pid] == "with_alerts"
+
+
+async def test_regaining_access_after_a_revocation_delivers_the_profile_again(api):
+    """Revoke and re-pair, which acceptance does repeatedly.
+
+    The second membership is a new row, so the profile has to be re-offered —
+    and by then the caregiver's cursor is further ahead than it was the first
+    time.
+    """
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+    caregiver = await _pair(api, owner, pid)
+
+    first = await pull(api, caregiver)
+    assert {e["id"] for e in first["changes"]["profiles"]} == {pid}
+
+    members = (await api.get(f"/v1/profiles/{pid}/members",
+                             headers=auth_header(owner))).json()
+    await api.delete(f"/v1/profiles/{pid}/members/{members[0]['account_id']}",
+                     headers=auth_header(owner))
+    assert (await pull(api, caregiver, first["cursor"]))["roles"] == {}
+
+    code = (await api.post("/v1/pairing/codes", headers=auth_header(owner),
+                           json={"profile_id": pid, "role": "with_alerts"})).json()["code"]
+    await api.post("/v1/pairing/redeem", headers=auth_header(caregiver), json={"code": code})
+
+    again = await pull(api, caregiver, first["cursor"])
+    assert {e["id"] for e in again["changes"]["profiles"]} == {pid}
+    assert {e["id"] for e in again["changes"]["dose_events"]} == {did}
+
+
+async def test_resending_a_profile_leaves_the_owner_schedules_alone(api):
+    """The resend covers what a watcher can receive, and stops there.
+
+    Schedules and stock events reach only the owner, who is not missing them.
+    Bumping those would re-send rows nobody needs and make the owner's device
+    recompute its alarms for nothing — the app track measured that cost.
+    """
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+    caught_up = (await pull(api, owner))["cursor"]
+
+    await _pair(api, owner, pid)
+
+    after = await pull(api, owner, caught_up)
+    assert {e["id"] for e in after["changes"]["profiles"]} == {pid}
+    assert "schedules" not in after["changes"]
+    assert "stock_events" not in after["changes"]
+
+
 async def test_a_watcher_never_receives_schedules(api):
     """The load-bearing test in this file.
 
