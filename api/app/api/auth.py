@@ -191,16 +191,46 @@ async def refresh(
 async def logout(
     caller: Caller = Depends(current_caller), session: AsyncSession = Depends(get_session)
 ) -> None:
+    """Signing out has to reach every credential the device holds.
+
+    It used to revoke refresh tokens and stop there, which left two others
+    working:
+
+    - the **push token**, so a signed-out phone went on receiving alerts about
+      someone's doses. Article 9 data, arriving at a device whose user has
+      deliberately left the account.
+    - the **sync token**, which lives ninety days and does not rotate. Wiping the
+      app's copy is not revocation; a copy taken beforehand kept full read access
+      to the account for the rest of its life.
+
+    The second one had no revocation path at all. `deps` refuses a device whose
+    `revoked_at` is set — a check `security.SYNC_TOKEN_TTL` describes as the
+    whole reason a long-lived token is safe to hand out — and **nothing in the
+    codebase ever set it**. The mechanism existed; nothing pulled the lever.
+
+    Setting it here is what makes that comment true. Signing in again clears it
+    (see `sign_in_with_google`), so this locks nobody out of their own account.
+    """
     await session.execute(
         update(RefreshToken)
         .where(RefreshToken.device_id == caller.device_id, RefreshToken.revoked_at.is_(None))
         .values(revoked_at=utcnow())
     )
+
+    device = await session.get(Device, caller.device_id)
+    if device is not None:
+        # Cleared as well as revoked. Revoking alone would stop the alerts,
+        # since the alert query skips revoked devices, but it would leave a
+        # token in the row that FCM has already forgotten — and the row is what
+        # someone reads when asking why a phone is silent.
+        device.push_token = None
+        device.revoked_at = utcnow()
+
     await session.commit()
     # The access token lives out its remaining minutes. Checking a revocation
     # list on every request would cost a query per call to save a few minutes on
-    # a deliberate sign-out; unlinking a device, which is the case that matters,
-    # is checked per request in deps.current_caller.
+    # a deliberate sign-out — and the device check above already closes the
+    # window for the credentials that outlive it.
 
 
 @router.delete("/account", status_code=status.HTTP_204_NO_CONTENT)

@@ -359,3 +359,81 @@ async def test_a_sync_token_is_refused_for_another_account_device(api, session):
         f"/v1/devices/{their_device.id}/sync-token", headers=auth_header(mine)
     )
     assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# What signing out has to reach
+# ---------------------------------------------------------------------------
+
+
+async def test_signing_out_kills_the_sync_token(api, session):
+    """Wiping the app's copy is not revocation.
+
+    The sync token lives ninety days and does not rotate, so a copy taken before
+    someone signed out kept full read access to their account for the rest of
+    its life. The check that refuses it exists in `deps`; until this, nothing in
+    the codebase ever set the flag it reads.
+    """
+    pair = await sign_in(api, f"out-{uuid.uuid4()}")
+    token = await _sync_token(api, session, pair)
+    header = {"Authorization": f"Bearer {token}"}
+
+    assert (await api.get("/v1/sync/pull", headers=header)).status_code == 200
+
+    assert (await api.post("/v1/auth/logout", headers=auth_header(pair))).status_code == 204
+
+    r = await api.get("/v1/sync/pull", headers=header)
+    assert r.status_code == 401
+    assert r.json()["error"]["code"] == "device_revoked"
+
+
+async def test_signing_out_stops_the_alerts(api, session):
+    """A signed-out phone went on receiving alerts about someone's doses.
+
+    Article 9 data arriving at a device whose user deliberately left the
+    account. The app can decline to show it, and now does, but the server had no
+    business sending it.
+    """
+    from sqlalchemy import select as sa_select
+
+    from app.db.models import Device
+
+    pair = await sign_in(api, f"push-{uuid.uuid4()}")
+    device = (
+        await session.execute(
+            sa_select(Device).where(Device.account_id == uuid.UUID(pair["account_id"]))
+        )
+    ).scalars().first()
+    await api.put(f"/v1/devices/{device.id}/push-token",
+                  headers=auth_header(pair), json={"fcm_token": "a-live-token"})
+
+    await api.post("/v1/auth/logout", headers=auth_header(pair))
+
+    await session.refresh(device)
+    assert device.push_token is None
+    assert device.revoked_at is not None
+
+
+async def test_signing_back_in_restores_the_device(api, session):
+    """Revoking on sign-out must not lock anyone out of their own account."""
+    from sqlalchemy import select as sa_select
+
+    from app.db.models import Device
+
+    subject = f"back-{uuid.uuid4()}"
+    pair = await sign_in(api, subject)
+    device_id = (
+        await session.execute(
+            sa_select(Device.id).where(Device.account_id == uuid.UUID(pair["account_id"]))
+        )
+    ).scalars().first()
+    await api.post("/v1/auth/logout", headers=auth_header(pair))
+
+    token = f"google-token-{subject}"
+    api.app.state.google_verifier.add(token, subject, None)
+    r = await api.post("/v1/auth/google", json={
+        "id_token": token,
+        "device": {"id": str(device_id), "platform": "android", "app_version": "1.1.0"},
+    })
+    assert r.status_code == 200, r.text
+    assert (await api.get("/v1/sync/pull", headers=auth_header(r.json()))).status_code == 200
