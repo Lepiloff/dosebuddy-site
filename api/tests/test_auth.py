@@ -6,6 +6,7 @@ unlinked.
 """
 
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 from sqlalchemy import select, text
@@ -228,3 +229,133 @@ async def test_a_token_never_reaches_the_log():
     cleaned = redact(f"Token has wrong audience {jwt}, expected other")
     assert jwt not in cleaned
     assert "<token>" in cleaned
+
+
+# ---------------------------------------------------------------------------
+# The background sync token
+# ---------------------------------------------------------------------------
+
+
+async def _sync_token(api, session, pair) -> str:
+    """Issue one the way the app does: from the foreground, with a full token."""
+    from sqlalchemy import select as sa_select
+
+    from app.db.models import Device
+
+    device = (
+        await session.execute(
+            sa_select(Device).where(Device.account_id == uuid.UUID(pair["account_id"]))
+        )
+    ).scalars().first()
+    r = await api.post(
+        f"/v1/devices/{device.id}/sync-token", headers=auth_header(pair)
+    )
+    assert r.status_code == 200, r.text
+    return r.json()["sync_token"]
+
+
+async def test_a_sync_token_can_sync(api, session):
+    """The whole reason it exists: the background half of the app can send.
+
+    Confirmations from a notification and doses that lapsed while their owner
+    slept used to sit on the phone until somebody opened the app, because the
+    background worker had no credential it could safely use.
+    """
+    pair = await sign_in(api, f"owner-{uuid.uuid4()}")
+    token = await _sync_token(api, session, pair)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    assert (await api.get("/v1/sync/pull", headers=headers)).status_code == 200
+    assert (
+        await api.post("/v1/sync/push", headers=headers, json={"changes": {}})
+    ).status_code == 200
+
+
+async def test_a_sync_token_can_do_nothing_else(api, session):
+    """The line the whole design rests on.
+
+    It is held for ninety days and never rotates, so it has to be worth little
+    if copied. Reaching any of these would make a leaked token into somebody
+    else's phone ringing — or into nobody's.
+    """
+    pair = await sign_in(api, f"owner-{uuid.uuid4()}")
+    token = await _sync_token(api, session, pair)
+    headers = {"Authorization": f"Bearer {token}"}
+    some_id = str(uuid.uuid4())
+
+    forbidden = [
+        ("post", "/v1/pairing/codes", {"profile_id": some_id, "role": "viewer"}),
+        ("post", "/v1/pairing/redeem", {"code": "AAA-BBB"}),
+        ("post", f"/v1/profiles/{some_id}/reminder-authority", {"device_id": some_id}),
+        ("get", f"/v1/profiles/{some_id}/members", None),
+        ("delete", f"/v1/profiles/{some_id}/members/{some_id}", None),
+        ("put", f"/v1/devices/{some_id}/push-token", {"fcm_token": "x"}),
+        ("post", f"/v1/devices/{some_id}/heartbeat", None),
+        ("delete", "/v1/account", None),
+        # Above all: it must not be able to mint another one.
+        ("post", f"/v1/devices/{some_id}/sync-token", None),
+    ]
+
+    for method, path, body in forbidden:
+        call = getattr(api, method)
+        r = await call(path, headers=headers, json=body) if body else await call(
+            path, headers=headers
+        )
+        assert r.status_code == 403, f"{method.upper()} {path} answered {r.status_code}"
+        assert r.json()["error"]["code"] == "token_scope_insufficient"
+
+
+async def test_unlinking_the_device_kills_the_sync_token_at_once(api, session):
+    """Ninety days of life, revocable the moment the device is unlinked.
+
+    This is what makes a long-lived signed token acceptable without storing it:
+    the device row is re-read on every request, so revocation needs no list of
+    outstanding tokens to hunt through.
+    """
+    from sqlalchemy import select as sa_select
+
+    from app.db.models import Device
+
+    pair = await sign_in(api, f"owner-{uuid.uuid4()}")
+    token = await _sync_token(api, session, pair)
+    headers = {"Authorization": f"Bearer {token}"}
+    assert (await api.get("/v1/sync/pull", headers=headers)).status_code == 200
+
+    device = (
+        await session.execute(
+            sa_select(Device).where(Device.account_id == uuid.UUID(pair["account_id"]))
+        )
+    ).scalars().first()
+    device.revoked_at = datetime.now(timezone.utc)
+    await session.commit()
+
+    r = await api.get("/v1/sync/pull", headers=headers)
+    assert r.status_code == 401
+    assert r.json()["error"]["code"] == "device_revoked"
+
+
+async def test_an_ordinary_token_still_syncs(api, session):
+    """The foreground has no reason to hold a second credential to do what it
+    was already doing."""
+    pair = await sign_in(api, f"owner-{uuid.uuid4()}")
+    assert (await api.get("/v1/sync/pull", headers=auth_header(pair))).status_code == 200
+
+
+async def test_a_sync_token_is_refused_for_another_account_device(api, session):
+    """Asking for a token against somebody else's device is a 404, not a token."""
+    from sqlalchemy import select as sa_select
+
+    from app.db.models import Device
+
+    mine = await sign_in(api, f"owner-{uuid.uuid4()}")
+    theirs = await sign_in(api, f"other-{uuid.uuid4()}")
+    their_device = (
+        await session.execute(
+            sa_select(Device).where(Device.account_id == uuid.UUID(theirs["account_id"]))
+        )
+    ).scalars().first()
+
+    r = await api.post(
+        f"/v1/devices/{their_device.id}/sync-token", headers=auth_header(mine)
+    )
+    assert r.status_code == 404

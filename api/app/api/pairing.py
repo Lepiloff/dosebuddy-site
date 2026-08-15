@@ -22,7 +22,12 @@ from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import Caller, current_caller, get_session
-from app.core.security import PAIRING_CODE_TTL, hash_pairing_code, new_pairing_code
+from app.core.security import (
+    PAIRING_CODE_TTL,
+    hash_pairing_code,
+    mint_sync_token,
+    new_pairing_code,
+)
 from app.db.models import Device, PairingCode, Profile, ProfileMembership, Role, utcnow
 
 router = APIRouter(tags=["pairing"])
@@ -234,6 +239,42 @@ async def set_push_token(
     device.push_token = body.fcm_token
     device.last_seen_at = utcnow()
     await session.commit()
+
+
+class SyncToken(BaseModel):
+    sync_token: str
+    expires_in: int
+
+
+@router.post("/devices/{device_id}/sync-token", response_model=SyncToken)
+async def issue_sync_token(
+    device_id: uuid.UUID,
+    request: Request,
+    caller: Caller = Depends(current_caller),
+    session: AsyncSession = Depends(get_session),
+) -> SyncToken:
+    """A credential the device's background worker may hold and reuse.
+
+    Issued from the foreground, where an ordinary access token is available, and
+    then kept in the Keystore beside the refresh token. It grants sync and
+    nothing else, and it does not rotate — which is the point, because rotation
+    is what stopped the background half of the app from using the network at all
+    (see core.security.SYNC_TOKEN_TTL).
+
+    Deliberately reissuable rather than one-per-device: the app asks whenever it
+    is open and near expiry, and the old one keeps working until it expires. A
+    device that has not been opened for months is the case this whole mechanism
+    exists for, so a token that could be invalidated by asking for another would
+    reintroduce the gap it closes.
+    """
+    device = await session.get(Device, device_id)
+    if device is None or device.account_id != caller.account.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "device_not_found")
+
+    token, expires_in = mint_sync_token(
+        request.app.state.settings.jwt_secret, caller.account.id, device.id
+    )
+    return SyncToken(sync_token=token, expires_in=expires_in)
 
 
 @router.post("/devices/{device_id}/heartbeat", status_code=status.HTTP_204_NO_CONTENT)

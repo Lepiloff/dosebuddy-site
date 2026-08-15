@@ -36,7 +36,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from app.api.deps import Caller, current_caller, get_session
+from app.api.deps import Caller, get_session, sync_caller
 from app.api.schemas import Changes, Outcome, PullOut, PushIn, PushOut
 from app.db.models import (
     SERVER_SEQ,
@@ -178,7 +178,7 @@ def _sync_values(row, device_id: uuid.UUID) -> dict[str, Any]:
 @router.post("/sync/push", response_model=PushOut)
 async def push(
     body: PushIn,
-    caller: Caller = Depends(current_caller),
+    caller: Caller = Depends(sync_caller),
     session: AsyncSession = Depends(get_session),
 ) -> PushOut:
     changes: Changes = body.changes
@@ -505,7 +505,7 @@ def feed_query(plan, since: int):
 @router.get("/sync/pull", response_model=PullOut)
 async def pull(
     cursor: str | None = Query(default=None),
-    caller: Caller = Depends(current_caller),
+    caller: Caller = Depends(sync_caller),
     session: AsyncSession = Depends(get_session),
 ) -> PullOut:
     since = decode_cursor(cursor)
