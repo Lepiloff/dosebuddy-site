@@ -211,9 +211,16 @@ async def test_redeeming_again_repairs_a_device_that_missed_the_profile(api):
 async def test_resending_a_profile_leaves_the_owner_schedules_alone(api):
     """The resend covers what a watcher can receive, and stops there.
 
-    Schedules and stock events reach only the owner, who is not missing them.
-    Bumping those would re-send rows nobody needs and make the owner's device
-    recompute its alarms for nothing — the app track measured that cost.
+    Schedules and stock events reach only the owner, who is not missing them, so
+    bumping those would re-send rows nobody needs.
+
+    **What this proves and what it does not.** It proves no schedule or stock row
+    moves. It does not prove the owner's device does nothing: the three rows that
+    do come back — the profile and its two medications — still cross the wire,
+    and the app track measured their device's materialisation counter moving 76
+    to 79 because of them. One recompute, with nothing for the diff to change.
+    The saving is that the cost is a third of what it would have been and no
+    alarm is touched, not that there is no cost.
     """
     owner, pid, mid, sid, did = await _owner_with_data(api)
     caught_up = (await pull(api, owner))["cursor"]
