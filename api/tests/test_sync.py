@@ -185,6 +185,29 @@ async def test_regaining_access_after_a_revocation_delivers_the_profile_again(ap
     assert {e["id"] for e in again["changes"]["dose_events"]} == {did}
 
 
+async def test_redeeming_again_repairs_a_device_that_missed_the_profile(api):
+    """The only lever a person has when their phone shows an empty profile.
+
+    "This account may see the profile" and "this account's devices have the
+    rows" can diverge — that divergence is the bug being repaired here, and it
+    left one live membership in production whose device had nothing. Re-pairing
+    has to fix it, or such an account stays broken for ever: the membership is
+    already live, so nothing about it is going to change again on its own.
+    """
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+    caregiver = await _pair(api, owner, pid)
+    caught_up = (await pull(api, caregiver))["cursor"]
+    assert (await pull(api, caregiver, caught_up))["changes"] == {}
+
+    code = (await api.post("/v1/pairing/codes", headers=auth_header(owner),
+                           json={"profile_id": pid, "role": "with_alerts"})).json()["code"]
+    await api.post("/v1/pairing/redeem", headers=auth_header(caregiver), json={"code": code})
+
+    again = await pull(api, caregiver, caught_up)
+    assert {e["id"] for e in again["changes"]["profiles"]} == {pid}
+    assert {e["id"] for e in again["changes"]["dose_events"]} == {did}
+
+
 async def test_resending_a_profile_leaves_the_owner_schedules_alone(api):
     """The resend covers what a watcher can receive, and stops there.
 

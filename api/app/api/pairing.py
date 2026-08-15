@@ -207,10 +207,7 @@ async def redeem(
     ).scalar_one_or_none()
 
     if existing is not None:
-        # Re-pairing with a different role is a legitimate way to change it. No
-        # resend: this account could already see the profile, so its devices
-        # have the rows. Every non-owner role sees the same fields — the role
-        # decides who gets alerted, not what crosses the wire.
+        # Re-pairing with a different role is a legitimate way to change it.
         existing.role = code.role
     else:
         session.add(
@@ -218,8 +215,17 @@ async def redeem(
                 profile_id=profile.id, account_id=caller.account.id, role=code.role
             )
         )
-        # Visibility just widened, so the feed has to carry the profile again.
-        await _resend_profile(session, profile.id)
+
+    # Both paths, not only the new membership. "This account may see the profile"
+    # and "this account's devices have the rows" are separate facts, and them
+    # diverging is the whole bug — which leaves an account that is already a live
+    # member with a device that will never be sent anything, and nothing about
+    # that membership is going to change again on its own. Redeeming again is
+    # then the only lever a person has, so it has to work.
+    #
+    # Rare, deliberate and idempotent, so doing it on every redeem costs nothing
+    # against being unable to repair a phone showing an empty profile.
+    await _resend_profile(session, profile.id)
 
     code.redeemed_at = now
     code.redeemed_by_account_id = caller.account.id
