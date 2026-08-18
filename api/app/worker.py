@@ -68,6 +68,35 @@ async def scan_once(sessionmaker, push: Push, now: datetime | None = None) -> in
                 # Another worker has it, or has already finished with it.
                 continue
 
+            if delivery.kind is alerts.AlertKind.reminder_authority_lost:
+                # A different shape of question, so a different path rather than
+                # the alert path with exceptions bolted on: one named device
+                # instead of an account, and a payload built from the world as
+                # it is now instead of the row as it was queued.
+                resolved = await alerts.resolve_nudge(session, delivery, now)
+                if resolved is alerts.NoNudge.moot:
+                    # Authority came back, or there is nothing left to arm.
+                    # Retired, not retried — and separately from a failure,
+                    # because "the nudge never arrived" and "the nudge stopped
+                    # being true" are different answers and only one is a fault.
+                    delivery.state = alerts.AlertState.expired.value
+                    await session.commit()
+                    continue
+                if resolved is alerts.NoNudge.no_token:
+                    log.info(
+                        "nudge.no_token",
+                        profile_id=str(delivery.profile_id),
+                        device_id=str(delivery.device_id),
+                    )
+                    alerts.defer(delivery, now, alerts.NO_TOKEN_WAIT)
+                    await session.commit()
+                    continue
+
+                outcome = await alerts.deliver_nudge(push, delivery, resolved)
+                alerts.record(delivery, outcome, now)
+                await session.commit()
+                continue
+
             tokens = by_account.get(delivery.account_id, ())
             if not tokens:
                 # Nobody to tell right now. Not a failure of this attempt — the

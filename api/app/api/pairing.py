@@ -13,7 +13,7 @@ become usable once sync lands.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
@@ -22,6 +22,7 @@ from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import Caller, current_caller, get_session
+from app.services import alerts
 from app.core.security import (
     PAIRING_CODE_TTL,
     hash_pairing_code,
@@ -44,12 +45,6 @@ router = APIRouter(tags=["pairing"])
 # A six-character code is ~10^9 possibilities, which is plenty against online
 # guessing but nothing against an unthrottled loop.
 MAX_REDEEM_ATTEMPTS_PER_HOUR = 10
-
-# How long the authority nudge is worth delivering. One value, used for both the
-# FCM ttl and the `expires_at` in the payload, because the two answer the same
-# question from opposite ends: FCM stops trying, and a message that arrives
-# anyway names the moment it stopped being true.
-NUDGE_TTL = 3600
 
 
 class IssueCodeIn(BaseModel):
@@ -420,37 +415,30 @@ async def set_reminder_authority(
 
     if previous is not None:
         old = await session.get(Device, previous)
-        if old is not None and old.push_token and old.revoked_at is None:
-            # Not retried and not recorded, unlike an alert. This only nudges a
-            # device to stop ringing sooner than its next sync would tell it, so
-            # losing the nudge costs one duplicate reminder, not a missed dose.
+        if old is not None and old.revoked_at is None:
+            # Queued for the worker, not sent from here, and that is the whole
+            # of the fix. This process has no FCM credentials — the compose file
+            # gives them to the worker alone, deliberately, so the key stays out
+            # of the process facing the internet — which meant every nudge sent
+            # from here went to a log file instead of a phone, silently, from
+            # the first day. `push.not_configured`, observed live 2026-08-15.
             #
-            # Every value is a string on purpose. FCM's `data` is
-            # map<string,string>, so the wire type is not ours to choose; naming
-            # it here keeps the sending side honest about what the other end
-            # actually receives.
-            await request.app.state.push.send(
-                old.push_token,
-                {
-                    "type": "reminder_authority_lost",
-                    "profile_id": str(profile.id),
-                    # Who holds it now. Enough for the receiver to tell "you
-                    # lost it" from "you are being told about someone else".
-                    "owner_device_id": str(device.id),
-                    # The profile's server_seq at the moment of the handover.
-                    # The same number reaches the device on its next pull, which
-                    # is what lets it drop a nudge older than what it already
-                    # knows — a retried nudge can otherwise describe a handover
-                    # that has since been undone.
-                    "revision": str(revision),
-                    "expires_at": (
-                        utcnow() + timedelta(seconds=NUDGE_TTL)
-                    ).isoformat().replace("+00:00", "Z"),
-                },
-                f"reminder_authority_lost:{profile.id}",
-                # An hour, matching `expires_at`. The next pull tells the device
-                # the same thing from the data, and now says it with the same
-                # revision, so a late nudge is genuinely redundant rather than
-                # merely assumed to be.
-                NUDGE_TTL,
+            # The queue also brings what a bare send never had: retries, a
+            # collapse key, a TTL, and a row afterwards recording whether it
+            # went. That last one is the question acceptance asked and the
+            # server could not answer.
+            #
+            # No push token is required to queue it. The worker resolves the
+            # token when it sends, so a device that registers one within the
+            # hour is still told — where the old code simply skipped it.
+            await alerts.claim(
+                session,
+                alerts.authority_lost(
+                    account_id=caller.account.id,
+                    profile_id=profile.id,
+                    device_id=old.id,
+                    revision=revision,
+                ),
+                utcnow(),
             )
+            await session.commit()

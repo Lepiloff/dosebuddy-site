@@ -451,6 +451,17 @@ class AlertKind(str, enum.Enum):
     dose_missed = "dose_missed"
     profile_stale = "profile_stale"
 
+    # Not a warning to a caregiver at all: a nudge to one of the owner's own
+    # devices that it no longer arms the alarms for a profile. It rides here for
+    # what the table already provides — retries, backoff, a collapse key, a TTL,
+    # and a row afterwards saying whether it went. It also keeps the FCM key in
+    # the worker, which is the only process that has it.
+    #
+    # Two things about it differ from the alerts, and both are load-bearing:
+    # it names a single device rather than an account, and its payload is built
+    # at send time rather than stored. See services/alerts.resolve_nudge.
+    reminder_authority_lost = "reminder_authority_lost"
+
 
 class AlertState(str, enum.Enum):
     """Where an alert has got to.
@@ -513,6 +524,20 @@ class AlertDelivery(Base):
         ForeignKey("profiles.id", ondelete="CASCADE"), index=True
     )
     kind: Mapped[AlertKind] = mapped_column(Enum(AlertKind, name="alert_kind"))
+
+    # Which device to tell, when the answer is not "every device the account
+    # has". Null for the two caregiver alerts, and it must stay null for them:
+    # reaching either of someone's two phones is telling them, and narrowing
+    # that to one device would lose alerts to a phone left at home.
+    #
+    # Set only for `reminder_authority_lost`, where the opposite holds. The
+    # message concerns exactly one device, and sending it to the whole account
+    # would deliver "you no longer ring for this profile" to the device that
+    # now does — correct only because the receiver would throw it away, which
+    # is a guarantee borrowed from the other side of the wire.
+    device_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("devices.id", ondelete="CASCADE"), nullable=True
+    )
 
     # The dose for dose_missed; for profile_stale, the window it belongs to, so
     # a device offline for a week produces one alert a day rather than one every

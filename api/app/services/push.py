@@ -136,8 +136,12 @@ class FcmPush:
 def build_push(settings) -> Push:
     """One place that decides which sender is in use.
 
-    Lives here rather than in the worker because the API sends too: handing
-    reminder authority to another device nudges the previous one to stop.
+    Called by the worker, and only by the worker. It used to say it lived here
+    because the API sends too — the authority nudge — and that was the shape of
+    a real defect rather than a stale comment: the API had a sender and no
+    credentials, so `build_push` handed it the logging stand-in and every nudge
+    was written to a file. The nudge is now queued for the worker instead
+    (`services/alerts.resolve_nudge`), and the API has no sender at all.
     """
     if settings.fcm_project_id and settings.fcm_credentials_path:
         return FcmPush(settings.fcm_project_id, settings.fcm_credentials_path)

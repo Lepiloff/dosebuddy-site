@@ -6,13 +6,20 @@ guessing ids.
 """
 
 import uuid
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import pytest
 from sqlalchemy import select
 
-from app.api.pairing import NUDGE_TTL
-from app.db.models import PairingCode, ProfileMembership, utcnow
+from app.db.models import (
+    AlertDelivery,
+    AlertKind,
+    AlertState,
+    PairingCode,
+    Profile,
+    ProfileMembership,
+    utcnow,
+)
 from tests.conftest import auth_header, make_profile, sign_in
 
 pytestmark = pytest.mark.asyncio
@@ -241,85 +248,74 @@ async def _two_devices(api, session):
     return owner, profile_id, devices[0], devices[1]
 
 
-async def test_the_authority_nudge_carries_what_the_receiver_checks(api, session):
-    """Every field the receiving device reads has to actually be sent.
+async def test_the_handover_queues_a_nudge_for_the_losing_device(api, session):
+    """The API queues; it does not send.
 
-    Its guard drops a nudge that names the receiver itself as the new owner, one
-    whose revision is not strictly newer, and one that has expired. All three
-    were written and covered by tests on the device, and all three were dead:
-    the payload was `type` and `profile_id` and nothing else, so the checks read
-    absent fields on the rare occasions a nudge was sent at all.
+    It has no FCM credentials and must not be given any — the compose file hands
+    them to the worker alone, because that process does not answer requests from
+    the internet. Sending from here is what made every nudge for months land in
+    a log file instead of a phone.
     """
-    from tests.test_alerts import RecordingPush
-
     owner, profile_id, losing, winning = await _two_devices(api, session)
 
     await api.post(f"/v1/profiles/{profile_id}/reminder-authority",
                    headers=auth_header(owner), json={"device_id": str(losing.id)})
-
-    pusher = RecordingPush()
-    api.app.state.push = pusher
-
     r = await api.post(f"/v1/profiles/{profile_id}/reminder-authority",
                        headers=auth_header(owner), json={"device_id": str(winning.id)})
     assert r.status_code == 204
 
-    assert len(pusher.sent) == 1
-    token, data = pusher.sent[0]
-    assert token == "token-losing-device"
-    assert data["type"] == "reminder_authority_lost"
-    assert data["profile_id"] == str(profile_id)
-    assert data["owner_device_id"] == str(winning.id)
-    assert int(data["revision"]) > 0
+    row = (await session.execute(
+        select(AlertDelivery).where(AlertDelivery.kind == AlertKind.reminder_authority_lost)
+    )).scalars().one()
 
-    # FCM's `data` is map<string,string>: a value sent as an int arrives as a
-    # string anyway. Asserting it here means the sending side says what the
-    # receiving side will see, rather than what Python happened to hold.
-    assert all(isinstance(v, str) for v in data.values()), data
+    assert row.device_id == losing.id, "the nudge concerns exactly one device"
+    assert row.profile_id == profile_id
+    assert row.state == AlertState.pending.value
+    assert row.attempts == 0
 
-    expires = datetime.fromisoformat(data["expires_at"].replace("Z", "+00:00"))
-    assert expires.tzinfo is not None, "a naive timestamp is not a moment in time"
-    # Level with the TTL handed to FCM, because they answer the same question
-    # from opposite ends.
-    assert pusher.ttl == [NUDGE_TTL]
-    assert abs((expires - utcnow()).total_seconds() - NUDGE_TTL) < 60
+    profile = await session.get(Profile, profile_id)
+    assert row.subject_id == str(profile.server_seq), (
+        "the revision is the subject, so two handovers are two rows rather than "
+        "one deduplicated away"
+    )
+    assert timedelta(minutes=55) < row.expires_at - utcnow() < timedelta(minutes=65)
 
 
-async def test_the_nudge_names_the_winner_not_the_loser(api, session):
-    """The receiver drops a nudge that names the receiver as the new owner —
-    that shape means "someone else lost it", not "you did". Sending the losing
-    device's own id would have every nudge correctly discarded."""
-    from tests.test_alerts import RecordingPush
+async def test_claiming_authority_for_the_first_time_queues_nothing(api, session):
+    """There is no previous holder to tell."""
+    owner, profile_id, losing, _winning = await _two_devices(api, session)
 
-    owner, profile_id, losing, winning = await _two_devices(api, session)
-    await api.post(f"/v1/profiles/{profile_id}/reminder-authority",
-                   headers=auth_header(owner), json={"device_id": str(losing.id)})
-
-    pusher = RecordingPush()
-    api.app.state.push = pusher
-    await api.post(f"/v1/profiles/{profile_id}/reminder-authority",
-                   headers=auth_header(owner), json={"device_id": str(winning.id)})
-
-    _token, data = pusher.sent[0]
-    assert data["owner_device_id"] != str(losing.id)
+    r = await api.post(f"/v1/profiles/{profile_id}/reminder-authority",
+                       headers=auth_header(owner), json={"device_id": str(losing.id)})
+    assert r.status_code == 204
+    assert (await session.execute(select(AlertDelivery))).scalars().all() == []
 
 
-async def test_a_handover_to_a_device_with_no_token_sends_nothing(api, session):
-    """Not an error. The device simply cannot be reached, and the pull still
-    tells it the truth."""
-    from tests.test_alerts import RecordingPush
+async def test_the_api_has_no_push_sender_at_all(api):
+    """Structural, not behavioural, and that is the point.
 
+    Asserting that a recorder saw nothing would pass just as well if the sender
+    were still wired up and merely happened not to fire on this path. There is
+    no sender: the FCM credential belongs to the worker, and an API that cannot
+    send cannot quietly start sending again.
+    """
+    assert not hasattr(api.app.state, "push")
+
+
+async def test_a_losing_device_with_no_token_is_still_queued(api, session):
+    """It used to be skipped outright, which threw away the nudge for a phone
+    that registers a token a minute later. The worker resolves the token when it
+    sends, so the hour the row lives is an hour the device can turn up in."""
     owner, profile_id, losing, winning = await _two_devices(api, session)
     losing.push_token = None
     await session.commit()
 
     await api.post(f"/v1/profiles/{profile_id}/reminder-authority",
                    headers=auth_header(owner), json={"device_id": str(losing.id)})
+    await api.post(f"/v1/profiles/{profile_id}/reminder-authority",
+                   headers=auth_header(owner), json={"device_id": str(winning.id)})
 
-    pusher = RecordingPush()
-    api.app.state.push = pusher
-    r = await api.post(f"/v1/profiles/{profile_id}/reminder-authority",
-                       headers=auth_header(owner), json={"device_id": str(winning.id)})
-
-    assert r.status_code == 204
-    assert pusher.sent == []
+    row = (await session.execute(
+        select(AlertDelivery).where(AlertDelivery.kind == AlertKind.reminder_authority_lost)
+    )).scalars().one()
+    assert row.device_id == losing.id

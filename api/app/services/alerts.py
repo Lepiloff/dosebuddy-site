@@ -13,6 +13,7 @@ the phone is off — the case most worth catching.
 
 from __future__ import annotations
 
+import enum
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -53,14 +54,17 @@ class Alert:
     profile_id: uuid.UUID
     kind: AlertKind
     subject_id: str
-    push_tokens: tuple[str, ...]
 
-    def payload(self) -> dict[str, str]:
-        return {
-            "type": self.kind.value,
-            "profile_id": str(self.profile_id),
-            "subject_id": self.subject_id,
-        }
+    # Only for `reminder_authority_lost`, which concerns one device rather than
+    # an account. Null for the caregiver alerts, and see the column comment for
+    # why that must stay so.
+    device_id: uuid.UUID | None = None
+
+    # It used to carry `push_tokens` and a `payload()`, and nothing read either
+    # once detection and delivery were split — the worker resolves both from the
+    # stored row, because by then the object that detected the alert is gone.
+    # Removed rather than left: fields nothing reads are how a payload comes to
+    # be missing three of its own in the first place.
 
 
 async def _watchers(session: AsyncSession) -> list[ProfileMembership]:
@@ -145,7 +149,6 @@ async def find_missed_dose_alerts(session: AsyncSession, now: datetime) -> list[
     for profile_id, dose_id, planned in rows:
         missed.setdefault(profile_id, []).append((dose_id, planned))
 
-    tokens = await tokens_by_account(session, [m.account_id for m in watchers])
 
     alerts: list[Alert] = []
     for m in watchers:
@@ -161,7 +164,6 @@ async def find_missed_dose_alerts(session: AsyncSession, now: datetime) -> list[
                     profile_id=m.profile_id,
                     kind=AlertKind.dose_missed,
                     subject_id=str(dose_id),
-                    push_tokens=tokens.get(m.account_id, ()),
                 )
             )
     return alerts
@@ -204,7 +206,6 @@ async def find_stale_profile_alerts(session: AsyncSession, now: datetime) -> lis
             )
         ).all()
     )
-    tokens = await tokens_by_account(session, [m.account_id for m in watchers])
 
     alerts: list[Alert] = []
     for m in watchers:
@@ -223,7 +224,6 @@ async def find_stale_profile_alerts(session: AsyncSession, now: datetime) -> lis
                 profile_id=m.profile_id,
                 kind=AlertKind.profile_stale,
                 subject_id=now.date().isoformat(),
-                push_tokens=tokens.get(m.account_id, ()),
             )
         )
     return alerts
@@ -235,12 +235,24 @@ async def find_stale_profile_alerts(session: AsyncSession, now: datetime) -> lis
 TTL = {
     AlertKind.dose_missed: timedelta(hours=6),
     AlertKind.profile_stale: timedelta(hours=24),
+    # An hour. The nudge only makes a device stop sooner than its next pull
+    # would; after that the pull says the same thing from the data, and the
+    # revision now travels with it, so a late nudge really is redundant rather
+    # than assumed to be.
+    AlertKind.reminder_authority_lost: timedelta(hours=1),
 }
 
 # Waits between attempts. Short at first, because most failures are seconds
 # long; spread out afterwards, because the ones that are not are usually
-# minutes or hours. Runs out well inside the shortest TTL, so an alert gives up
-# for a stated reason rather than by quietly outliving its usefulness.
+# minutes or hours.
+#
+# It used to say this runs out well inside the shortest TTL. That stopped being
+# true when the authority nudge arrived with a TTL of one hour: its attempts
+# land at 0, +1, +6 and +26 minutes, and the fifth would fall past the hour, so
+# `record` retires it as expired instead. That is the correct outcome and the
+# path is tested — but the sentence promising otherwise had to go, because a
+# comment that describes an old arrangement is how the last three defects
+# survived review.
 BACKOFF = (
     timedelta(minutes=1),
     timedelta(minutes=5),
@@ -278,6 +290,7 @@ async def claim(session: AsyncSession, alert: Alert, now: datetime) -> bool:
             profile_id=alert.profile_id,
             kind=alert.kind,
             subject_id=alert.subject_id,
+            device_id=alert.device_id,
             state=AlertState.pending.value,
             attempts=0,
             next_attempt_at=now,
@@ -339,6 +352,116 @@ async def take(
     ).scalar_one_or_none()
 
 
+def authority_lost(
+    account_id: uuid.UUID,
+    profile_id: uuid.UUID,
+    device_id: uuid.UUID,
+    revision: int,
+) -> Alert:
+    """The nudge to the device that has just stopped arming a profile's alarms.
+
+    The revision is the subject, which makes each handover its own row: two
+    handovers of one profile are two things to say, not one said twice. It is
+    also why the unique index cannot collapse them — the same reasoning that put
+    `profile_id` in that index after a caregiver watching two parents received
+    one alert a day between them.
+    """
+    return Alert(
+        account_id=account_id,
+        profile_id=profile_id,
+        kind=AlertKind.reminder_authority_lost,
+        subject_id=str(revision),
+        device_id=device_id,
+    )
+
+
+class NoNudge(str, enum.Enum):
+    """Why a queued nudge is not being sent on this pass."""
+
+    # Nothing left to say to this device. Retired rather than retried.
+    moot = "moot"
+    # The device is reachable in principle but has no token yet. Waits.
+    no_token = "no_token"
+
+
+@dataclass(frozen=True)
+class Nudge:
+    token: str
+    payload: dict[str, str]
+    ttl_seconds: int
+
+
+async def resolve_nudge(
+    session: AsyncSession, delivery: AlertDelivery, now: datetime
+) -> Nudge | NoNudge:
+    """Build the nudge from the world as it is now, not as it was when queued.
+
+    **This is what makes retries safe, and it was the owner's objection to
+    queueing at all.** Store the payload and a retry twenty minutes later says
+    "you lost it" using twenty-minute-old facts — so a handover A to B that
+    failed to send, followed by B back to A, would tell A it is not the owner
+    while A is precisely the owner, and A would fall silent. Rebuilt at send
+    time the same retry names the current holder, which is A, addressed to A;
+    the message cannot make A stop, and the check below retires it before it is
+    even sent.
+
+    So the queue no longer trades a missed nudge for a wrong one. It only ever
+    sends what is true at the moment it sends it.
+
+    Four ways there is nothing to say, all of them retirement rather than
+    failure: the profile is gone, nobody holds authority, the device we were
+    going to tell holds it again, or that device has been signed out and is
+    arming nothing anyway.
+    """
+    profile = await session.get(Profile, delivery.profile_id)
+    if profile is None or profile.deleted_at_ms is not None:
+        return NoNudge.moot
+    if profile.owner_device_id is None or profile.owner_device_id == delivery.device_id:
+        return NoNudge.moot
+
+    device = await session.get(Device, delivery.device_id) if delivery.device_id else None
+    if device is None or device.revoked_at is not None:
+        return NoNudge.moot
+    if not device.push_token:
+        return NoNudge.no_token
+
+    # Bounded by the row's own deadline rather than a fresh hour per attempt.
+    # The two are the same question — how long this is worth delivering — and
+    # letting a retry outlive the row would have the server stop caring about a
+    # message FCM is still holding.
+    remaining = int((delivery.expires_at - now).total_seconds())
+    if remaining <= 0:
+        return NoNudge.moot
+
+    return Nudge(
+        token=device.push_token,
+        payload={
+            "type": delivery.kind.value,
+            "profile_id": str(delivery.profile_id),
+            "owner_device_id": str(profile.owner_device_id),
+            # The profile's position in the change feed, which is also what the
+            # device sees on its next pull. One number in both channels, so the
+            # device can drop a nudge it has already outrun.
+            "revision": str(profile.server_seq),
+            "expires_at": delivery.expires_at.isoformat().replace("+00:00", "Z"),
+        },
+        ttl_seconds=remaining,
+    )
+
+
+async def deliver_nudge(push, delivery: AlertDelivery, nudge: Nudge) -> Delivery:
+    """One device, one token, one outcome.
+
+    Deliberately not `deliver`, which reports the best result across every
+    token an account has. That rule is right for an alert — reaching one of
+    someone's two phones is telling them — and wrong here, where the whole point
+    is that exactly one device is being addressed.
+    """
+    return await push.send(
+        nudge.token, nudge.payload, collapse_key(delivery), nudge.ttl_seconds
+    )
+
+
 def collapse_key(delivery: AlertDelivery) -> str:
     """What makes two deliveries of one alert land as one notification.
 
@@ -348,6 +471,12 @@ def collapse_key(delivery: AlertDelivery) -> str:
     replacement is silent, and the alert it swallowed is the one about the
     parent nobody has heard from.
     """
+    if delivery.kind is AlertKind.reminder_authority_lost:
+        # No subject here, and that is the difference: two authority nudges for
+        # one profile are not two things a device needs to hear. The later one
+        # is the truth and should replace the earlier one while the phone is
+        # offline, which is exactly what a shared collapse key buys.
+        return f"{delivery.kind.value}:{delivery.profile_id}"
     return f"{delivery.kind.value}:{delivery.profile_id}:{delivery.subject_id}"
 
 

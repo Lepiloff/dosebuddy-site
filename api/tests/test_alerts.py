@@ -18,6 +18,7 @@ from app.db.models import (
     Device,
     Profile,
     ProfileMembership,
+    utcnow,
 )
 from app.services import alerts
 from app.services.push import Delivery
@@ -593,3 +594,173 @@ async def test_each_signal_keeps_its_own_ttl_at_fcm(api, session, db_engine):
     assert ttl_of["dose_missed"] == int(alerts.TTL[AlertKind.dose_missed].total_seconds())
     assert ttl_of["profile_stale"] == int(alerts.TTL[AlertKind.profile_stale].total_seconds())
     assert ttl_of["profile_stale"] != ttl_of["dose_missed"], "one figure for both is the bug"
+
+
+# ---------------------------------------------------------------------------
+# The authority nudge, which rides this queue without being an alert
+# ---------------------------------------------------------------------------
+
+
+async def _handover(api, session, db_engine):
+    """One account, two handsets, authority moved from the first to the second."""
+    from app.db.models import Device as DeviceModel
+
+    subject = f"owner-{uuid.uuid4()}"
+    owner = await sign_in(api, subject)
+    await sign_in(api, subject)
+
+    pid = str(uuid.uuid4())
+    await push(api, owner, profiles=[{
+        "id": pid, "created_at": ms(), "updated_at": ms(), "deleted_at": None,
+        "op_seq": 90001, "name": "Mum", "color": 4283215696, "sort_order": 0,
+    }])
+
+    devices = (await session.execute(
+        select(DeviceModel).where(DeviceModel.account_id == uuid.UUID(owner["account_id"]))
+        .order_by(DeviceModel.created_at)
+    )).scalars().all()
+    losing, winning = devices[0], devices[1]
+    losing.push_token = "token-losing"
+    winning.push_token = "token-winning"
+    await session.commit()
+
+    for device in (losing, winning):
+        r = await api.post(f"/v1/profiles/{pid}/reminder-authority",
+                           headers=auth_header(owner), json={"device_id": str(device.id)})
+        assert r.status_code == 204
+    return owner, pid, losing, winning
+
+
+async def test_the_worker_sends_the_queued_authority_nudge(api, session, db_engine):
+    """Everything the receiving device checks, delivered by the process that
+    actually holds the FCM credential."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    owner, pid, losing, winning = await _handover(api, session, db_engine)
+
+    pusher = RecordingPush()
+    await scan_once(async_sessionmaker(db_engine, expire_on_commit=False), pusher)
+
+    assert len(pusher.sent) == 1
+    token, payload = pusher.sent[0]
+    assert token == "token-losing", "the device that kept authority must not be told"
+    assert payload["type"] == "reminder_authority_lost"
+    assert payload["profile_id"] == pid
+    assert payload["owner_device_id"] == str(winning.id)
+
+    profile = await session.get(Profile, uuid.UUID(pid))
+    assert payload["revision"] == str(profile.server_seq)
+    assert payload["expires_at"].endswith("Z")
+
+    # FCM's data is map<string,string>; saying so here keeps the sending side
+    # honest about what the other end receives.
+    assert all(isinstance(v, str) for v in payload.values()), payload
+
+    # Level with the row's own deadline rather than a fresh hour per attempt.
+    assert 3500 < pusher.ttl[0] <= 3600
+
+    row = (await session.execute(
+        select(AlertDelivery).where(AlertDelivery.kind == AlertKind.reminder_authority_lost)
+    )).scalars().one()
+    await session.refresh(row)
+    assert row.state == AlertState.sent.value
+    assert row.sent_at is not None, "and now there is a record of whether it went"
+
+
+async def test_a_nudge_whose_authority_came_back_is_retired_not_sent(api, session, db_engine):
+    """The objection that made queueing look worse than sending inline.
+
+    A to B fails to send; B goes back to A; the retry tells A it is not the
+    owner while A is exactly the owner, and A falls silent. Rebuilding the
+    payload at send time removes the case at its root — by the time the retry
+    runs, the device it addresses holds authority again and there is nothing
+    left to say.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    owner, pid, losing, winning = await _handover(api, session, db_engine)
+
+    # Authority goes back before the worker ever runs.
+    r = await api.post(f"/v1/profiles/{pid}/reminder-authority",
+                       headers=auth_header(owner), json={"device_id": str(losing.id)})
+    assert r.status_code == 204
+
+    pusher = RecordingPush()
+    await scan_once(async_sessionmaker(db_engine, expire_on_commit=False), pusher)
+
+    rows = {r.device_id: r for r in (await session.execute(
+        select(AlertDelivery).where(AlertDelivery.kind == AlertKind.reminder_authority_lost)
+    )).scalars().all()}
+
+    assert rows[losing.id].state == AlertState.expired.value, (
+        "telling the current owner it lost authority is the failure this avoids"
+    )
+    assert [t for t, _ in pusher.sent] == ["token-winning"], (
+        "only the device that actually lost it is told"
+    )
+
+
+async def test_a_losing_device_with_no_token_waits_instead_of_failing(api, session, db_engine):
+    """Nothing was tried, so nothing should be counted against the attempts."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    owner, pid, losing, winning = await _handover(api, session, db_engine)
+    losing.push_token = None
+    await session.commit()
+
+    pusher = RecordingPush()
+    await scan_once(async_sessionmaker(db_engine, expire_on_commit=False), pusher)
+
+    assert pusher.sent == []
+    row = (await session.execute(
+        select(AlertDelivery).where(AlertDelivery.kind == AlertKind.reminder_authority_lost)
+    )).scalars().one()
+    await session.refresh(row)
+    assert row.state == AlertState.pending.value
+    assert row.attempts == 0
+    assert row.next_attempt_at > utcnow()
+
+
+async def test_a_signed_out_device_is_not_chased(api, session, db_engine):
+    """It arms nothing, so there is nothing to tell it to stop."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    owner, pid, losing, winning = await _handover(api, session, db_engine)
+    losing.revoked_at = utcnow()
+    await session.commit()
+
+    pusher = RecordingPush()
+    await scan_once(async_sessionmaker(db_engine, expire_on_commit=False), pusher)
+
+    assert pusher.sent == []
+    row = (await session.execute(
+        select(AlertDelivery).where(AlertDelivery.kind == AlertKind.reminder_authority_lost)
+    )).scalars().one()
+    await session.refresh(row)
+    assert row.state == AlertState.expired.value
+
+
+async def test_the_nudge_and_the_pull_agree_on_the_revision(api, session, db_engine):
+    """One number, both channels. The whole reason the revision exists.
+
+    The device drops an authority push whose revision is not strictly newer than
+    the one it last pulled. Asserting the two are *equal* is the point:
+    asserting each is merely present would pass with two unrelated numbers,
+    which is the defect.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from tests.test_sync import pull
+
+    owner, pid, losing, winning = await _handover(api, session, db_engine)
+
+    pusher = RecordingPush()
+    await scan_once(async_sessionmaker(db_engine, expire_on_commit=False), pusher)
+    _token, payload = pusher.sent[0]
+
+    prof = [p for p in (await pull(api, owner))["changes"]["profiles"] if p["id"] == pid][0]
+    assert prof["owner_device_id"] == str(winning.id)
+    assert payload["revision"] == prof["revision"], (
+        "the push and the pull must name the same revision, or the device's "
+        "'strictly newer' check compares numbers from two different worlds"
+    )

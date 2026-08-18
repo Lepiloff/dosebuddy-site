@@ -22,7 +22,6 @@ from app.core.logging import setup_logging
 from app.core.observability import RequestLog
 from app.db.session import create_engine, create_sessionmaker
 from app.services.google import RealGoogleVerifier
-from app.services.push import build_push
 
 
 @asynccontextmanager
@@ -65,7 +64,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = settings
     app.add_middleware(RequestLog)
-    app.state.push = build_push(settings)
+    # No push sender here, deliberately. This process has no FCM credentials —
+    # `deploy/docker-compose.yml` gives them to the worker alone, so the key
+    # stays out of the process answering requests from the internet — and for
+    # months it also had a sender, which quietly turned every authority nudge
+    # into a log line. Nothing in the API sends push; the worker does. If this
+    # line ever comes back, the credential question comes back with it.
     errors.install(app)
 
     # Operational endpoints sit at the root, outside the versioned contract:
