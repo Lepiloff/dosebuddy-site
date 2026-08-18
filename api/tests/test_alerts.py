@@ -628,7 +628,28 @@ async def _handover(api, session, db_engine):
         r = await api.post(f"/v1/profiles/{pid}/reminder-authority",
                            headers=auth_header(owner), json={"device_id": str(device.id)})
         assert r.status_code == 204
+
+    # The winner pulls, which is what releases the nudge. Done explicitly here
+    # rather than hidden in a fixture: it is the precondition the whole gate is
+    # about, and a test that got it for free would not notice if it vanished.
+    await _winner_has_pulled(session, winning, pid)
     return owner, pid, losing, winning
+
+
+async def _winner_has_pulled(session, winning, pid) -> None:
+    """Mark the winning device as having pulled the handover.
+
+    The real path is a `GET /sync/pull` on that device's own token; this writes
+    the column that pull writes, because these tests are about what the worker
+    does with the fact, not about how the fact is recorded. The recording itself
+    is covered in test_sync.
+    """
+    from app.db.models import Device as DeviceModel
+
+    profile = await session.get(Profile, uuid.UUID(pid))
+    device = await session.get(DeviceModel, winning.id)
+    device.cursor_seq = profile.server_seq
+    await session.commit()
 
 
 async def test_the_worker_sends_the_queued_authority_nudge(api, session, db_engine):
@@ -684,6 +705,12 @@ async def test_a_nudge_whose_authority_came_back_is_retired_not_sent(api, sessio
     r = await api.post(f"/v1/profiles/{pid}/reminder-authority",
                        headers=auth_header(owner), json={"device_id": str(losing.id)})
     assert r.status_code == 204
+
+    # And the device it went back to pulls, which is what releases the nudge now
+    # owed to the other one. Without this the gate holds that nudge — correctly,
+    # and the assertion below would be measuring the gate rather than the thing
+    # this test is about.
+    await _winner_has_pulled(session, losing, pid)
 
     pusher = RecordingPush()
     await scan_once(async_sessionmaker(db_engine, expire_on_commit=False), pusher)
@@ -764,3 +791,74 @@ async def test_the_nudge_and_the_pull_agree_on_the_revision(api, session, db_eng
         "the push and the pull must name the same revision, or the device's "
         "'strictly newer' check compares numbers from two different worlds"
     )
+
+
+async def test_the_nudge_waits_until_the_new_owner_has_pulled(api, session, db_engine):
+    """The whole of variant (b), and the reason it was chosen.
+
+    Silencing the previous phone before the new one knows it took over leaves
+    nobody ringing. Measured on 18.08: 2 min 36 s of silence, against 28 s of
+    two phones ringing on the slower build. Invariant 1 puts reliability first,
+    so a duplicate is the failure to prefer — the previous phone keeps ringing
+    until the new one has actually pulled the handover.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.db.models import Device as DeviceModel
+
+    owner, pid, losing, winning = await _handover(api, session, db_engine)
+
+    # Undo what the helper arranged: the winner has not pulled after all.
+    device = await session.get(DeviceModel, winning.id)
+    device.cursor_seq = None
+    await session.commit()
+
+    pusher = RecordingPush()
+    await scan_once(async_sessionmaker(db_engine, expire_on_commit=False), pusher)
+
+    assert pusher.sent == [], "the losing phone must keep ringing until the winner is ready"
+    row = (await session.execute(
+        select(AlertDelivery).where(AlertDelivery.kind == AlertKind.reminder_authority_lost)
+    )).scalars().one()
+    await session.refresh(row)
+    assert row.state == AlertState.pending.value
+    assert row.attempts == 0, "nothing was tried, so nothing is spent"
+
+    # And once it has pulled, the same scan lets it through.
+    await _winner_has_pulled(session, winning, pid)
+    row.next_attempt_at = utcnow() - timedelta(seconds=1)
+    await session.commit()
+
+    await scan_once(async_sessionmaker(db_engine, expire_on_commit=False), pusher)
+    assert [t for t, _ in pusher.sent] == ["token-losing"]
+
+
+async def test_a_stale_cursor_does_not_open_the_gate(api, session, db_engine):
+    """Reaching the revision at the moment of handover is not enough.
+
+    A profile written again since then sits at a higher sequence, and a pull
+    that stopped short of it never carried the row naming the new owner. The
+    gate compares against the profile as it stands, not against the number the
+    nudge was queued with.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.db.models import Device as DeviceModel
+
+    owner, pid, losing, winning = await _handover(api, session, db_engine)
+
+    row = (await session.execute(
+        select(AlertDelivery).where(AlertDelivery.kind == AlertKind.reminder_authority_lost)
+    )).scalars().one()
+    handover_revision = int(row.subject_id)
+
+    # The profile moves on, and the winner's cursor stops at the old number.
+    profile = await session.get(Profile, uuid.UUID(pid))
+    profile.server_seq = handover_revision + 50
+    device = await session.get(DeviceModel, winning.id)
+    device.cursor_seq = handover_revision
+    await session.commit()
+
+    pusher = RecordingPush()
+    await scan_once(async_sessionmaker(db_engine, expire_on_commit=False), pusher)
+    assert pusher.sent == []

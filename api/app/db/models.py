@@ -104,6 +104,23 @@ class Device(Base):
     # apart from "nothing to report", and the two mean opposite things.
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # How far this device's cursor has reached. The cursor itself belongs to the
+    # client and always will — this is a copy of what it was last handed, not
+    # the authority on where it is.
+    #
+    # It exists for one question the server previously could not answer: has the
+    # device that just took over a profile actually seen that it did? Without
+    # it, the nudge telling the previous phone to stop went out immediately,
+    # and — since the new phone only learns by pulling — the usual result was a
+    # gap where neither phone rang. Measured 18.08: 2 min 36 s of silence, where
+    # the unfixed build had produced 28 s of both ringing.
+    #
+    # Silence is the worse of the two (spec invariant 1), so the previous phone
+    # is now kept ringing until this column says the new one is ready. Null
+    # means "not known to have pulled anything", which is the cautious reading:
+    # it holds the nudge rather than releasing it.
+    cursor_seq: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

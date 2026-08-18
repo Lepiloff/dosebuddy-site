@@ -382,6 +382,16 @@ class NoNudge(str, enum.Enum):
     moot = "moot"
     # The device is reachable in principle but has no token yet. Waits.
     no_token = "no_token"
+    # The device taking over has not yet pulled the handover, so the device
+    # losing it must keep ringing. Waits.
+    awaiting_winner = "awaiting_winner"
+
+
+# How long to wait before asking again whether the new owner has caught up. The
+# worker scans every minute anyway, so this only keeps the row from being locked
+# and released on every pass while a phone sleeps through its background period.
+# Not an attempt: nothing was tried, and the wait is expected to be minutes.
+AWAITING_WINNER_WAIT = timedelta(seconds=60)
 
 
 @dataclass(frozen=True)
@@ -422,6 +432,32 @@ async def resolve_nudge(
     device = await session.get(Device, delivery.device_id) if delivery.device_id else None
     if device is None or device.revoked_at is not None:
         return NoNudge.moot
+
+    # **The gate, and the reason this signal is worth delaying at all.**
+    #
+    # Silencing the previous phone before the new one has seen that it took over
+    # leaves nobody ringing. Measured 18.08: the nudge reached the losing phone
+    # in 1.4 s and it stopped six seconds later, while the winning phone was
+    # still waiting on a background pull — 2 min 36 s during which the dose had
+    # no alarm on any device. The unfixed build, slower on both halves, had
+    # produced 28 s of two phones ringing instead. Both are violations of §1.4,
+    # and the ranking between them is not ours: reliability of reminders is
+    # invariant 1, so a duplicate is the failure to prefer.
+    #
+    # So the nudge waits for evidence rather than an assumption. `cursor_seq` is
+    # how far the new owner's device has actually been handed rows, and it must
+    # have reached the profile as it now stands — not merely the revision at the
+    # moment of handover, because a profile written again since would leave that
+    # older number satisfied by a pull that never carried the new owner.
+    #
+    # Null means no pull is known, which holds the nudge. That is the cautious
+    # direction: holding it costs a duplicate, releasing it early costs silence.
+    owner_device = await session.get(Device, profile.owner_device_id)
+    if owner_device is None:
+        return NoNudge.moot
+    if owner_device.cursor_seq is None or owner_device.cursor_seq < profile.server_seq:
+        return NoNudge.awaiting_winner
+
     if not device.push_token:
         return NoNudge.no_token
 

@@ -27,6 +27,7 @@ from sqlalchemy import cast as sa_cast
 from sqlalchemy import column as sa_column
 from sqlalchemy import func, literal as sa_literal, select, union_all
 from sqlalchemy import text as sql_text
+from sqlalchemy import update as sa_update
 from sqlalchemy import true as sa_true
 from sqlalchemy import tuple_ as sa_tuple
 from sqlalchemy.dialects.postgresql import ARRAY
@@ -40,6 +41,7 @@ from app.api.deps import Caller, get_session, sync_caller
 from app.api.schemas import Changes, Outcome, PullOut, PushIn, PushOut
 from app.db.models import (
     SERVER_SEQ,
+    Device,
     DoseEvent,
     Medication,
     Profile,
@@ -606,6 +608,28 @@ async def pull(
         changes.setdefault(entity, []).append(wire)
 
     new_cursor = page[-1][0] if page else since
+
+    # Remember how far this device has been handed. The cursor is still the
+    # client's — this is a copy of the last value it was given, kept for one
+    # decision: whether the device taking over a profile has seen that it did.
+    # Until it has, the previous phone keeps ringing, because a gap where
+    # neither rings is worse than a moment where both do.
+    #
+    # Written only when it moves. A client replaying an old cursor — a retry of
+    # a request whose response was lost, a device restored from a backup — must
+    # not walk this backwards and shut a gate on a device that has since caught
+    # up, so the guard sits in the WHERE rather than in the value: the statement
+    # matches no row instead of writing a smaller number.
+    await session.execute(
+        sa_update(Device)
+        .where(
+            Device.id == caller.device_id,
+            func.coalesce(Device.cursor_seq, -1) < new_cursor,
+        )
+        .values(cursor_seq=new_cursor)
+    )
+    await session.commit()
+
     return PullOut(
         cursor=encode_cursor(new_cursor), has_more=has_more, changes=changes, roles=roles
     )

@@ -82,6 +82,21 @@ async def scan_once(sessionmaker, push: Push, now: datetime | None = None) -> in
                     delivery.state = alerts.AlertState.expired.value
                     await session.commit()
                     continue
+                if resolved is alerts.NoNudge.awaiting_winner:
+                    # The device taking over has not pulled the handover yet,
+                    # so the one losing it keeps ringing. Logged because "the
+                    # old phone did not stop" is a support question, and the
+                    # answer — it was told to keep going, on purpose — is not
+                    # guessable from an empty table.
+                    log.info(
+                        "nudge.awaiting_winner",
+                        profile_id=str(delivery.profile_id),
+                        device_id=str(delivery.device_id),
+                        queued_at=delivery.expires_at.isoformat(),
+                    )
+                    alerts.defer(delivery, now, alerts.AWAITING_WINNER_WAIT)
+                    await session.commit()
+                    continue
                 if resolved is alerts.NoNudge.no_token:
                     log.info(
                         "nudge.no_token",

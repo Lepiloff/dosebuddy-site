@@ -679,3 +679,79 @@ async def test_an_owned_dose_may_have_no_schedule(api):
     row = [d for d in pulled["changes"]["dose_events"] if d["id"] == ad_hoc][0]
     assert row["schedule_id"] is None
     assert pulled["roles"][pid] == "owner"
+
+
+async def test_a_pull_records_how_far_the_device_has_been_handed(api, session):
+    """The fact the authority gate rests on, recorded where pull writes it."""
+    from sqlalchemy import select
+
+    from app.db.models import Device
+
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+
+    device = (await session.execute(
+        select(Device).where(Device.account_id == uuid.UUID(owner["account_id"]))
+    )).scalars().one()
+    assert device.cursor_seq is None, "nothing has been handed to it yet"
+
+    got = await pull(api, owner)
+    await session.refresh(device)
+    assert device.cursor_seq is not None
+    first = device.cursor_seq
+
+    # It follows the rows, not the calls: a pull that returns nothing new leaves
+    # it where it was.
+    await pull(api, owner, got["cursor"])
+    await session.refresh(device)
+    assert device.cursor_seq == first
+
+    await push(api, owner, medications=[medication(str(uuid.uuid4()), pid, "Second")])
+    await pull(api, owner, got["cursor"])
+    await session.refresh(device)
+    assert device.cursor_seq > first
+
+
+async def test_replaying_an_old_cursor_does_not_walk_the_record_backwards(api, session):
+    """A retry of a request whose response was lost must not shut a gate on a
+    device that has since caught up."""
+    from sqlalchemy import select
+
+    from app.db.models import Device
+
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+    device = (await session.execute(
+        select(Device).where(Device.account_id == uuid.UUID(owner["account_id"]))
+    )).scalars().one()
+
+    await pull(api, owner)
+    await session.refresh(device)
+    ahead = device.cursor_seq
+
+    # The same device asks again from the beginning, as a replayed request does.
+    await pull(api, owner)
+    await session.refresh(device)
+    assert device.cursor_seq == ahead
+
+
+async def test_each_device_is_recorded_separately(api, session):
+    """One account, two handsets: one of them pulling says nothing about the
+    other, and the authority gate depends on telling them apart."""
+    from sqlalchemy import select
+
+    from app.db.models import Device
+
+    subject = f"owner-{uuid.uuid4()}"
+    owner = await sign_in(api, subject)
+    second = await sign_in(api, subject)
+
+    await push(api, owner, profiles=[profile(str(uuid.uuid4()))])
+    await pull(api, owner)
+
+    devices = {d.id: d for d in (await session.execute(
+        select(Device).where(Device.account_id == uuid.UUID(owner["account_id"]))
+    )).scalars().all()}
+    assert len(devices) == 2
+
+    pulled = [d for d in devices.values() if d.cursor_seq is not None]
+    assert len(pulled) == 1, "only the device that pulled has a record"
+    del second
