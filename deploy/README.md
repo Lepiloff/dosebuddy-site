@@ -216,9 +216,13 @@ Then:
 - Search Console needs no change of address — same domain. Resubmit the sitemap
   and run a Live Test.
 
-After a week of stable serving, raise HSTS from `max-age=300` to `31536000` in
-`nginx/snippets/landing.conf`. Not before: a year-long promise made on day one
-would make a rollback painful if GitHub's certificate had lapsed by then.
+HSTS started at `max-age=300` and was raised to `31536000` on 2026-08-18, once
+the move had held and Pages had stopped being the fallback. It was short at
+first on purpose: a year-long promise made on day one would have made a
+rollback painful if GitHub's certificate had lapsed by then. The value lives in
+three places — `nginx/snippets/landing.conf`, `nginx/conf.d/10-dosebuddyapp.conf`
+(the `www` redirect, which does not include the snippet) and
+`nginx/conf.d/20-api.conf`.
 
 ---
 
