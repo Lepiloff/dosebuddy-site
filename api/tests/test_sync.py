@@ -471,6 +471,98 @@ async def test_a_watcher_is_not_told_which_device_rings(api, session):
 
     prof = (await pull(api, caregiver))["changes"]["profiles"][0]
     assert "owner_device_id" not in prof
+    # Nor the revision. It exists to decide whether to keep arming alarms, and a
+    # watcher arms none.
+    assert "revision" not in prof
+
+
+async def test_the_nudge_and_the_pull_agree_on_the_revision(api, session):
+    """One number, both channels. This is the whole fix.
+
+    The device drops an authority push whose revision is not strictly newer than
+    the one it last pulled. That guard is written and tested on the device, and
+    until this test's subject existed it could never fire: the pull carried no
+    revision at all, so the device stored nothing to compare against and let
+    every push through — including a retried one describing a handover that had
+    since been undone.
+
+    Asserting the two values are equal is the point. Asserting each is merely
+    present would pass with two unrelated numbers, which is the defect."""
+    from sqlalchemy import select
+
+    from app.db.models import Device
+    from tests.test_alerts import RecordingPush
+
+    subject = f"owner-{uuid.uuid4()}"
+    owner = await sign_in(api, subject)
+    # The same account signing in from a second handset — a phone being
+    # replaced, which is what this endpoint is for.
+    await sign_in(api, subject)
+
+    pid = str(uuid.uuid4())
+    await push(api, owner, profiles=[profile(pid)])
+
+    devices = (await session.execute(
+        select(Device).where(Device.account_id == uuid.UUID(owner["account_id"]))
+        .order_by(Device.created_at)
+    )).scalars().all()
+    first, second = devices[0], devices[1]
+
+    first.push_token = "token-first"
+    await session.commit()
+
+    # Claiming it costs no nudge: there is no previous holder to tell.
+    r = await api.post(f"/v1/profiles/{pid}/reminder-authority",
+                       headers=auth_header(owner), json={"device_id": str(first.id)})
+    assert r.status_code == 204
+
+    pusher = RecordingPush()
+    api.app.state.push = pusher
+
+    r = await api.post(f"/v1/profiles/{pid}/reminder-authority",
+                       headers=auth_header(owner), json={"device_id": str(second.id)})
+    assert r.status_code == 204
+
+    assert len(pusher.sent) == 1, "the device losing authority must be told"
+    token, data = pusher.sent[0]
+    assert token == "token-first"
+
+    prof = [p for p in (await pull(api, owner))["changes"]["profiles"] if p["id"] == pid][0]
+    assert prof["owner_device_id"] == str(second.id)
+    assert data["revision"] == prof["revision"], (
+        "the push and the pull must name the same revision, or the device's "
+        "'strictly newer' check compares numbers from two different worlds"
+    )
+
+
+async def test_the_revision_moves_forward_with_every_handover(api, session):
+    """Strictly newer has to mean something. A revision that repeated would make
+    the device's guard reject the second handover as stale."""
+    from sqlalchemy import select
+
+    from app.db.models import Device
+
+    subject = f"owner-{uuid.uuid4()}"
+    owner = await sign_in(api, subject)
+    await sign_in(api, subject)
+
+    pid = str(uuid.uuid4())
+    await push(api, owner, profiles=[profile(pid)])
+
+    devices = (await session.execute(
+        select(Device).where(Device.account_id == uuid.UUID(owner["account_id"]))
+        .order_by(Device.created_at)
+    )).scalars().all()
+
+    seen = []
+    for device in (devices[0], devices[1], devices[0]):
+        await api.post(f"/v1/profiles/{pid}/reminder-authority",
+                       headers=auth_header(owner), json={"device_id": str(device.id)})
+        prof = [p for p in (await pull(api, owner))["changes"]["profiles"]
+                if p["id"] == pid][0]
+        seen.append(int(prof["revision"]))
+
+    assert seen == sorted(seen) and len(set(seen)) == 3, seen
 
 
 async def test_authority_cannot_be_taken_by_someone_else(api, session):

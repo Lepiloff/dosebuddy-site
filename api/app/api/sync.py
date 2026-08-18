@@ -375,6 +375,21 @@ def _row_to_wire(entity: str, row, role: Role | None = None) -> dict[str, Any]:
             # only a nudge, and a nudge that is lost must not leave two phones
             # ringing for one dose.
             "owner_device_id": str(row.owner_device_id) if row.owner_device_id else None,
+            # The same number the authority nudge carries, so the device can
+            # compare the two channels. Without it the device stores nothing to
+            # compare against, its "strictly newer" check passes every push, and
+            # a retried nudge can undo a handover that has since been redone.
+            #
+            # A string, because FCM's `data` is map<string,string> and the push
+            # side has no choice; one type in both channels means one parse.
+            #
+            # No new column: server_seq already exists, is already monotonic,
+            # and already moves when authority moves. That it also moves on
+            # every other write to the profile makes the check conservative in
+            # the safe direction — the device keeps the newer number it pulled
+            # and drops the older push, which is right, because it already holds
+            # the fresher truth.
+            "revision": str(row.server_seq),
             # The caller's own role on this profile. Not a column — role lives
             # on the (account ↔ profile) link — but the client cannot decide
             # anything without it, and the thing it decides is P0.
