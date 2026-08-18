@@ -78,8 +78,19 @@ class Account(Base):
 class Device(Base):
     __tablename__ = "devices"
 
-    # Client-generated and stable. A new id means a new device with its own
-    # session, not a reinstall — a reinstall wipes app storage and the id with it.
+    # Client-generated, and stable across app *updates* — the id lives in the
+    # device's DataStore, which an update leaves alone. Deleting the app or
+    # clearing its data destroys it, and a new id then means a new device with
+    # its own session.
+    #
+    # A backup never carries it: the app excludes DataStore from Android backup
+    # and device transfer on purpose, because an id restored onto a second
+    # handset would have this table count one device where there are two — and
+    # the alarms for a profile are armed by whichever device this table names.
+    #
+    # Said precisely because the earlier wording — "a reinstall wipes the id" —
+    # made an update look like it produced a new device, which had us reading
+    # the wrong row during acceptance.
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     account_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("accounts.id", ondelete="CASCADE"), index=True
