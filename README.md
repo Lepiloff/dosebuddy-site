@@ -27,7 +27,26 @@ fonts/                   self-hosted Atkinson Hyperlegible Next (+ OFL licence)
 img/                     mark, OG cards, Play badges, app screenshots
 tool/prepare-assets.sh   regenerates everything in img/ and fonts/
 tool/og-template.html    source of the Open Graph cards
+
+api/                     FastAPI backend: sync, pairing, alerts (api.dosebuddyapp.com)
+deploy/                  nginx + certbot + compose stack, and how it ships
+docs/                    the contract, the architecture, the open debts
 ```
+
+The site is no longer the whole repository. `api/` and `deploy/` arrived with
+v1.1, when the landing moved off GitHub Pages onto the same EC2 box that serves
+the API. The landing is still served exactly as written — nothing below changed
+about that.
+
+## Documents
+
+| | |
+|---|---|
+| [`docs/v1.1-api-contract.md`](docs/v1.1-api-contract.md) | The wire. What the endpoints take and return, agreed with the app track. Read this to write a client. |
+| [`docs/sync-architecture.md`](docs/sync-architecture.md) | The implementation. Why the server is built this way, and what breaks if a given line is changed. Read this before editing `api/app`. |
+| [`docs/v1.1-contract-decisions.md`](docs/v1.1-contract-decisions.md) | Decisions taken during the contract, with their reasoning. |
+| [`docs/debts.md`](docs/debts.md) | Deliberately deferred work, and acceptance findings. A debt only leaves with the commit that closes it. |
+| [`deploy/README.md`](deploy/README.md) | The box, the certificates, the rollback, the backups. |
 
 ## Local preview
 
