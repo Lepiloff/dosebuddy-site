@@ -31,6 +31,13 @@ jobs:
       - name: Landing
         run: ./deploy/verify.sh dosebuddyapp.com
 
+      # verify.sh covers the landing's certificate; this is the other host, and
+      # until now nothing watched it ahead of time. The curl below notices an
+      # expired certificate only once it has expired, which on the host that
+      # carries sync is a warning that arrives with the outage.
+      - name: API certificate
+        run: ./deploy/check-cert.sh api.dosebuddyapp.com
+
       - name: API
         run: |
           curl -fsS -o /dev/null https://api.dosebuddyapp.com/health
