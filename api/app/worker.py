@@ -19,7 +19,7 @@ import structlog
 from app.core.config import get_settings
 from app.core.logging import setup_logging
 from app.db.session import create_engine, create_sessionmaker
-from app.services import alerts
+from app.services import alerts, retention
 from app.services.push import Push, build_push
 
 SCAN_INTERVAL_SECONDS = 60
@@ -149,6 +149,29 @@ async def scan_once(sessionmaker, push: Push, now: datetime | None = None) -> in
     return delivered
 
 
+async def sweep_if_due(
+    sessionmaker, last: datetime | None, now: datetime
+) -> datetime:
+    """Run the retention sweep at most once a day.
+
+    It lives on the alert loop because that is the only process we already run
+    on a schedule; giving retention its own cron would mean a second thing to
+    deploy and a second thing to notice has stopped.
+
+    `last` is held in memory only, so a restart sweeps immediately. That is
+    deliberate: the pass is a single indexed DELETE over rows whose age is
+    measured in years, and running it once more than needed costs nothing —
+    while persisting a timestamp to avoid that would add state we would then
+    have to keep correct.
+    """
+    if last is not None and now - last < retention.SWEEP_INTERVAL:
+        return last
+    async with sessionmaker() as session:
+        await retention.sweep(session, now)
+        await session.commit()
+    return now
+
+
 async def main() -> None:
     settings = get_settings()
     setup_logging(settings)
@@ -158,6 +181,7 @@ async def main() -> None:
     push = build_push(settings)
 
     log.info("worker.start", push=type(push).__name__, interval=SCAN_INTERVAL_SECONDS)
+    last_sweep: datetime | None = None
     try:
         while True:
             try:
@@ -170,6 +194,17 @@ async def main() -> None:
                 # the restart takes, and stops alerting for good if the error
                 # repeats.
                 log.exception("worker.scan_failed")
+
+            try:
+                last_sweep = await sweep_if_due(
+                    sessionmaker, last_sweep, datetime.now(timezone.utc)
+                )
+            except Exception:  # noqa: BLE001
+                # Caught apart from the scan on purpose. Retention is a promise
+                # on a web page; delivery is the product. A sweep that cannot
+                # run must never be the reason a caregiver is not told.
+                log.exception("worker.sweep_failed")
+
             await asyncio.sleep(SCAN_INTERVAL_SECONDS)
     finally:
         await engine.dispose()
