@@ -245,6 +245,25 @@ class ProfileMembership(Base):
     # and a day with no signal, and still catches a phone that is genuinely off
     # or lost within two of its owner's mornings.
     #
+    # Now measured rather than reasoned about. The app track ran 28 hours of
+    # background-task wake-ups on two handsets (2026-08-20), reported by worst
+    # gap rather than median because the median is not what trips this:
+    #
+    #   S23, Android 16     98 runs, median 15.7 min, worst 48.9 min (daytime),
+    #                       worst night 36.3 min. An earlier three-day run had a
+    #                       night gap of 86.3 min — take the worse of the two,
+    #                       one day does not prove the absence of hard nights.
+    #   Nova 5T, EMUI 10    68 runs, median 18.2 min, worst 212.3 min — three and
+    #                       a half hours, overnight, 02:16 to 05:49.
+    #
+    # So 36 hours holds roughly a 10x margin over the worst silence a healthy
+    # phone has actually shown. Twelve would still have held 3.4x, which is the
+    # honest way to say that the old value was tight rather than wrong; what
+    # made it wrong was Doze, not the arithmetic.
+    #
+    # Read this before lowering it: the worst case is set by the owner's phone,
+    # not by anything here.
+    #
     # It says the app has not been in touch, and nothing more: a missed dose is
     # `dose_missed` and only ever comes from the device saying so. Silence is not
     # evidence of a missed dose, and the wording on the device must not imply it.
