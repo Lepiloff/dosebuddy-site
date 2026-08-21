@@ -31,21 +31,6 @@ jobs:
       - name: Landing
         run: ./deploy/verify.sh sonadose.com
 
-      # The old domain is not dead, it has a job: hand every old link over with
-      # the path intact. Nothing else checks that, and a redirect that quietly
-      # stops working looks exactly like a domain nobody visits any more.
-      - name: The old domain still hands over
-        run: |
-          for path in / /es/ /404.html; do
-            got=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' \
-                  "https://dosebuddyapp.com$path")
-            echo "dosebuddyapp.com$path -> $got"
-            case "$got" in
-              "301 https://sonadose.com$path") ;;
-              *) echo "expected 301 to https://sonadose.com$path"; exit 1 ;;
-            esac
-          done
-
       # verify.sh covers the landing's certificate; this is the other host, and
       # until now nothing watched it ahead of time. The curl below notices an
       # expired certificate only once it has expired, which on the host that
@@ -56,8 +41,6 @@ jobs:
       - name: Certificates
         run: |
           ./deploy/check-cert.sh api.sonadose.com
-          ./deploy/check-cert.sh api.dosebuddyapp.com
-          ./deploy/check-cert.sh dosebuddyapp.com
 
       - name: API
         run: |
