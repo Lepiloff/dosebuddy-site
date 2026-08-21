@@ -41,10 +41,6 @@ jobs:
       - name: Certificates
         run: |
           ./deploy/check-cert.sh api.sonadose.com
-          # Still listed: the old API host serves until the app track confirms no
-          # installed build calls it. The old *landing* is gone — domain, vhost
-          # and certificate — so it is not checked here any more.
-          ./deploy/check-cert.sh api.dosebuddyapp.com
 
       - name: API
         run: |
