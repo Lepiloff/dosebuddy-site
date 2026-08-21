@@ -29,8 +29,13 @@ if [ -z "$HOST" ]; then
     exit 64
 fi
 
-APEX="dosebuddyapp.com"
-WWW="www.dosebuddyapp.com"
+# Derived from the host under test rather than fixed. These name the redirect
+# targets the checks assert, and after the move to sonadose.com a fixed value
+# meant the script could only ever verify the domain it was written for — it
+# failed 31 of 33 against the old name for the single reason that the old name
+# now redirects, which is correct behaviour reported as breakage.
+APEX="$HOST"
+WWW="www.$HOST"
 
 CURL_TLS=()
 [ "${INSECURE:-0}" = "1" ] && CURL_TLS=(-k)
