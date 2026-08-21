@@ -1,7 +1,9 @@
 name: Deploy landing to EC2
 
-# The cutover is done: dosebuddyapp.com is served from this box, verified at 30
-# of 30 by deploy/verify.sh, so a push to main is now the way the site ships.
+# The site is served from this box at sonadose.com, verified at 33 of 33 by
+# deploy/verify.sh, so a push to main is now the way it ships. dosebuddyapp.com
+# was retired on 2026-08-21 — domain, vhosts and certificates — and the smoke
+# test below failed the first deploy after that because it still named it.
 #
 # Paths are filtered because GitHub Pages still publishes from this branch as
 # the rollback, and a README edit has no business restarting anything.
@@ -98,5 +100,6 @@ jobs:
       # depends on, and a deploy that leaves either broken is not a success.
       - name: Smoke test
         run: |
-          curl -fsS -o /dev/null https://dosebuddyapp.com/
-          curl -fsS -o /dev/null https://api.dosebuddyapp.com/health
+          curl -fsS -o /dev/null https://sonadose.com/
+          curl -fsS -o /dev/null https://sonadose.com/es/
+          curl -fsS -o /dev/null https://api.sonadose.com/health
