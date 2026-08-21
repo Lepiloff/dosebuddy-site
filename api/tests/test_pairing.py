@@ -262,7 +262,7 @@ async def test_the_handover_queues_a_nudge_for_the_losing_device(api, session):
                    headers=auth_header(owner), json={"device_id": str(losing.id)})
     r = await api.post(f"/v1/profiles/{profile_id}/reminder-authority",
                        headers=auth_header(owner), json={"device_id": str(winning.id)})
-    assert r.status_code == 204
+    assert r.status_code == 200
 
     row = (await session.execute(
         select(AlertDelivery).where(AlertDelivery.kind == AlertKind.reminder_authority_lost)
@@ -287,8 +287,46 @@ async def test_claiming_authority_for_the_first_time_queues_nothing(api, session
 
     r = await api.post(f"/v1/profiles/{profile_id}/reminder-authority",
                        headers=auth_header(owner), json={"device_id": str(losing.id)})
-    assert r.status_code == 204
+    assert r.status_code == 200
     assert (await session.execute(select(AlertDelivery))).scalars().all() == []
+
+
+async def test_the_claim_answers_with_the_number_it_wrote(api, session):
+    """204 threw away the one thing the caller most needed.
+
+    The revision is what a device compares late nudges against. Told nothing, it
+    records nothing, and its fence stays open at whatever number it last saw — so
+    a nudge issued *before* this handover can still clear it and disarm the very
+    device the server has just made the owner.
+    """
+    owner, profile_id, first, second = await _two_devices(api, session)
+
+    r = await api.post(f"/v1/profiles/{profile_id}/reminder-authority",
+                       headers=auth_header(owner), json={"device_id": str(second.id)})
+    assert r.status_code == 200
+
+    body = r.json()
+    assert body["owner_device_id"] == str(second.id)
+
+    session.expire_all()
+    profile = await session.get(Profile, profile_id)
+    assert body["revision"] == profile.server_seq, "the receipt names the row that was written"
+
+
+async def test_the_revision_in_the_receipt_is_a_number(api, session):
+    """A string here would throw on the build that is already in the store.
+
+    It casts this field with `as num?` — inside the sign-in path, where a
+    failure of exactly this kind once hid for three days. Pull sends the same
+    quantity as a string because that value also travels through FCM's
+    `map<string,string>`, which has no numbers. The two disagree deliberately;
+    making them agree would break a client that can no longer be changed.
+    """
+    owner, profile_id, first, second = await _two_devices(api, session)
+
+    r = await api.post(f"/v1/profiles/{profile_id}/reminder-authority",
+                       headers=auth_header(owner), json={"device_id": str(second.id)})
+    assert isinstance(r.json()["revision"], int)
 
 
 async def test_the_api_has_no_push_sender_at_all(api):

@@ -448,11 +448,113 @@ async def test_reminder_authority_moves_and_is_visible_over_sync(api, session):
         headers=auth_header(owner),
         json={"device_id": str(mine.id)},
     )
-    assert r.status_code == 204
+    assert r.status_code == 200
 
     got = await pull(api, owner)
     prof = [p for p in got["changes"]["profiles"] if p["id"] == pid][0]
     assert prof["owner_device_id"] == str(mine.id)
+
+
+async def test_a_handover_alone_puts_the_profile_back_in_the_feed(api, session):
+    """Nothing about the profile changed, and the row must arrive anyway.
+
+    Pulling from zero would prove nothing — it returns every row regardless of
+    what moved. The cursor is drained first, so the only thing that can put this
+    profile back in the feed is the handover, which is the delivery mechanism
+    the whole invariant rests on.
+    """
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+
+    from sqlalchemy import select
+
+    from app.db.models import Device
+
+    mine = (await session.execute(
+        select(Device).where(Device.account_id == uuid.UUID(owner["account_id"]))
+    )).scalars().first()
+
+    drained = await pull(api, owner)
+    assert (await pull(api, owner, drained["cursor"]))["changes"] == {}, "cursor is drained"
+
+    await api.post(f"/v1/profiles/{pid}/reminder-authority",
+                   headers=auth_header(owner), json={"device_id": str(mine.id)})
+
+    rows = (await pull(api, owner, drained["cursor"]))["changes"]["profiles"]
+    assert [r["id"] for r in rows] == [pid]
+    assert rows[0]["owner_device_id"] == str(mine.id)
+    assert rows[0]["revision"] is not None
+
+
+async def test_a_handover_does_not_touch_updated_at(api, session):
+    """Ownership is not an edit of the profile, and the wire has to say so.
+
+    `updated_at` is what last-write-wins compares. A handover that bumped it
+    would have the server inventing a content timestamp, and the phone's own
+    pending rename would then lose to a change nobody made.
+
+    It has a consequence on the other side of the wire: after a handover the
+    incoming `updated_at` equals the local one by construction, so a client that
+    applied ownership only when the content resolved as *newer* would discard
+    every handover it was ever sent.
+    """
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+
+    from sqlalchemy import select
+
+    from app.db.models import Device
+
+    mine = (await session.execute(
+        select(Device).where(Device.account_id == uuid.UUID(owner["account_id"]))
+    )).scalars().first()
+
+    def row(got):
+        return [p for p in got["changes"]["profiles"] if p["id"] == pid][0]
+
+    before = row(await pull(api, owner))
+
+    await api.post(f"/v1/profiles/{pid}/reminder-authority",
+                   headers=auth_header(owner), json={"device_id": str(mine.id)})
+
+    after = row(await pull(api, owner))
+    assert after["updated_at"] == before["updated_at"]
+    assert after["created_at"] == before["created_at"]
+    assert after["name"] == before["name"]
+    assert int(after["revision"]) > int(before["revision"]), "only the revision moves"
+
+
+async def test_a_repeat_claim_answers_with_the_current_revision(api, session):
+    """The branch that writes nothing is where the caller is most likely behind.
+
+    A device asking for authority it already holds is exactly what a device that
+    missed a handover looks like, and that branch used to return without a word.
+    The number it gets back is the profile's current one rather than the one its
+    own handover produced: an ordinary edit has moved it since, and answering
+    with the older number would leave open the fence the answer exists to close.
+    """
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+
+    from sqlalchemy import select
+
+    from app.db.models import Device
+
+    mine = (await session.execute(
+        select(Device).where(Device.account_id == uuid.UUID(owner["account_id"]))
+    )).scalars().first()
+
+    claim = {"headers": auth_header(owner), "json": {"device_id": str(mine.id)}}
+    first = (await api.post(f"/v1/profiles/{pid}/reminder-authority", **claim)).json()
+
+    # A rename: it moves server_seq and leaves ownership alone.
+    await push(api, owner, profiles=[profile(pid, name="Renamed", at=ms() + 1000)])
+
+    again = await api.post(f"/v1/profiles/{pid}/reminder-authority", **claim)
+    assert again.status_code == 200
+    body = again.json()
+    assert body["owner_device_id"] == first["owner_device_id"]
+    assert body["revision"] > first["revision"]
+
+    prof = [p for p in (await pull(api, owner))["changes"]["profiles"] if p["id"] == pid][0]
+    assert int(prof["revision"]) == body["revision"], "both channels name one number"
 
 
 async def test_a_watcher_is_not_told_which_device_rings(api, session):
