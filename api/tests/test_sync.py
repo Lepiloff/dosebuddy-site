@@ -11,6 +11,7 @@ import uuid
 
 import pytest
 
+from app.api.sync import PAGE_SIZE
 from tests.conftest import auth_header, sign_in
 
 pytestmark = pytest.mark.asyncio
@@ -555,6 +556,61 @@ async def test_a_repeat_claim_answers_with_the_current_revision(api, session):
 
     prof = [p for p in (await pull(api, owner))["changes"]["profiles"] if p["id"] == pid][0]
     assert int(prof["revision"]) == body["revision"], "both channels name one number"
+
+
+async def test_roles_is_on_every_page_including_the_one_past_the_end(api, session):
+    """The key must never be absent, and it now guards someone else's data.
+
+    A client that reads a missing `roles` as an empty map reads it as "you watch
+    nobody", and acting on that means deleting the watched profiles it holds —
+    medications and intake history with them, none of it recoverable locally,
+    because none of it originated there. The server has always sent the map on
+    both return branches. This pins it, because "the server always does" is a
+    thin thing for that to rest on: it is two literals in one file, and a later
+    change made to save bytes would look harmless.
+
+    Walked across a page boundary on purpose. A single-page pull would pass
+    while saying nothing about the page that carries `has_more`, or the one
+    after the last.
+    """
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+    await push(api, owner,
+               dose_events=[dose(str(uuid.uuid4()), mid, pid, sid) for _ in range(PAGE_SIZE)])
+
+    cursor, pages, crossed = None, 0, False
+    while True:
+        body = await pull(api, owner, cursor)
+        assert "roles" in body, f"page {pages} arrived without roles"
+        assert body["roles"] == {pid: "owner"}
+        pages += 1
+        crossed = crossed or body["has_more"]
+        cursor = body["cursor"]
+        if not body["has_more"]:
+            break
+
+    assert pages > 1 and crossed, "the walk has to cross a page boundary to mean anything"
+
+    # And once past the end: nothing changed, and the map is still there. This
+    # is the response a quiet device gets all day.
+    drained = await pull(api, owner, cursor)
+    assert drained["changes"] == {}
+    assert "roles" in drained
+    assert drained["roles"] == {pid: "owner"}
+
+
+async def test_roles_is_present_when_the_caller_can_see_nothing(api):
+    """The early return, which is the branch most likely to be trimmed.
+
+    An account with no profiles at all gets an empty map rather than a missing
+    key — "you watch nobody" said out loud, instead of a silence the client has
+    to guess at. The two mean the same thing to a reader who conflates them and
+    opposite things to one who does not.
+    """
+    stranger = await sign_in(api, f"nobody-{uuid.uuid4()}")
+    body = await pull(api, stranger)
+    assert "roles" in body
+    assert body["roles"] == {}
+    assert body["changes"] == {}
 
 
 async def test_a_watcher_is_not_told_which_device_rings(api, session):
