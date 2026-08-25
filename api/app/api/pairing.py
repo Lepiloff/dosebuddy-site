@@ -356,8 +356,37 @@ class ReminderAuthorityIn(BaseModel):
     device_id: uuid.UUID
 
 
+class ReminderAuthorityOut(BaseModel):
+    """The receipt, which this endpoint used to compute and then throw away.
+
+    It answered 204. The number was right there — `RETURNING server_seq` on the
+    handover — and it went only into the nudge for the losing device, never to
+    the caller that had just won. The caller therefore recorded no revision, and
+    the fence it keeps against late nudges stayed open at whatever number it
+    last saw.
+
+    That is not the safe direction, which is what the client comment claimed.
+    Take a device A holding revision 5, while the server has since moved
+    authority A -> B (6) -> A (7) and the nudge for 6 is still queued at FCM. A
+    claims, is told nothing, stays at 5. The nudge for 6 then arrives, clears
+    "strictly newer than 5", and A disarms its alarms and records B as the owner
+    — while the server has A as the owner and sends nothing more. If B is the
+    phone that was replaced, nobody rings. Silence, not a tolerable duplicate.
+
+    **`revision` is a JSON number here and a string on pull, and that is not an
+    oversight.** The published client casts this one with `as num?`, which
+    throws on a string, and parses pull's with a switch that accepts either;
+    pull's must be a string because it also travels through FCM's
+    `map<string,string>`. Making the two agree would break the build in the
+    store, and that build cannot be changed.
+    """
+
+    owner_device_id: uuid.UUID
+    revision: int
+
+
 @router.post(
-    "/profiles/{profile_id}/reminder-authority", status_code=status.HTTP_204_NO_CONTENT
+    "/profiles/{profile_id}/reminder-authority", response_model=ReminderAuthorityOut
 )
 async def set_reminder_authority(
     profile_id: uuid.UUID,
@@ -365,7 +394,7 @@ async def set_reminder_authority(
     request: Request,
     caller: Caller = Depends(current_caller),
     session: AsyncSession = Depends(get_session),
-) -> None:
+) -> ReminderAuthorityOut:
     """Move the reminder authority for a profile to another device.
 
     Exactly one device materialises alarms for a profile (spec §1.4), so this is
@@ -392,7 +421,14 @@ async def set_reminder_authority(
 
     previous = profile.owner_device_id
     if previous == device.id:
-        return
+        # Nothing to write, but everything still to say. This branch is exactly
+        # the case the fence exists for: the caller is claiming what the server
+        # already believes it holds, which is what a device that missed a
+        # handover looks like. Answering it with the current `server_seq` is
+        # what closes the gap — the device that knew least now knows the number.
+        return ReminderAuthorityOut(
+            owner_device_id=device.id, revision=profile.server_seq
+        )
 
     # A new server_seq, so the change reaches every device through the ordinary
     # cursor rather than needing a delivery mechanism of its own.
@@ -442,3 +478,5 @@ async def set_reminder_authority(
                 utcnow(),
             )
             await session.commit()
+
+    return ReminderAuthorityOut(owner_device_id=device.id, revision=revision)

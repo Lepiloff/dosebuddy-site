@@ -627,7 +627,7 @@ async def _handover(api, session, db_engine):
     for device in (losing, winning):
         r = await api.post(f"/v1/profiles/{pid}/reminder-authority",
                            headers=auth_header(owner), json={"device_id": str(device.id)})
-        assert r.status_code == 204
+        assert r.status_code == 200
 
     # The winner pulls, which is what releases the nudge. Done explicitly here
     # rather than hidden in a fixture: it is the precondition the whole gate is
@@ -704,7 +704,7 @@ async def test_a_nudge_whose_authority_came_back_is_retired_not_sent(api, sessio
     # Authority goes back before the worker ever runs.
     r = await api.post(f"/v1/profiles/{pid}/reminder-authority",
                        headers=auth_header(owner), json={"device_id": str(losing.id)})
-    assert r.status_code == 204
+    assert r.status_code == 200
 
     # And the device it went back to pulls, which is what releases the nudge now
     # owed to the other one. Without this the gate holds that nudge — correctly,
