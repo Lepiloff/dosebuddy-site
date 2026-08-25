@@ -44,11 +44,82 @@ cd "$REPO/deploy"
 # The other order is the safe one: additive migrations leave the *old* code
 # working, so the brief overlap is old-code-on-new-schema rather than the
 # reverse.
+#
+# The image id is read on both sides of the build because a deploy that changes
+# nothing about the API should not restart it, and on 2026-08-25 one did: a
+# commit touching only `api/tests/` recreated `dosebuddy-api`, roughly ten
+# seconds during which every phone syncing got a 502. Idempotent retries make
+# that cheap, but it is still an outage nobody asked for, and it will happen on
+# every docs-or-tests deploy until the cause is known.
+#
+# Two candidates, and the log below now tells them apart instead of leaving it
+# to argument:
+#
+#   - the id changes. Then the build is not reproducible, and the likeliest
+#     reason is at the bottom of this very script: `docker builder prune` trims
+#     the cache each deploy, so the next one may have to re-execute
+#     `RUN pip install`, and a re-executed RUN produces a new layer — same
+#     contents, different id. Each deploy would be sabotaging the next one.
+#   - the id is stable and compose recreates anyway. Then the trigger is the
+#     service config, or something compose decides for itself, and the guard
+#     below stops it.
+api_before=$(docker image inspect -f '{{.Id}}' dosebuddy-api:local 2>/dev/null || echo none)
+
 docker compose build
+
+api_after=$(docker image inspect -f '{{.Id}}' dosebuddy-api:local 2>/dev/null || echo none)
 
 docker compose run --rm -T api alembic upgrade head
 
-docker compose up -d
+# Leave the API alone when neither its image nor its service config moved.
+#
+# Both halves are required. The image alone is not enough: a change to an
+# environment variable or a mount in docker-compose.yml is invisible to it, and
+# skipping the restart there would mean a deploy that reports success while the
+# setting it shipped is not in effect. Compose records the config it built a
+# container from, so the two can simply be compared.
+#
+# The default is to recreate. Every way this check can fail to reach an answer —
+# no previous image, an older compose without `--hash`, an unreadable label —
+# falls through to the ordinary path, because a needless restart is a far
+# smaller fault than a change that silently did not apply.
+echo "==> api"
+recreate=yes
+if [ "$api_before" = "$api_after" ] && [ "$api_before" != none ]; then
+    want=$(docker compose config --hash=api 2>/dev/null | awk '{print $2}')
+    have=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.config-hash"}}' \
+           dosebuddy-api 2>/dev/null || true)
+    if [ -n "$want" ] && [ "$want" = "$have" ]; then
+        recreate=no
+    else
+        echo "    image unchanged, service config changed"
+    fi
+else
+    echo "    image changed: ${api_before#sha256:} -> ${api_after#sha256:}"
+fi
+
+if [ "$recreate" = no ]; then
+    echo "    nothing changed; leaving the running container alone"
+    # Named services rather than a global --no-recreate: the flag is not a
+    # statement about the API, and applied to everything it would also swallow
+    # a change to any other service. Everything else keeps the ordinary path,
+    # including services added to the compose file after this was written.
+    #
+    # Everything else goes first, and the order is not cosmetic. `up api` also
+    # brings up what api depends on, so doing api last means Postgres and Redis
+    # are settled before the thing that talks to them — the same reason compose
+    # starts dependencies first when left to itself. Reversed, a Postgres that
+    # did need recreating would be pulled out from under a container that had
+    # just been told to keep running.
+    others=$(docker compose config --services | grep -vxE 'api|worker' | tr '\n' ' ')
+    if [ -n "$others" ]; then
+        # shellcheck disable=SC2086
+        docker compose up -d $others
+    fi
+    docker compose up -d --no-recreate api worker
+else
+    docker compose up -d
+fi
 
 for _ in $(seq 30); do
     docker compose exec -T nginx nginx -t >/dev/null 2>&1 && break
