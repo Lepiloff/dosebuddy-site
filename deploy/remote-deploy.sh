@@ -45,29 +45,39 @@ cd "$REPO/deploy"
 # working, so the brief overlap is old-code-on-new-schema rather than the
 # reverse.
 #
-# The image id is read on both sides of the build because a deploy that changes
-# nothing about the API should not restart it, and on 2026-08-25 one did: a
-# commit touching only `api/tests/` recreated `dosebuddy-api`, roughly ten
-# seconds during which every phone syncing got a 502. Idempotent retries make
-# that cheap, but it is still an outage nobody asked for, and it will happen on
-# every docs-or-tests deploy until the cause is known.
+# A deploy that changes nothing about the API should not restart it, and on
+# 2026-08-25 one did: a commit touching only `api/tests/` recreated
+# `dosebuddy-api`, ten seconds in which every phone mid-sync got a 502.
 #
-# Two candidates, and the log below now tells them apart instead of leaving it
-# to argument:
+# The cause, read out of the deploy log the same day rather than guessed at.
+# **Every layer was CACHED and the image id changed anyway.** BuildKit exports a
+# provenance attestation next to the image, the attestation carries build-time
+# metadata, and the digest of the manifest list therefore differs on every
+# build even when the contents are byte-identical. Compose compares that digest,
+# sees a new image, and recreates. Two services here build the same context, so
+# it happened twice per deploy.
 #
-#   - the id changes. Then the build is not reproducible, and the likeliest
-#     reason is at the bottom of this very script: `docker builder prune` trims
-#     the cache each deploy, so the next one may have to re-execute
-#     `RUN pip install`, and a re-executed RUN produces a new layer — same
-#     contents, different id. Each deploy would be sabotaging the next one.
-#   - the id is stable and compose recreates anyway. Then the trigger is the
-#     service config, or something compose decides for itself, and the guard
-#     below stops it.
-api_before=$(docker image inspect -f '{{.Id}}' dosebuddy-api:local 2>/dev/null || echo none)
+# `BUILDX_NO_DEFAULT_ATTESTATIONS` removes the attestation, which is what makes
+# the export deterministic. It is set as an environment variable rather than
+# passed as `--provenance=false`, because an unsupported flag fails the build
+# while an unrecognised variable is simply ignored — and this script must
+# survive an older compose on the box.
+#
+# The fingerprint below is the belt to that pair of braces: it asks whether the
+# image is the *same image*, in terms of its layers and the config the
+# Dockerfile sets, rather than whether its manifest happens to hash the same.
+# That question has one answer no matter what the exporter decides to attach.
+api_fingerprint() {
+    docker image inspect \
+        -f '{{json .RootFS.Layers}}|{{json .Config.Env}}|{{json .Config.Cmd}}|{{json .Config.Entrypoint}}|{{json .Config.WorkingDir}}|{{json .Config.User}}' \
+        dosebuddy-api:local 2>/dev/null || echo none
+}
 
-docker compose build
+api_before=$(api_fingerprint)
 
-api_after=$(docker image inspect -f '{{.Id}}' dosebuddy-api:local 2>/dev/null || echo none)
+BUILDX_NO_DEFAULT_ATTESTATIONS=1 docker compose build
+
+api_after=$(api_fingerprint)
 
 docker compose run --rm -T api alembic upgrade head
 
@@ -95,8 +105,9 @@ if [ "$api_before" = "$api_after" ] && [ "$api_before" != none ]; then
         echo "    image unchanged, service config changed"
     fi
 else
-    echo "    image changed: ${api_before#sha256:} -> ${api_after#sha256:}"
+    echo "    image contents changed"
 fi
+echo "    id: $(docker image inspect -f '{{.Id}}' dosebuddy-api:local 2>/dev/null || echo none)"
 
 if [ "$recreate" = no ]; then
     echo "    nothing changed; leaving the running container alone"
