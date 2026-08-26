@@ -2,6 +2,16 @@
 .idea/
 .vscode/
 
+# Local Claude Code settings and their atomic-write temp files
+.claude/settings.local.json
+.claude/*.tmp*
+
+# Renders from tool/ui-shots.sh. Overwritten every run, never a baseline.
+build/
+
+# Playwright CLI scratch state, created by `npx playwright`.
+.playwright-cli/
+
 # OS
 .DS_Store
 

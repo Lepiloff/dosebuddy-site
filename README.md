@@ -48,8 +48,15 @@ a sequence are not things SQLite can stand in for.
 
 ```bash
 python3 -m http.server 8765          # the landing: /  and  /es/
+tool/ui-shots.sh                     # render both locales and report what a PNG cannot
 ./tool/prepare-assets.sh             # regenerate img/ and fonts/ (or: screens)
 ```
+
+`tool/ui-shots.sh` writes PNGs to `build/ui-shots/` and reports console errors,
+failed requests, horizontal overflow and CSP violations — the local preview
+sends no CSP of its own, so an inline style works there and vanishes in
+production. It borrows Playwright from the npx cache and adds nothing to this
+repository.
 
 ```bash
 cd api && pytest                     # needs TEST_DATABASE_URL pointing at Postgres
@@ -65,3 +72,4 @@ cd api && pytest                     # needs TEST_DATABASE_URL pointing at Postg
 | [`docs/debts.md`](docs/debts.md) | Deferred work and acceptance findings. A debt leaves only with the commit that closes it. |
 | [`docs/landing.md`](docs/landing.md) | Constraints the page must keep — contrast, consent, URLs, no medical claims — and the keyword research behind the copy. |
 | [`deploy/README.md`](deploy/README.md) | The box, the certificates, the rollback, the backups. |
+| [`CLAUDE.md`](CLAUDE.md) | What an agent gets wrong here without being told: the deploy trigger, the CSP, the allow-list. |

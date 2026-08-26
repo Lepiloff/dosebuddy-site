@@ -24,6 +24,15 @@ the script at all until Accept is clicked, and both buttons carry the same
 visual weight, because a banner that makes "Decline" quieter is not freely
 given consent.
 
+**Styling lives in `css/site.css`, never inline.** The production CSP sets
+`style-src 'self'` and `script-src 'self' '<one hash>'`, so an inline `<style>`
+block, a `style="…"` attribute, or an edit to the one inline script is dropped by
+the browser. `python3 -m http.server` sends no CSP at all, so the page looks
+correct locally and is broken in production — silently, with no error anywhere.
+`tool/ui-shots.sh` replays the real header locally so the violation surfaces as a
+console error; `deploy/nginx/snippets/landing.conf` is where the policy actually
+lives, and `.github/workflows/deploy.yml` fails the deploy on a stale hash.
+
 **URLs must not change.** Identical paths are what made the move off GitHub
 Pages, and later the move to a new domain, cost nothing in search. Changing a
 path is the one edit that genuinely breaks rankings.
