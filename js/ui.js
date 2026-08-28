@@ -34,7 +34,7 @@
      else has to change:
 
        <div class="video" data-yt="VIDEO_ID" data-poster="/img/video-poster.webp"
-            data-label="Play the DoseBuddy overview"></div>
+            data-label="Play the Sonadose overview"></div>
 
      Nothing is requested from Google until the visitor clicks, and the embed
      then uses youtube-nocookie.com. */

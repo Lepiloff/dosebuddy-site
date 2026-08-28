@@ -19,7 +19,7 @@ the executable form of that claim, calibrated against the live Pages edge on
 | | On Pages | Here |
 |---|---|---|
 | TLS certificate | issued and renewed by GitHub | Let's Encrypt via the certbot sidecar |
-| `http` → `https` | automatic | `conf.d/10-dosebuddyapp.conf` |
+| `http` → `https` | automatic | `conf.d/10-sonadose.conf` |
 | `www` → apex, 301 | automatic | same, in one hop as before |
 | CDN | Fastly, global | **lost.** Single origin in eu-central-1 |
 | Web root | the whole repository | only the site (`site-exclude.txt`) |
@@ -35,8 +35,8 @@ the cutover and record the numbers next to the ones in the top-level `README.md`
 docker-compose.yml         nginx, certbot, postgres, redis, api
 env.example                what deploy/.env holds; .env itself is gitignored
 nginx/conf.d/00-common.conf        http-level settings, TLS params, catch-all vhost
-nginx/conf.d/10-dosebuddyapp.conf  the landing: four server blocks
-nginx/conf.d/20-api.conf           api.dosebuddyapp.com
+nginx/conf.d/10-sonadose.conf      the landing: four server blocks
+nginx/conf.d/20-api.conf           api.sonadose.com
 nginx/snippets/landing.conf        how the site is served
 site-include.txt           what the web root may contain (allow-list)
 init-cert.sh               first certificate for a hostname

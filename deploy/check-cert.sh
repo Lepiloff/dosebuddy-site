@@ -3,15 +3,14 @@
 # Days left on a host's certificate — and a failure while there is still time to
 # do something about it.
 #
-#   ./check-cert.sh api.dosebuddyapp.com
-#   ./check-cert.sh api.dosebuddyapp.com 14
+#   ./check-cert.sh api.sonadose.com
+#   ./check-cert.sh api.sonadose.com 14
 #
 # Why this exists next to verify.sh, which already checks a certificate: the
-# monitor runs verify.sh against dosebuddyapp.com, so the landing gets about
-# nine days of warning. api.dosebuddyapp.com had none. The only thing watching
-# it was a curl of /health, which starts failing the moment the certificate
-# expires rather than before — no notice on the host that carries sync and
-# caregiver alerts once v1.1 ships.
+# monitor runs verify.sh against the landing, so that host gets about nine days
+# of warning. The api host had none. The only thing watching it was a curl of
+# /health, which starts failing the moment the certificate expires rather than
+# before — no notice on the host that carries sync and caregiver alerts.
 #
 # What an expired certificate here does and does not do, because the difference
 # decides how fast anyone needs to move: sync and caregiver alerts stop; the

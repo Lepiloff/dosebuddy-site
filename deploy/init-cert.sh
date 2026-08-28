@@ -2,8 +2,8 @@
 #
 # Issue the first Let's Encrypt certificate for a hostname on this box.
 #
-#   ./init-cert.sh new.dosebuddyapp.com                          # rehearsal
-#   ./init-cert.sh dosebuddyapp.com www.dosebuddyapp.com         # cutover
+#   ./init-cert.sh api.sonadose.com                    # one hostname
+#   ./init-cert.sh sonadose.com www.sonadose.com       # apex and www together
 #
 # Renewals after this are the certbot sidecar's job and need no help.
 #
@@ -126,7 +126,7 @@ if [ "${PREPARE_ONLY:-0}" = "1" ]; then
     echo
     echo "PREPARE_ONLY: nginx is up on placeholder certificates and nothing was"
     echo "requested. The site can be checked on the box now:"
-    echo "  curl -sk --resolve dosebuddyapp.com:443:127.0.0.1 https://dosebuddyapp.com/ | head"
+    echo "  curl -sk --resolve sonadose.com:443:127.0.0.1 https://sonadose.com/ | head"
     echo "Re-run without PREPARE_ONLY once DNS and the security group are ready."
     exit 0
 fi
