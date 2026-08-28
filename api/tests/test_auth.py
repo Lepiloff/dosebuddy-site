@@ -11,8 +11,8 @@ from datetime import datetime, timezone
 import pytest
 from sqlalchemy import select, text
 
-from app.db.models import Account, Device, RefreshToken
-from tests.conftest import auth_header, sign_in
+from app.db.models import Account, Device, Profile, ProfileMembership, RefreshToken
+from tests.conftest import auth_header, make_profile, sign_in
 
 pytestmark = pytest.mark.asyncio
 
@@ -165,6 +165,43 @@ async def test_tokens_die_with_the_account(api, session):
 
     left = (await session.execute(select(RefreshToken))).scalars().all()
     assert left == []
+
+
+async def test_a_watcher_leaving_takes_only_its_own_membership(api, session):
+    """The one part of deletion that is about somebody else's data.
+
+    Production had exactly this shape on 2026-08-28 — one account watching
+    another's profile — and both accounts were deleted minutes apart, which is
+    the only reason it was ever exercised. The profile must survive the
+    watcher, and the membership must not: it is the watcher's row, and erasure
+    outranks keeping a record of who watched whom.
+    """
+    owner = await sign_in(api, f"owner-{uuid.uuid4()}")
+    profile_id = await make_profile(session, owner["account_id"], "Someone")
+    caregiver = await sign_in(api, f"cg-{uuid.uuid4()}")
+
+    code = (
+        await api.post(
+            "/v1/pairing/codes",
+            headers=auth_header(owner),
+            json={"profile_id": str(profile_id), "role": "with_alerts"},
+        )
+    ).json()["code"]
+    redeemed = await api.post(
+        "/v1/pairing/redeem", headers=auth_header(caregiver), json={"code": code}
+    )
+    assert redeemed.status_code == 200
+
+    assert (await api.delete("/v1/account", headers=auth_header(caregiver))).status_code == 204
+
+    survived = (
+        await session.execute(select(Profile).where(Profile.id == profile_id))
+    ).scalar_one_or_none()
+    assert survived is not None
+
+    # Gone, not kept revoked. The cascade takes the row, and the assertion is
+    # on the row's absence rather than on `revoked_at` for that reason.
+    assert (await session.execute(select(ProfileMembership))).scalars().all() == []
 
 
 async def test_sign_in_says_so_when_google_is_not_configured(api):
