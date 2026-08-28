@@ -37,7 +37,7 @@
   "@type": "SoftwareApplication",
   "name": "Sonadose",
   "alternateName": "Sonadose - Recordatorio",
-  "description": "Recordatorio de medicación pensado para familias que cuidan de una persona mayor. Tú añades los medicamentos y los horarios; ellos ven una única pantalla enorme con dos botones. Alarmas a pantalla completa que sobreviven a reinicios y al ahorro de batería, historial de tomas y control de existencias.",
+  "description": "Un pastillero con alarma para el móvil: añades los medicamentos y los horarios, y la app ocupa la pantalla y repite el aviso hasta confirmar la toma, con el horario que tú decidas. Incluye modo sénior de dos botones para quien lo necesite, uso compartido en familia, alarmas a pantalla completa que sobreviven a reinicios y al ahorro de batería, historial de tomas y control de existencias.",
   "applicationCategory": "HealthApplication",
   "applicationSubCategory": "Recordatorio de medicación",
   "operatingSystem": "Android 8.0 o superior",
@@ -117,6 +117,21 @@
 <body>
 <a class="skip-link" href="#main">Saltar al contenido</a>
 
+<svg class="icon-sprite" width="0" height="0" aria-hidden="true">
+  <defs>
+    <symbol id="ic-senior" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="15" rx="3"/><circle cx="9" cy="12" r="2"/><circle cx="15" cy="12" r="2"/></symbol>
+    <symbol id="ic-today" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M8.3 12.3 10.8 14.8 15.9 9.4"/></symbol>
+    <symbol id="ic-history" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12a8 8 0 1 1 2.4 5.7"/><path d="M4 12V7M4 12H9"/></symbol>
+    <symbol id="ic-card" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="4.5" y="3.5" width="15" height="17" rx="2.2"/><path d="M8 8h8M8 12h8M8 16h5"/></symbol>
+    <symbol id="ic-calendar" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="15" rx="2.2"/><path d="M3.5 9.5h17M8 3.5v3M16 3.5v3"/><path d="M7.2 13.2h1.6M11.2 13.2h1.6M15.2 13.2h1.6M7.2 17h1.6M11.2 17h1.6"/></symbol>
+    <symbol id="ic-profiles" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="8.5" cy="8.5" r="3"/><circle cx="16" cy="10.5" r="2.4"/><path d="M3.5 20c.5-3.4 2.6-5.3 5-5.3s4.5 1.9 5 5.3M14.4 20c.4-2.6 1.9-4.2 3.6-4.6"/></symbol>
+    <symbol id="ic-stop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><rect x="9" y="9" width="6" height="6" rx="1"/></symbol>
+    <symbol id="ic-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3.2 2"/></symbol>
+    <symbol id="ic-globe" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.4 2.3 3.6 5.3 3.6 8.5s-1.2 6.2-3.6 8.5c-2.4-2.3-3.6-5.3-3.6-8.5S9.6 5.8 12 3.5Z"/></symbol>
+    <symbol id="ic-shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5 19 6.3v5.4c0 4.6-3 7.7-7 8.8-4-1.1-7-4.2-7-8.8V6.3Z"/><path d="M8.6 12.2 11 14.6 15.6 9.8"/></symbol>
+  </defs>
+</svg>
+
 <div class="lang-hint" id="lang-hint" data-lang="en" hidden>
   <span lang="en">This page is also available in English.</span>
   <a href="/" hreflang="en" lang="en">View in English</a>
@@ -152,60 +167,55 @@
   <section class="hero">
     <div class="wrap hero__grid">
       <div>
-        <p class="eyebrow">Para quien cuida de un padre o una madre mayor</p>
-        <h1>Un pastillero con alarma, en el móvil de tus padres</h1>
-        <p class="hero__lead">
-          La misma función que un pastillero electrónico, sin comprar nada. Tú añades
-          los medicamentos una vez; ellos ven una sola pantalla con la hora, el
-          medicamento y dos botones grandes. La alarma suena a pantalla completa y
-          se repite hasta cinco veces, cada cinco minutos, hasta que se confirma la
-          toma.
+        <p class="eyebrow hero-in-1">Para cualquiera con una pauta de medicación</p>
+        <h1 class="hero-in-2">El pastillero con alarma que <span class="accent-word">de verdad te avisa</span></h1>
+        <p class="hero__lead hero-in-3">
+          Configura la hora una vez. Cuando toca una pastilla, Sonadose ocupa la
+          pantalla como un despertador, no un aviso silencioso que puedes pasar
+          por alto, y sigue recordándotelo hasta que lo confirmes, con el
+          horario que tú decidas.
         </p>
 
-        <div class="hero__cta">
-          <a class="play-badge" href="https://play.google.com/store/apps/details?id=com.everpine.dosebuddy" rel="noopener">
+        <div class="hero__cta hero-in-4">
+          <a class="play-badge" href="https://play.google.com/store/apps/details?id=com.everpine.dosebuddy&referrer=utm_source%3Demea_Med%26utm_medium%3Dlanding_page" rel="noopener">
             <img src="/img/badges/es.webp" alt="Consigue Sonadose en Google Play" width="512" height="198">
           </a>
           <p class="cta-note">Gratis · Sin publicidad · Sin suscripción · Android 8.0 o superior · Español e inglés</p>
         </div>
-
-        <ul class="dose-strip" aria-hidden="true">
-          <li class="cell"><strong>8:00</strong><small>Tomada</small></li>
-          <li class="cell"><strong>14:00</strong><small>Tomada</small></li>
-          <li class="cell is-next"><strong>21:00</strong><small>Toca ahora</small></li>
-        </ul>
       </div>
 
-      <figure class="shot shot--center">
-        <img src="/img/screens/es-today-640.webp"
-             srcset="/img/screens/es-today-320.webp 320w, /img/screens/es-today-640.webp 640w"
-             sizes="304px"
-             width="640" height="1256" fetchpriority="high" decoding="async"
-             alt="Pantalla Hoy de Sonadose con los medicamentos de la mañana y de la tarde, la hora de cada toma y una marca de verificación en las que ya se han tomado.">
-      </figure>
+      <div class="hero__visual">
+        <figure class="phone hero-in-phone">
+          <img src="/img/screens/es-today-640.webp"
+               srcset="/img/screens/es-today-320.webp 320w, /img/screens/es-today-640.webp 640w"
+               sizes="280px"
+               width="640" height="1256" fetchpriority="high" decoding="async"
+               alt="Pantalla Hoy de Sonadose con los medicamentos de la mañana y de la tarde, la hora de cada toma y una marca de verificación en las que ya se han tomado.">
+        </figure>
+        <ul class="pchips" aria-hidden="true">
+          <li class="pchip"><strong>8:00</strong><span>Tomada</span></li>
+          <li class="pchip"><strong>14:00</strong><span>Tomada</span></li>
+          <li class="pchip pchip--next"><strong>21:00</strong><span>Toca ahora</span></li>
+        </ul>
+      </div>
     </div>
   </section>
 
   <!-- 2. El problema -->
-  <section class="section">
-    <div class="wrap split">
-      <div class="split__body stack">
+  <section class="stat-band">
+    <div class="wrap">
+      <div class="stack">
         <h2>Acordarse de tres pastillas al día cuesta más de lo que parece</h2>
         <p>
           Casi nunca es cabezonería. Es una llamada en mitad del desayuno, una
           siesta que se alarga, una caja nueva idéntica a la de siempre.
         </p>
         <p>
-          Un papel en la nevera no suena. Y el recordatorio del propio móvil es una
-          notificación discreta que ya ha desaparecido cuando alguien mira la
-          pantalla.
-        </p>
-        <p>
           Sonadose está hecho justo para ese momento: suena fuerte, ocupa toda la
           pantalla y no se rinde tras un solo aviso.
         </p>
       </div>
-      <div class="stat">
+      <div class="stat-card">
         <b>Cerca de la mitad</b>
         <p>de las personas con una enfermedad crónica no toman la medicación como se le ha prescrito.</p>
         <cite>Organización Mundial de la Salud</cite>
@@ -213,166 +223,159 @@
     </div>
   </section>
 
-  <!-- 3. Cómo funciona -->
+  <!-- 3. Funciones principales -->
   <section class="section">
     <div class="wrap">
       <div class="section__head">
-        <h2>Cómo funciona</h2>
-        <p>Tres pasos, y solo el primero es cosa tuya.</p>
+        <h2>Lo que Sonadose hace de verdad</h2>
+        <p>Cuatro cosas bien hechas. El resto está debajo.</p>
       </div>
-      <ol class="steps">
-        <li class="cell">
-          <h3>Tú lo configuras</h3>
-          <p>
-            Añade cada medicamento con una foto de la caja, las horas de la toma y
-            cuántas pastillas trae el envase. Unos minutos, una sola vez.
-          </p>
-        </li>
-        <li class="cell">
-          <h3>Ellos solo pulsan</h3>
-          <p>
-            A su hora, el móvil suena y llena la pantalla: el medicamento, la hora y
-            dos botones: «Tomada» y «Más tarde». Nada más que buscar.
-          </p>
-        </li>
-        <li class="cell">
-          <h3>Tú lo compruebas</h3>
-          <p>
-            Cada toma confirmada queda en un calendario en ese móvil. Un vistazo y
-            sabes cómo ha ido la semana, sin interrogatorios en la cena.
-          </p>
-        </li>
-      </ol>
+
+      <div class="features">
+        <article class="feature feature--lead">
+          <div>
+            <span class="tag tag--teal">Familia</span>
+            <h3>Comparte un perfil. Solo suena un móvil.</h3>
+            <p>Añades los medicamentos de tu madre en tu móvil; ella los ve en el suyo. Se te avisa si se olvida una toma. Los recordatorios suenan en un único móvil por perfil: el que tú elijas. Nadie recibe el aviso dos veces, y tus propios móviles se mantienen sincronizados.</p>
+          </div>
+          <div class="crop-window">
+            <img src="/img/screens/es-calendar-640.webp"
+                 srcset="/img/screens/es-calendar-320.webp 320w, /img/screens/es-calendar-640.webp 640w"
+                 sizes="224px"
+                 width="640" height="1256" loading="lazy" decoding="async"
+                 alt="Calendario de Sonadose de julio de 2026, la mayoría de días con una toma confirmada y uno marcado con una toma olvidada.">
+          </div>
+        </article>
+
+        <div class="features__rest">
+          <article class="feature">
+            <span class="tag tag--amber">Fiabilidad</span>
+            <h3>Recordatorios que mantienen su hora</h3>
+            <p>Alarmas a hora exacta que sobreviven a reinicios y al ahorro de batería. Se repiten hasta confirmar la toma, con el intervalo que tú elijas. Prueba de fiabilidad integrada y guía de ajustes de batería para tu marca de móvil.</p>
+            <div class="feature__media">
+              <div class="crop-window crop-window--small">
+                <img src="/img/screens/es-elder-640.webp"
+                     srcset="/img/screens/es-elder-320.webp 320w, /img/screens/es-elder-640.webp 640w"
+                     sizes="200px"
+                     width="640" height="1256" loading="lazy" decoding="async"
+                     alt="Alarma a pantalla completa de Sonadose con el próximo medicamento, su hora y un botón grande de Tomada.">
+              </div>
+            </div>
+          </article>
+
+          <article class="feature">
+            <span class="tag tag--rose">Coste</span>
+            <h3>Gratis, sin conexión y sin cuenta</h3>
+            <p>Todos los medicamentos, todos los perfiles, el motor de recordatorios completo. La cuenta solo hace falta para compartir un perfil o sincronizar tus propios móviles.</p>
+            <div class="feature__media">
+              <div class="zero-stat">
+                <span class="zero-stat__num">&euro;0</span>
+                <ul class="zero-stat__list"><li>publicidad</li><li>suscripción</li><li>registro obligatorio</li></ul>
+              </div>
+            </div>
+          </article>
+
+          <article class="feature">
+            <span class="tag tag--blue">Existencias</span>
+            <h3>Cuenta lo que queda</h3>
+            <p>Dile el tamaño del envase una vez. Sonadose cuenta hacia atrás y avisa para comprar el siguiente antes de que se acabe el último.</p>
+            <div class="feature__media">
+              <div class="stock-gauge">
+                <div class="stock-gauge__dots" aria-hidden="true">
+                  <span></span><span></span><span></span><span></span><span></span>
+                  <span></span><span></span><span class="is-low"></span><span class="is-low"></span><span class="is-low"></span>
+                </div>
+                <p class="stock-gauge__note"><strong>Quedan 3.</strong> Toca reponer antes de que se acabe la caja.</p>
+              </div>
+            </div>
+          </article>
+        </div>
+      </div>
     </div>
   </section>
 
-  <!-- 4. Modo sénior -->
-  <section class="section">
-    <div class="wrap split split--flip">
-      <figure class="shot shot--center">
-        <img src="/img/screens/es-elder-640.webp"
-             srcset="/img/screens/es-elder-320.webp 320w, /img/screens/es-elder-640.webp 640w"
-             sizes="304px"
-             width="640" height="1256" loading="lazy" decoding="async"
-             alt="Modo sénior de Sonadose: un solo medicamento en letra muy grande con la hora de la toma, la foto del envase y dos botones a todo lo ancho, «Tomada» y «Más tarde».">
-      </figure>
-      <div class="split__body stack">
-        <h2>Modo sénior: dos botones y nada que se pueda estropear</h2>
-        <p>
-          Al activarlo, la app se convierte en una sola pantalla. Sin pestañas, sin
-          menús y sin ajustes en los que meterse por error.
-        </p>
-        <ul class="stack">
-          <li><strong>Texto que se lee desde el otro lado de la cocina.</strong> Se agranda toda la pantalla, no solo el titular.</li>
-          <li><strong>Una foto de la caja de verdad.</strong> Así el envase correcto es evidente aunque todos los nombres se parezcan.</li>
-          <li><strong>Una alarma que suena de verdad.</strong> A pantalla completa, como un despertador, incluso con el móvil en silencio.</li>
-          <li><strong>Salida protegida.</strong> Un toque despistado no puede llevarlos a los ajustes ni hacerles perder la app.</li>
-        </ul>
-      </div>
-    </div>
-  </section>
-
-  <!-- 5. Tranquilidad (uso compartido en familia, incluido en la v1.1) -->
-  <section class="section">
-    <div class="wrap split">
-      <div class="split__body stack">
-        <h2>Botones grandes para ellos. Tranquilidad para ti.</h2>
-        <p>
-          Sonadose funciona en su móvil: botones grandes, una sola pantalla, sin
-          cuenta y sin cobertura. Los recordatorios no dependen de nosotros: si
-          nuestro servidor se cae, su teléfono sigue avisando.
-        </p>
-        <p>
-          Cuando quieras saber que todo va bien, te comparten el perfil. El uso
-          compartido empieza con un código que se genera en su móvil y se entrega
-          una vez: nadie puede pedir acceso. A partir de ahí ves los medicamentos
-          y si cada dosis se tomó, y puedes recibir un aviso cuando alguna no se
-          toma o cuando su teléfono lleva mucho tiempo en silencio.
-        </p>
-        <p>
-          Lo que no obtienes es su móvil. Compartir muestra el historial: no te
-          deja cambiar una pauta, y quien es dueño del perfil puede retirar el
-          acceso cuando quiera. La app es gratis.
-        </p>
-      </div>
-      <figure class="shot shot--center">
-        <img src="/img/screens/es-calendar-640.webp"
-             srcset="/img/screens/es-calendar-320.webp 320w, /img/screens/es-calendar-640.webp 640w"
-             sizes="304px"
-             width="640" height="1256" loading="lazy" decoding="async"
-             alt="Calendario de Sonadose de julio de 2026, con cada día marcado según si se confirmaron todas las tomas.">
-      </figure>
-    </div>
-  </section>
-
-  <!-- 6. Fiabilidad y privacidad -->
+  <!-- 4. Galería -->
   <section class="section">
     <div class="wrap">
       <div class="section__head">
-        <h2>Pensado para seguir ahí a las nueve de la noche</h2>
-        <p>
-          Un recordatorio que deja de funcionar sin avisar es peor que no tener
-          ninguno. Es la parte de Sonadose que más atención recibe.
-        </p>
+        <h2>Míralo en su móvil</h2>
+        <p>Cuatro pantallas, cada una con su función.</p>
       </div>
-
-      <ul class="features">
-        <li class="cell">
-          <h3>Sobrevive a reinicios y al ahorro de batería</h3>
-          <p>
-            Las alarmas a hora exacta se rearman tras reiniciar, y la configuración
-            pide exactamente los permisos que Android necesita para que salten a su
-            hora.
-          </p>
+      <ul class="gallery">
+        <li class="gallery__item">
+          <figure class="phone">
+            <img src="/img/screens/es-today-640.webp"
+                 srcset="/img/screens/es-today-320.webp 320w, /img/screens/es-today-640.webp 640w"
+                 sizes="200px" width="640" height="1256" loading="lazy" decoding="async"
+                 alt="Pantalla Hoy de Sonadose con los medicamentos de la mañana y de la tarde y una marca de verificación en las que ya se han tomado.">
+          </figure>
+          <figcaption>Hoy</figcaption>
         </li>
-        <li class="cell">
-          <h3>Insiste</h3>
-          <p>
-            La alarma se repite hasta cinco veces, cada cinco minutos. Después el
-            aviso permanece en pantalla hasta que se cierra la ventana de toma.
-            Posponer quince minutos cuando no es buen momento.
-          </p>
+        <li class="gallery__item">
+          <figure class="phone">
+            <img src="/img/screens/es-elder-640.webp"
+                 srcset="/img/screens/es-elder-320.webp 320w, /img/screens/es-elder-640.webp 640w"
+                 sizes="200px" width="640" height="1256" loading="lazy" decoding="async"
+                 alt="Modo sénior de Sonadose: un solo medicamento en letra muy grande con la hora de la toma, la foto del envase y dos botones a todo lo ancho, «Tomada» y «Más tarde».">
+          </figure>
+          <figcaption>Modo sénior</figcaption>
         </li>
-        <li class="cell">
-          <h3>Prueba de fiabilidad incluida</h3>
-          <p>
-            Mándate un recordatorio de prueba y sigue la guía paso a paso de los
-            ajustes de batería de tu marca de móvil. Huawei y Xiaomi necesitan una
-            mano.
-          </p>
+        <li class="gallery__item">
+          <figure class="phone">
+            <img src="/img/screens/es-calendar-640.webp"
+                 srcset="/img/screens/es-calendar-320.webp 320w, /img/screens/es-calendar-640.webp 640w"
+                 sizes="200px" width="640" height="1256" loading="lazy" decoding="async"
+                 alt="Calendario de Sonadose de julio de 2026, con cada día marcado según si se confirmaron todas las tomas.">
+          </figure>
+          <figcaption>Calendario</figcaption>
         </li>
-        <li class="cell">
-          <h3>Cuenta lo que queda</h3>
-          <p>
-            Dile cuántas pastillas trae el envase y Sonadose va descontando; luego
-            avisa para comprar la caja siguiente antes de que se acabe la última.
-          </p>
+        <li class="gallery__item">
+          <figure class="phone">
+            <img src="/img/screens/es-medications-640.webp"
+                 srcset="/img/screens/es-medications-320.webp 320w, /img/screens/es-medications-640.webp 640w"
+                 sizes="200px" width="640" height="1256" loading="lazy" decoding="async"
+                 alt="Lista de medicamentos de Sonadose, con la dosis, la pauta y las pastillas que quedan en el envase de cada uno.">
+          </figure>
+          <figcaption>Medicamentos</figcaption>
         </li>
       </ul>
+    </div>
+  </section>
 
-      <div class="split spaced">
-        <div class="split__body stack">
-          <h3>Qué sale del móvil: casi nada</h3>
-          <p>
-            Tu lista de medicamentos, los horarios y el historial de tomas se
-            guardan en el dispositivo, y no hace falta cuenta para usar la app. Los nombres de
-            medicamentos y perfiles nunca se envían a analítica ni a anunciantes, y
-            tus datos nunca se venden.
-          </p>
-          <p>
-            Una sola cosa sale del móvil, y no es médica: estadísticas de fallos y
-            de uso a través de Google Firebase. Llevan un identificador técnico de la
-            instalación, no tuyo. El detalle está en la
-            <a href="https://lepiloff.github.io/dosebuddy-legal/privacy.html" rel="noopener">política de privacidad</a>.
-          </p>
-        </div>
-        <figure class="shot shot--center">
-          <img src="/img/screens/es-medications-640.webp"
-               srcset="/img/screens/es-medications-320.webp 320w, /img/screens/es-medications-640.webp 640w"
-               sizes="304px"
-               width="640" height="1256" loading="lazy" decoding="async"
-               alt="Lista de medicamentos de Sonadose, con la dosis, la pauta y las pastillas que quedan en el envase de cada uno.">
-        </figure>
+  <!-- 5. Lo demás -->
+  <section class="section">
+    <div class="wrap">
+      <div class="section__head">
+        <h2>Lo demás, de un vistazo</h2>
+        <p>Más pequeño, pero no un añadido: cada cosa se hizo porque una semana real la necesitaba.</p>
+      </div>
+      <div class="index-list">
+        <div class="index-row"><span class="index-row__icon-wrap index-row__icon-wrap--teal"><svg class="index-row__icon"><use href="#ic-senior"></use></svg></span><div><h3>Modo sénior</h3><p>Una pantalla, dos botones grandes. Salir exige una suma sencilla, para no salir sin querer.</p></div></div>
+        <div class="index-row"><span class="index-row__icon-wrap index-row__icon-wrap--blue"><svg class="index-row__icon"><use href="#ic-today"></use></svg></span><div><h3>Hoy</h3><p>Qué tomar, qué está tomado y qué viene después.</p></div></div>
+        <div class="index-row"><span class="index-row__icon-wrap index-row__icon-wrap--amber"><svg class="index-row__icon"><use href="#ic-history"></use></svg></span><div><h3>Tres días atrás o adelante</h3><p>Marca una toma que olvidaste confirmar.</p></div></div>
+        <div class="index-row"><span class="index-row__icon-wrap index-row__icon-wrap--rose"><svg class="index-row__icon"><use href="#ic-card"></use></svg></span><div><h3>Una ficha por medicamento</h3><p>Pauta, existencias y una nota que puedes leer y editar.</p></div></div>
+        <div class="index-row"><span class="index-row__icon-wrap index-row__icon-wrap--teal"><svg class="index-row__icon"><use href="#ic-calendar"></use></svg></span><div><h3>Historial en calendario</h3><p>Cualquier día de un vistazo.</p></div></div>
+        <div class="index-row"><span class="index-row__icon-wrap index-row__icon-wrap--blue"><svg class="index-row__icon"><use href="#ic-profiles"></use></svg></span><div><h3>Varios perfiles</h3><p>Tus vitaminas y las recetas de mamá, por separado.</p></div></div>
+        <div class="index-row"><span class="index-row__icon-wrap index-row__icon-wrap--amber"><svg class="index-row__icon"><use href="#ic-stop"></use></svg></span><div><h3>Finalizar una pauta</h3><p>Detiene los próximos recordatorios y conserva el historial.</p></div></div>
+        <div class="index-row"><span class="index-row__icon-wrap index-row__icon-wrap--rose"><svg class="index-row__icon"><use href="#ic-clock"></use></svg></span><div><h3>Posponer 15 minutos</h3><p>Para cuando no es buen momento.</p></div></div>
+        <div class="index-row"><span class="index-row__icon-wrap index-row__icon-wrap--teal"><svg class="index-row__icon"><use href="#ic-globe"></use></svg></span><div><h3>Español e inglés</h3><p>Tema claro y oscuro, en los dos idiomas.</p></div></div>
+        <div class="index-row"><span class="index-row__icon-wrap index-row__icon-wrap--blue"><svg class="index-row__icon"><use href="#ic-shield"></use></svg></span><div><h3>Privado por diseño</h3><p>Medicamentos e historial se quedan en el dispositivo, nunca se venden.</p></div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 6. Confianza -->
+  <section class="section">
+    <div class="wrap trust">
+      <div class="stack">
+        <h2>Qué sale del móvil: casi nada</h2>
+        <p>Tu lista de medicamentos, los horarios y el historial de tomas se guardan en el dispositivo, y no hace falta cuenta para usar la app. Los nombres de medicamentos y perfiles nunca se envían a analítica ni a anunciantes, y tus datos nunca se venden.</p>
+        <p>Una sola cosa sale del móvil, y no es médica: estadísticas de fallos y de uso a través de Google Firebase. Llevan un identificador técnico de la instalación, no tuyo. El detalle está en la <a href="https://lepiloff.github.io/dosebuddy-legal/privacy.html" rel="noopener">política de privacidad</a>.</p>
+      </div>
+      <div class="trust-badges">
+        <div class="trust-badge">Nunca se vende nada</div>
+        <div class="trust-badge">Funciona sin cuenta</div>
+        <div class="trust-badge">Alarmas a prueba de reinicios</div>
       </div>
     </div>
   </section>
@@ -385,7 +388,7 @@
       </div>
 
       <div class="faq">
-        <details class="cell" name="faq">
+        <details name="faq">
           <summary>¿Sonadose es gratis?</summary>
           <div class="faq__body">
             <p>
@@ -398,7 +401,7 @@
           </div>
         </details>
 
-        <details class="cell" name="faq">
+        <details name="faq">
           <summary>¿En qué se diferencia de un pastillero?</summary>
           <div class="faq__body">
             <p>
@@ -413,7 +416,7 @@
           </div>
         </details>
 
-        <details class="cell" name="faq">
+        <details name="faq">
           <summary>¿En qué móviles funciona?</summary>
           <div class="faq__body">
             <p>
@@ -424,7 +427,7 @@
           </div>
         </details>
 
-        <details class="cell" name="faq">
+        <details name="faq">
           <summary>¿Necesita conexión a internet?</summary>
           <div class="faq__body">
             <p>
@@ -436,7 +439,7 @@
           </div>
         </details>
 
-        <details class="cell" name="faq">
+        <details name="faq">
           <summary>¿Suena si el móvil está en silencio?</summary>
           <div class="faq__body">
             <p>
@@ -451,7 +454,7 @@
           </div>
         </details>
 
-        <details class="cell" name="faq">
+        <details name="faq">
           <summary>¿Qué pasa si pulsan «Más tarde»?</summary>
           <div class="faq__body">
             <p>
@@ -462,7 +465,7 @@
           </div>
         </details>
 
-        <details class="cell" name="faq">
+        <details name="faq">
           <summary>¿Puedo configurarlo en mi móvil para ellos?</summary>
           <div class="faq__body">
             <p>
@@ -479,7 +482,7 @@
           </div>
         </details>
 
-        <details class="cell" name="faq">
+        <details name="faq">
           <summary>¿Tiene publicidad?</summary>
           <div class="faq__body">
             <p>
@@ -489,7 +492,7 @@
           </div>
         </details>
 
-        <details class="cell" name="faq">
+        <details name="faq">
           <summary>¿Qué no hace Sonadose?</summary>
           <div class="faq__body">
             <p>
@@ -506,12 +509,12 @@
   <!-- 8. Llamada final -->
   <section class="closing">
     <div class="wrap">
-      <h2>Configúralo esta noche. Mañana reciben el primer aviso.</h2>
+      <h2>Configúralo esta noche. <span class="accent-word">Mañana llega el primer aviso</span>.</h2>
       <p>
         Gratis en Google Play, y sin necesidad de cuenta: el primer medicamento queda
         añadido en lo que se hace un café.
       </p>
-      <a class="play-badge" href="https://play.google.com/store/apps/details?id=com.everpine.dosebuddy" rel="noopener">
+      <a class="play-badge" href="https://play.google.com/store/apps/details?id=com.everpine.dosebuddy&referrer=utm_source%3Demea_Med%26utm_medium%3Dlanding_page" rel="noopener">
         <img src="/img/badges/es.webp" alt="Consigue Sonadose en Google Play" width="512" height="198" loading="lazy">
       </a>
     </div>
@@ -528,7 +531,7 @@
       </a>
       <nav aria-label="Pie de página">
         <ul>
-          <li><a href="https://play.google.com/store/apps/details?id=com.everpine.dosebuddy" rel="noopener">Google Play</a></li>
+          <li><a href="https://play.google.com/store/apps/details?id=com.everpine.dosebuddy&referrer=utm_source%3Demea_Med%26utm_medium%3Dlanding_page" rel="noopener">Google Play</a></li>
           <li><a href="https://lepiloff.github.io/dosebuddy-legal/privacy.html" rel="noopener">Política de privacidad</a></li>
           <li><a href="#consent" data-consent-reopen>Ajustes de cookies</a></li>
           <li><a href="/" hreflang="en" lang="en">English</a></li>

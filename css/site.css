@@ -1,17 +1,31 @@
 /* ============================================================================
    Sonadose - sonadose.com
-   Direction: "Pastillero", the visual language of a weekly pill organiser.
-   The compartment (rounded cell with a lid edge) is the page's one signature
-   shape: it carries the hero dose strip, the three setup steps and the cards.
+   Direction: "Pastillero", the visual language of a weekly pill organiser,
+   still true after the 2026-08 redesign but carried differently. Where the
+   first version repeated one flat compartment card everywhere, this one
+   spreads the same soft-rounded, bordered shape across a wider cast: the
+   hero's dose chips (the real dose-strip data, built up into the page's
+   signature graphic instead of a footnote under the button), the phone-crop
+   windows in the four core features, and the icon roundels in the feature
+   index. Four features get real screenshots, a typographic device, or a
+   hand-built stock gauge instead of a generic icon set; the other ten sit in
+   a deliberately quiet, uncoloured list, so the two tiers read as different
+   in kind, not just in size.
 
-   Colour roles are split on purpose. The brand teal #2A9D8F is only 3.2:1 on
-   paper, so it is a *surface* colour (fills, borders, the mark) and never a
-   text colour; --accent-ink is the darkened teal used wherever text or a
-   filled button needs to clear WCAG AA.
+   Colour roles are still split on purpose. The brand teal #2A9D8F is only
+   3.2:1 on paper, so it is a *surface* colour (fills, borders, the mark) and
+   never a text colour; --accent-ink is the darkened teal used wherever text
+   or a filled button needs to clear WCAG AA. Four muted accents (teal, amber,
+   a slate blue, a dusty rose) mark the four core features and nothing else,
+   so colour itself signals "this one matters" instead of decorating every
+   component equally.
 
-   Type is Atkinson Hyperlegible Next, self-hosted. It is drawn by the Braille
-   Institute for low-vision readers. The page is set in the same values the
-   product sells.
+   Type is Atkinson Hyperlegible Next, self-hosted. It is drawn by the
+   Braille Institute for low-vision readers, and it is the same face the
+   Android app is set in; that is a brand fact, not a placeholder, so it is
+   not paired with a second display face. Character comes from scale and
+   weight instead: the hero and section headings run bigger and tighter than
+   most sites bother with, on the same one family.
    ========================================================================= */
 
 @layer reset, base, layout, components, utilities;
@@ -38,47 +52,63 @@
   --teal: #2a9d8f;
   --mint: #b7e4dd;
 
-  /* Tier 2, semantic, light theme */
-  --bg: #fbfaf7;
+  /* Tier 2, semantic, light theme. "Pale Sky": a cool, pale blue-teal wash,
+     chosen over a warmer cream because it read calmer and more trust-forward
+     without tipping into clinical white. */
+  --bg: #f2f7f8;
+  --bg-wash: #e9f2f3;
   --surface: #ffffff;
-  --cell-fill: #e8f6f3;
-  --cell-line: #9dd3c9;
-  --ink: #10322e;
-  --ink-muted: #4a6360;
+  --cell-fill: #e3f1f0;
+  --cell-line: #aed7d8;
+  --ink: #142527;
+  --ink-muted: #4c6265;
   --accent-ink: #12655c;
   --accent-ink-strong: #0f5e55;
   --on-accent: #ffffff;
-  --line: #e2e0d8;
+  --line: #dde8e9;
   --amber: #e8a33d;
   --amber-ink: #7a4a08;
-  --shadow: 0 1px 2px rgb(16 50 46 / 0.05), 0 8px 24px -12px rgb(16 50 46 / 0.18);
-  --shadow-lift: 0 2px 4px rgb(16 50 46 / 0.06), 0 18px 40px -18px rgb(16 50 46 / 0.28);
+  --amber-fill: color-mix(in srgb, var(--amber) 22%, var(--surface));
 
-  /* Scale */
+  /* Four core-feature accents. Deliberately used nowhere else: colour marks
+     the four things that get a detailed pass, not the page in general. */
+  --acc-blue-ink: #1f6e8c;
+  --acc-blue-chip: #cfe6ee;
+  --acc-blue-line: #9cc9d8;
+  --acc-rose-ink: #9c4f6b;
+  --acc-rose-chip: #f0dce3;
+  --acc-rose-line: #dcb3c2;
+
+  --shadow: 0 1px 2px rgb(16 40 36 / 0.05), 0 8px 24px -12px rgb(16 40 36 / 0.16);
+  --shadow-lift: 0 6px 16px -6px rgb(16 40 36 / 0.16), 0 24px 48px -20px rgb(16 40 36 / 0.28);
+
+  /* Scale. Wider top end than the first version: a landing that is meant to
+     be looked at, not just read, earns a hero that fills more of the screen. */
   --step--1: clamp(0.9375rem, 0.91rem + 0.14vw, 1rem);
   --step-0: clamp(1.0625rem, 1.02rem + 0.22vw, 1.1875rem);
   --step-1: clamp(1.1875rem, 1.11rem + 0.38vw, 1.4375rem);
-  --step-2: clamp(1.375rem, 1.24rem + 0.66vw, 1.875rem);
-  --step-3: clamp(1.75rem, 1.5rem + 1.25vw, 2.625rem);
-  --step-4: clamp(2.25rem, 1.72rem + 2.65vw, 4rem);
+  --step-2: clamp(1.5rem, 1.3rem + 0.9vw, 2.125rem);
+  --step-3: clamp(2rem, 1.5rem + 2.2vw, 3.375rem);
+  --step-4: clamp(2.75rem, 1.9rem + 3.8vw, 5.75rem);
 
   --space-1: 0.5rem;
   --space-2: 0.875rem;
   --space-3: 1.375rem;
   --space-4: 2rem;
   --space-5: 3rem;
-  --space-6: clamp(3.5rem, 8vw, 6.5rem);
+  --space-6: clamp(3.25rem, 7vw, 5.5rem);
 
   --radius-cell: 1.125rem;
   --radius-card: 1.5rem;
   --measure: 34rem;
-  --container: 70rem;
+  --container: 74rem;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #0e1b19;
-    --surface: #172624;
+    --bg: #0f1c1e;
+    --bg-wash: #142629;
+    --surface: #182c2a;
     --cell-fill: #1b322e;
     --cell-line: #35635b;
     --ink: #e9f3f1;
@@ -89,8 +119,14 @@
     --line: #2c4a45;
     --amber: #f0b45e;
     --amber-ink: #f0b45e;
+    --acc-blue-ink: #7fc4e0;
+    --acc-blue-chip: #16323d;
+    --acc-blue-line: #2d5568;
+    --acc-rose-ink: #e39cb8;
+    --acc-rose-chip: #3a2230;
+    --acc-rose-line: #5c3648;
     --shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 8px 24px -12px rgb(0 0 0 / 0.6);
-    --shadow-lift: 0 2px 4px rgb(0 0 0 / 0.45), 0 18px 40px -18px rgb(0 0 0 / 0.7);
+    --shadow-lift: 0 6px 16px -6px rgb(0 0 0 / 0.5), 0 24px 48px -20px rgb(0 0 0 / 0.75);
   }
 }
 
@@ -171,8 +207,8 @@
   h1,
   h2,
   h3 {
-    line-height: 1.14;
-    letter-spacing: -0.018em;
+    line-height: 1.05;
+    letter-spacing: -0.03em;
     font-weight: 700;
     text-wrap: balance;
   }
@@ -187,7 +223,8 @@
 
   h3 {
     font-size: var(--step-1);
-    line-height: 1.25;
+    line-height: 1.2;
+    letter-spacing: -0.015em;
   }
 
   p {
@@ -249,10 +286,19 @@
   .stack > * + * {
     margin-block-start: var(--space-3);
   }
+
+  .accent-word {
+    color: var(--accent-ink);
+  }
 }
 
 /* --- Components ---------------------------------------------------------- */
 @layer components {
+  /* Icon sprite: symbols only, never rendered directly ---------------------- */
+  .icon-sprite {
+    position: absolute;
+  }
+
   /* Skip link ------------------------------------------------------------- */
   .skip-link {
     position: absolute;
@@ -312,6 +358,10 @@
     border-radius: 0.5rem;
   }
 
+  .site-footer .brand {
+    justify-content: center;
+  }
+
   /* Language switch ------------------------------------------------------- */
   .lang-switch {
     display: flex;
@@ -347,7 +397,7 @@
     box-shadow: inset 0 0 0 2px var(--cell-line);
   }
 
-  /* Google Play badge ----------------------------------------------------- */
+  /* Google Play badge ------------------------------------------------------ */
   /* Google's artwork already carries the mandated clear space, so the link box
      is sized to the artwork and never re-cropped. */
   .play-badge {
@@ -375,31 +425,39 @@
     color: var(--ink-muted);
   }
 
-  /* Compartment, the signature shape ------------------------------------- */
-  .cell {
-    position: relative;
-    background: var(--cell-fill);
-    border: 2px solid var(--cell-line);
-    border-radius: var(--radius-cell);
-    /* The lighter top edge reads as the lid of a pill-organiser compartment. */
-    box-shadow: inset 0 2px 0 color-mix(in srgb, var(--surface) 70%, transparent);
-  }
-
-  /* Hero ------------------------------------------------------------------ */
-  .hero {
-    padding-block: clamp(2.5rem, 6vw, 5rem) clamp(2rem, 4vw, 3.25rem);
-  }
-
-  .hero__grid {
-    display: grid;
-    gap: clamp(2.5rem, 6vw, 4.5rem);
+  /* Small saturated tag, used only on the four core features: colour spent
+     in small doses, to mark "this one matters" rather than decorate. */
+  .tag {
+    display: inline-flex;
     align-items: center;
+    gap: 0.35rem;
+    padding: 0.3rem 0.65rem;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    margin-block-end: var(--space-2);
   }
 
-  @media (min-width: 56rem) {
-    .hero__grid {
-      grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
-    }
+  .tag--teal {
+    background: var(--accent-ink);
+    color: var(--on-accent);
+  }
+
+  .tag--amber {
+    background: var(--amber);
+    color: var(--amber-ink);
+  }
+
+  .tag--blue {
+    background: var(--acc-blue-line);
+    color: var(--acc-blue-ink);
+  }
+
+  .tag--rose {
+    background: var(--acc-rose-line);
+    color: var(--acc-rose-ink);
   }
 
   .eyebrow {
@@ -414,6 +472,50 @@
     color: var(--accent-ink);
   }
 
+  /* Motion: one orchestrated hero sequence on load, nothing scattered across
+     the rest of the page. ---------------------------------------------- */
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(18px); }
+    to { opacity: 1; transform: none; }
+  }
+
+  @keyframes pop {
+    from { opacity: 0; transform: translateY(10px) scale(0.96); }
+    to { opacity: 1; transform: none; }
+  }
+
+  @keyframes pulse-ring {
+    0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--amber) 55%, transparent); }
+    50% { box-shadow: 0 0 0 12px color-mix(in srgb, var(--amber) 0%, transparent); }
+  }
+
+  .hero-in-1 { animation: rise 0.7s cubic-bezier(.2, .8, .2, 1) both; }
+  .hero-in-2 { animation: rise 0.7s cubic-bezier(.2, .8, .2, 1) 0.1s both; }
+  .hero-in-3 { animation: rise 0.7s cubic-bezier(.2, .8, .2, 1) 0.2s both; }
+  .hero-in-4 { animation: rise 0.7s cubic-bezier(.2, .8, .2, 1) 0.32s both; }
+  .hero-in-phone { animation: pop 0.8s cubic-bezier(.2, .8, .2, 1) 0.28s both; }
+
+  /* Hero -------------------------------------------------------------------
+     The signature graphic is the real dose-strip data (time + status),
+     scattered around the phone like compartments popped loose from a pill
+     organiser, instead of a decorative shape unrelated to the product. */
+  .hero {
+    padding-block: clamp(2rem, 5vw, 3.5rem) clamp(3rem, 8vw, 6rem);
+    overflow: clip;
+  }
+
+  .hero__grid {
+    display: grid;
+    gap: clamp(3.5rem, 9vw, 6rem);
+    align-items: center;
+  }
+
+  @media (min-width: 58rem) {
+    .hero__grid {
+      grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+    }
+  }
+
   .hero__lead {
     margin-block-start: var(--space-3);
     max-inline-size: var(--measure);
@@ -425,45 +527,13 @@
     margin-block-start: var(--space-4);
   }
 
-  /* Dose strip, a day of compartments, the next dose still open ----------- */
-  .dose-strip {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.6rem;
-    margin-block-start: var(--space-5);
+  .hero__visual {
+    position: relative;
   }
 
-  .dose-strip li {
-    display: grid;
-    place-items: center;
-    gap: 0.15rem;
-    min-inline-size: 5rem;
-    padding: 0.7rem 0.9rem;
-    font-variant-numeric: tabular-nums;
-    font-weight: 700;
-    font-size: var(--step--1);
-  }
-
-  .dose-strip li small {
-    font-size: 0.75em;
-    font-weight: 400;
-    color: var(--ink-muted);
-  }
-
-  .dose-strip .is-next {
-    background: color-mix(in srgb, var(--amber) 24%, var(--surface));
-    border-color: var(--amber);
-    color: var(--amber-ink);
-  }
-
-  .dose-strip .is-next small {
-    color: inherit;
-  }
-
-  /* Phone screenshots ----------------------------------------------------- */
-  .shot {
-    margin: 0;
-    inline-size: min(100%, 19rem);
+  .phone {
+    margin-inline: auto;
+    inline-size: min(100%, 16.5rem);
     border-radius: var(--radius-card);
     border: 1px solid var(--line);
     overflow: hidden;
@@ -471,131 +541,425 @@
     background: var(--surface);
   }
 
-  .shot img {
+  .phone img {
     inline-size: 100%;
     aspect-ratio: 640 / 1256;
   }
 
-  .shot--center {
-    margin-inline: auto;
+  .pchips {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0.6rem;
+    margin-block-start: var(--space-4);
   }
 
-  /* Steps, a real sequence, so the numerals carry information ------------- */
-  .steps {
-    display: grid;
-    gap: var(--space-3);
-    counter-reset: step;
+  .pchip {
+    background: var(--surface);
+    border: 2px solid var(--cell-line);
+    border-radius: 1rem;
+    padding: 0.65rem 1rem;
+    text-align: center;
+    box-shadow: var(--shadow);
+    min-inline-size: 6rem;
   }
 
-  @media (min-width: 48rem) {
-    .steps {
-      grid-template-columns: repeat(3, 1fr);
-      gap: var(--space-4);
-    }
-  }
-
-  .steps > li {
-    counter-increment: step;
-    padding: var(--space-4) var(--space-3) var(--space-3);
-  }
-
-  .steps > li::before {
-    content: counter(step);
-    display: grid;
-    place-items: center;
-    inline-size: 2.75rem;
-    block-size: 2.75rem;
-    margin-block-end: var(--space-2);
-    background: var(--accent-ink);
-    color: var(--on-accent);
-    border-radius: 0.85rem;
-    font-size: var(--step-1);
-    font-weight: 700;
+  .pchip strong {
+    display: block;
+    font-size: 1rem;
     font-variant-numeric: tabular-nums;
   }
 
-  .steps h3 + p {
-    margin-block-start: var(--space-1);
+  .pchip span {
+    font-size: 0.78rem;
     color: var(--ink-muted);
   }
 
-  /* Split section (copy + screenshot) ------------------------------------- */
-  .split {
+  .pchip--next {
+    background: var(--amber-fill);
+    border-color: var(--amber);
+    animation: pulse-ring 2.6s ease-in-out infinite;
+  }
+
+  .pchip--next span {
+    color: var(--amber-ink);
+    font-weight: 700;
+  }
+
+  @media (min-width: 58rem) {
+    .hero__visual {
+      min-block-size: 30rem;
+    }
+
+    .pchips {
+      position: absolute;
+      inset: 0;
+      margin: 0;
+      display: block;
+    }
+
+    .pchip {
+      position: absolute;
+      inline-size: 9rem;
+    }
+
+    .pchip:nth-child(1) {
+      inset-block-start: -0.5rem;
+      inset-inline-start: -3rem;
+      transform: rotate(-8deg);
+    }
+
+    .pchip:nth-child(2) {
+      inset-block-end: 1.5rem;
+      inset-inline-start: -4rem;
+      transform: rotate(6deg);
+    }
+
+    .pchip--next {
+      inset-block-start: 42%;
+      inset-inline-end: -3.5rem;
+      inline-size: 10rem;
+      transform: rotate(-5deg);
+    }
+  }
+
+  /* Stat band --------------------------------------------------------------- */
+  .stat-band {
+    background: var(--bg-wash);
+    border-block: 1px solid var(--line);
+  }
+
+  .stat-band .wrap {
+    padding-block: var(--space-6);
     display: grid;
-    gap: clamp(2rem, 5vw, 4rem);
+    gap: var(--space-4);
     align-items: center;
   }
 
-  @media (min-width: 56rem) {
-    .split {
-      grid-template-columns: minmax(0, 1fr) minmax(0, 0.85fr);
-    }
-
-    .split--flip > :first-child {
-      order: 2;
+  @media (min-width: 52rem) {
+    .stat-band .wrap {
+      grid-template-columns: minmax(0, 1fr) minmax(0, 20rem);
+      gap: var(--space-5);
     }
   }
 
-  .split__body {
-    max-inline-size: var(--measure);
+  .stat-band h2 {
+    font-size: var(--step-2);
   }
 
-  /* Feature list ---------------------------------------------------------- */
-  .features {
-    display: grid;
-    gap: var(--space-3);
-  }
-
-  @media (min-width: 44rem) {
-    .features {
-      grid-template-columns: repeat(2, 1fr);
-    }
-  }
-
-  .features > li {
-    padding: var(--space-3);
-  }
-
-  .features h3 {
-    margin-block-end: var(--space-1);
-  }
-
-  .features p {
+  .stat-band p {
     color: var(--ink-muted);
-    font-size: var(--step--1);
   }
 
-  /* Pull quote / statistic ------------------------------------------------ */
-  .stat {
+  .stat-card {
     display: grid;
-    gap: var(--space-2);
-    padding: var(--space-4);
-    border-radius: var(--radius-card);
-    background: var(--cell-fill);
-    border: 2px solid var(--cell-line);
+    gap: 0.6rem;
   }
 
-  .stat b {
-    font-size: var(--step-3);
-    line-height: 1.05;
-    letter-spacing: -0.02em;
+  .stat-card b {
+    font-size: clamp(2.75rem, 2.2rem + 3vw, 4.5rem);
+    line-height: 1;
+    letter-spacing: -0.03em;
+    color: var(--acc-blue-ink);
   }
 
-  .stat cite {
+  .stat-card cite {
     font-style: normal;
     font-size: var(--step--1);
     color: var(--ink-muted);
   }
 
-  /* FAQ, native details, so it works with JS off ------------------------- */
-  .faq {
+  /* Core features: an editorial spread, not a repeated icon card ----------- */
+  .features {
     display: grid;
-    gap: var(--space-2);
-    max-inline-size: 48rem;
+    gap: var(--space-3);
+  }
+
+  .feature p {
+    margin-block-start: 0.6rem;
+    color: var(--ink-muted);
+    font-size: var(--step--1);
+  }
+
+  .feature--lead {
+    display: grid;
+    gap: var(--space-4);
+    padding: var(--space-4);
+  }
+
+  @media (min-width: 42rem) {
+    .feature--lead {
+      grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
+      align-items: center;
+    }
+  }
+
+  .feature--lead h3 {
+    font-size: var(--step-2);
+  }
+
+  .feature--lead p {
+    max-inline-size: 30rem;
+    font-size: var(--step-0);
+  }
+
+  .features__rest {
+    display: grid;
+    gap: var(--space-3);
+    grid-template-columns: 1fr;
+  }
+
+  @media (min-width: 46rem) {
+    .features__rest {
+      grid-template-columns: repeat(3, 1fr);
+      align-items: stretch;
+    }
+  }
+
+  .features__rest .feature {
+    display: flex;
+    flex-direction: column;
+    padding: var(--space-4);
+  }
+
+  /* Every tile's visual sits in a shared-height band, bottom-anchored, so the
+     row reads as one composed line even when the paragraphs above it run to
+     different lengths. */
+  .feature__media {
+    margin-block-start: auto;
+    padding-block-start: var(--space-4);
+    display: flex;
+    align-items: flex-end;
+  }
+
+  @media (min-width: 46rem) {
+    .feature__media {
+      block-size: 9.5rem;
+    }
+  }
+
+  .crop-window {
+    inline-size: min(100%, 12rem);
+    aspect-ratio: 4 / 5;
+    border-radius: 1.1rem;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    box-shadow: var(--shadow-lift);
+    background: var(--surface);
+  }
+
+  .crop-window img {
+    inline-size: 100%;
+    block-size: 100%;
+    object-fit: cover;
+    object-position: top;
+  }
+
+  .feature--lead .crop-window {
+    margin-inline: auto;
+    inline-size: min(100%, 14rem);
+    transform: rotate(2.5deg);
+  }
+
+  .crop-window--small {
+    inline-size: auto;
+    block-size: 100%;
+    transform: rotate(-2deg);
+  }
+
+  .zero-stat {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+  }
+
+  .zero-stat__num {
+    font-size: clamp(3.25rem, 2.8rem + 2.2vw, 5rem);
+    font-weight: 700;
+    line-height: 1;
+    color: var(--acc-rose-ink);
+    letter-spacing: -0.01em;
+  }
+
+  .zero-stat__list {
+    display: grid;
+    gap: 0.15rem;
+    font-size: var(--step--1);
+    font-weight: 700;
+    color: var(--ink);
+  }
+
+  .stock-gauge__dots {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+  }
+
+  .stock-gauge__dots span {
+    inline-size: 0.85rem;
+    block-size: 0.85rem;
+    border-radius: 50%;
+    background: var(--acc-blue-ink);
+    flex: none;
+  }
+
+  .stock-gauge__dots span.is-low {
+    background: transparent;
+    border: 2px solid var(--acc-blue-line);
+  }
+
+  .stock-gauge__note {
+    margin-block-start: 0.6rem;
+    font-size: var(--step--1);
+    color: var(--ink-muted);
+  }
+
+  .stock-gauge__note strong {
+    color: var(--ink);
+  }
+
+  /* Gallery: a loose fan of real screens ------------------------------------ */
+  .gallery {
+    display: grid;
+    gap: var(--space-4) var(--space-3);
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  @media (min-width: 56rem) {
+    .gallery {
+      grid-template-columns: repeat(4, 1fr);
+      align-items: end;
+    }
+  }
+
+  .gallery__item {
+    text-align: center;
+  }
+
+  .gallery__item .phone {
+    transition: transform 0.25s ease;
+  }
+
+  .gallery__item:hover .phone {
+    transform: translateY(-0.4rem) rotate(0deg) !important;
+  }
+
+  @media (min-width: 56rem) {
+    .gallery__item:nth-child(1) .phone { transform: rotate(-4deg); }
+    .gallery__item:nth-child(2) .phone { transform: rotate(2deg); margin-block-start: -1.25rem; }
+    .gallery__item:nth-child(3) .phone { transform: rotate(-2deg); }
+    .gallery__item:nth-child(4) .phone { transform: rotate(4deg); margin-block-start: -1.25rem; }
+  }
+
+  .gallery__item figcaption {
+    margin-block-start: var(--space-2);
+    font-weight: 700;
+    font-size: var(--step--1);
+  }
+
+  /* Secondary features: a quiet typographic index, on purpose --------------- */
+  .index-list {
+    display: grid;
+  }
+
+  @media (min-width: 40rem) {
+    .index-list {
+      grid-template-columns: repeat(2, 1fr);
+      column-gap: var(--space-5);
+    }
+  }
+
+  .index-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.9rem;
+    padding-block: var(--space-3);
+    border-block-start: 1px solid var(--line);
+  }
+
+  .index-list > .index-row:nth-last-child(-n+2) {
+    border-block-end: 1px solid var(--line);
+  }
+
+  @media (max-width: 39.9375rem) {
+    .index-list > .index-row:last-child {
+      border-block-end: 1px solid var(--line);
+    }
+  }
+
+  /* Muted pastel, not the saturated tags above: this tier stays the quiet
+     one. Same four accents, cycled, just lighter-touch. */
+  .index-row__icon-wrap {
+    flex: none;
+    inline-size: 2.25rem;
+    block-size: 2.25rem;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+  }
+
+  .index-row__icon-wrap--teal { background: var(--cell-fill); color: var(--accent-ink); }
+  .index-row__icon-wrap--amber { background: var(--amber-fill); color: var(--amber-ink); }
+  .index-row__icon-wrap--rose { background: var(--acc-rose-chip); color: var(--acc-rose-ink); }
+  .index-row__icon-wrap--blue { background: var(--acc-blue-chip); color: var(--acc-blue-ink); }
+
+  .index-row__icon {
+    inline-size: 1.15rem;
+    block-size: 1.15rem;
+    color: inherit;
+  }
+
+  .index-row p {
+    margin-block-start: 0.15rem;
+    font-size: var(--step--1);
+    color: var(--ink-muted);
+  }
+
+  /* Trust --------------------------------------------------------------- */
+  .trust {
+    display: grid;
+    gap: var(--space-4);
+  }
+
+  @media (min-width: 52rem) {
+    .trust {
+      grid-template-columns: minmax(0, 1fr) minmax(0, 22rem);
+      align-items: start;
+    }
+  }
+
+  .trust h2 {
+    font-size: var(--step-2);
+  }
+
+  .trust p {
+    color: var(--ink-muted);
+  }
+
+  .trust p a {
+    font-weight: 700;
+  }
+
+  .trust-badges {
+    display: grid;
+    gap: 0.6rem;
+  }
+
+  .trust-badge {
+    padding: 0.9rem 1.1rem;
+    font-size: var(--step--1);
+    font-weight: 700;
+    border-block-start: 2px solid var(--cell-line);
+  }
+
+  /* FAQ, native details, so it works with JS off. Quiet rows, not boxes ---- */
+  .faq {
+    max-inline-size: 46rem;
+    border-block-start: 1px solid var(--line);
   }
 
   .faq details {
-    padding-inline: var(--space-3);
+    border-block-end: 1px solid var(--line);
   }
 
   .faq summary {
@@ -616,22 +980,16 @@
   }
 
   .faq summary::after {
-    content: "";
+    content: "+";
     flex: none;
-    inline-size: 1.5rem;
-    block-size: 1.5rem;
-    margin-block-start: 0.2em;
-    background: var(--accent-ink);
-    /* Plus sign drawn as a mask so it survives Forced Colors as a solid box
-       rather than vanishing like a background-image would. */
-    mask: linear-gradient(var(--ink), var(--ink)) center / 0.875rem 2px no-repeat,
-      linear-gradient(var(--ink), var(--ink)) center / 2px 0.875rem no-repeat;
-    transition: rotate 0.2s ease;
+    font-weight: 700;
+    color: var(--accent-ink);
+    font-size: 1.3em;
+    line-height: 1;
   }
 
   .faq details[open] summary::after {
-    rotate: 45deg;
-    mask: linear-gradient(var(--ink), var(--ink)) center / 0.875rem 2px no-repeat;
+    content: "\2013";
   }
 
   .faq summary:focus-visible {
@@ -665,8 +1023,7 @@
   .closing {
     text-align: center;
     padding-block: var(--space-6);
-    background: var(--cell-fill);
-    border-block: 2px solid var(--cell-line);
+    background: var(--bg-wash);
   }
 
   .closing p {
@@ -681,7 +1038,7 @@
     margin-block-start: var(--space-4);
   }
 
-  /* Footer ---------------------------------------------------------------- */
+  /* Footer ------------------------------------------------------------------ */
   .site-footer {
     padding-block: var(--space-5);
     font-size: var(--step--1);
@@ -721,7 +1078,7 @@
     margin-block-start: var(--space-3);
   }
 
-  /* Language hint --------------------------------------------------------- */
+  /* Language hint ----------------------------------------------------------- */
   .lang-hint {
     display: flex;
     flex-wrap: wrap;
@@ -745,7 +1102,7 @@
     min-block-size: 2.25rem;
   }
 
-  /* Cookie consent -------------------------------------------------------- */
+  /* Cookie consent ------------------------------------------------------------ */
   /* Rendered in the HTML and revealed by script, never injected, so it cannot
      push layout around after paint. */
   .consent {
@@ -809,7 +1166,7 @@
     color: var(--on-accent);
   }
 
-  /* Video slot ------------------------------------------------------------ */
+  /* Video slot ---------------------------------------------------------------- */
   /* Empty on launch. Drop a <div class="video" data-yt="ID"> in and the lazy
      facade in js/ui.js takes over, no layout change needed later. */
   .video {
@@ -856,20 +1213,6 @@
     clip-path: inset(50%);
     white-space: nowrap;
   }
-
-  .center {
-    text-align: center;
-  }
-
-  .center .section__head,
-  .center .stat,
-  .center .hero__lead {
-    margin-inline: auto;
-  }
-
-  .spaced {
-    margin-block-start: var(--space-5);
-  }
 }
 
 /* --- Motion & contrast preferences --------------------------------------- */
@@ -889,16 +1232,16 @@
 }
 
 @media (forced-colors: active) {
-  .cell,
-  .stat,
-  .shot,
+  .phone,
+  .crop-window,
+  .pchip,
   .video,
   .btn {
     border: 2px solid CanvasText;
   }
 
-  .steps > li::before {
-    border: 2px solid CanvasText;
+  .index-row__icon-wrap {
+    border: 1px solid CanvasText;
   }
 
   .site-header {
