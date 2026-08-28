@@ -91,6 +91,11 @@ class Device(Base):
     # Said precisely because the earlier wording — "a reinstall wipes the id" —
     # made an update look like it produced a new device, which had us reading
     # the wrong row during acceptance.
+    #
+    # Measured 2026-08-28: two handsets that had been reinstalled between the
+    # 25th and the 28th appeared as two new rows, and the id one of them
+    # reported matched none of the three the account already held. The id does
+    # not survive that, as written.
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     account_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("accounts.id", ondelete="CASCADE"), index=True
@@ -209,9 +214,17 @@ class Profile(Base):
 class ProfileMembership(Base):
     __tablename__ = "profile_memberships"
     __table_args__ = (
-        # One live membership per (profile, account). Revoked rows are kept as
-        # history: who could see what, and when, is a GDPR question, so the
-        # uniqueness is partial rather than the rows being deleted.
+        # One live membership per (profile, account). Revoking a caregiver
+        # keeps the row as history: who could see what, and when, is a GDPR
+        # question, so the uniqueness is partial rather than the rows being
+        # deleted.
+        #
+        # Deleting the account is the exception, and it outranks this — the
+        # `account_id` cascade takes the rows with it. Erasure is the stronger
+        # obligation, and a record of who watched whom is not history worth
+        # keeping about someone who asked to be forgotten. Said here because
+        # `delete_account` briefly tried to hold both rules at once, with an
+        # UPDATE the cascade then undid.
         Index(
             "uq_membership_live",
             "profile_id",

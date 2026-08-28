@@ -18,7 +18,7 @@ from app.core.security import (
     mint_access_token,
     new_refresh_token,
 )
-from app.db.models import Account, Device, Profile, ProfileMembership, RefreshToken, utcnow
+from app.db.models import Account, Device, Profile, RefreshToken, utcnow
 from app.core.observability import redact
 from app.services.google import GoogleIdentity, InvalidGoogleToken
 
@@ -241,15 +241,19 @@ async def delete_account(
 
     A Play obligation that arrived with accounts. Profiles the account only
     watched are left alone — they are not its data, and removing them would
-    delete someone else's history on their behalf. Its membership of them goes.
+    delete someone else's history on their behalf. Its membership of them goes
+    with the account row, because `profile_memberships.account_id` cascades.
+
+    There used to be an UPDATE above that DELETE, marking those memberships
+    revoked first, on the reasoning that a record of who could see what is
+    worth keeping. It could not survive the statement below it: the cascade
+    removed the very rows it had just written. So the code described a
+    retention that never happened. Erasure is the stronger obligation here
+    anyway — what went is what should have gone, and only the account-deletion
+    half of the rule in ProfileMembership was wrong.
     """
     account_id = caller.account.id
 
-    await session.execute(
-        update(ProfileMembership)
-        .where(ProfileMembership.account_id == account_id, ProfileMembership.revoked_at.is_(None))
-        .values(revoked_at=utcnow())
-    )
     # Profiles it owns go with it, and their memberships cascade — anyone
     # watching loses access because the data no longer exists.
     await session.execute(delete(Profile).where(Profile.owner_account_id == account_id))
