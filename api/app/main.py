@@ -1,4 +1,4 @@
-"""The DoseBuddy API.
+"""The Sonadose API.
 
 Skeleton only, on purpose. Auth, pairing and sync are not here: they follow the
 API contract in part 5 of the v1.1 spec, which is the agreed seam between this
@@ -55,7 +55,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     setup_logging(settings)
 
     app = FastAPI(
-        title="DoseBuddy API",
+        title="Sonadose API",
         version=settings.version,
         lifespan=lifespan,
         docs_url="/docs" if settings.docs_enabled else None,
