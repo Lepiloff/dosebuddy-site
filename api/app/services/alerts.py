@@ -184,10 +184,20 @@ async def find_stale_profile_alerts(session: AsyncSession, now: datetime) -> lis
     that is the one device materialising reminders (spec §1.4), and its silence
     is the only silence that means nobody is being reminded.
 
-    A profile with no `owner_device_id` raises nothing. No device has claimed
-    authority, so no alarms are being armed at all — which is worse than stale,
-    and a different signal than this one. Worth having; not by pretending it is
-    this.
+    A profile with no `owner_device_id` raises nothing, and the reason written
+    here was wrong until 2026-09-09: it said no alarms are being armed at all.
+    The device reads an unclaimed profile as its own and arms it — checked in
+    `lib/core/roles/reminder_authority.dart`, where the NULL branch is
+    deliberate, because unclaimed is the majority state and reading it as
+    "nobody's" would stop every reminder in production at once.
+
+    So the silence this signal measures is not happening, and there is no device
+    named to measure it against either. Raising nothing is right; "nobody is
+    being reminded" was never what an empty column meant.
+
+    That an unclaimed profile can be armed by two devices at once — a restored
+    backup and the original, both seeing NULL — is real, is v1.0's behaviour,
+    and is settled at claim rather than here.
     """
     watchers = await _watchers(session)
     if not watchers:
