@@ -5,13 +5,17 @@ receive, and about what happens when two devices disagree. A push that works and
 a pull that returns rows is the easy half.
 """
 
+import asyncio
 import itertools
 import time
 import uuid
 
 import pytest
+from sqlalchemy import update
+from sqlalchemy.exc import DBAPIError
 
 from app.api.sync import PAGE_SIZE
+from app.db.models import IMMUTABLE_PARENT_SQLSTATE, Medication
 from tests.conftest import auth_header, sign_in
 
 pytestmark = pytest.mark.asyncio
@@ -765,6 +769,201 @@ async def test_a_forbidden_record_is_rejected_not_retried(api):
 
     assert out["retry"] == []
     assert out["rejected"][0]["code"] == "forbidden_role"
+
+
+# ---------------------------------------------------------------------------
+# A medication does not change profile
+# ---------------------------------------------------------------------------
+#
+# Set on creation, refused afterwards, and refused by the schema rather than by
+# this endpoint alone (models.py, migration 0014). The reason is on the phone:
+# `dose_events.profile_id` is written when a dose is first materialised and
+# never rewritten, so a medication that changed parent leaves its doses naming
+# the profile it used to belong to, and the device drops the alarm it was about
+# to set as stale. Nothing errors; the phone simply goes quiet.
+
+
+async def test_a_medication_cannot_change_profile(api):
+    """Both profiles are the caller's own, so nothing here is about permission."""
+    owner, pid, mid, _, _ = await _owner_with_data(api)
+    second = str(uuid.uuid4())
+    await push(api, owner, profiles=[profile(second, "Second")])
+
+    out = await push(api, owner, medications=[medication(mid, second, at=ms() + 5000)])
+
+    assert out["retry"] == []
+    assert out["rejected"] == [
+        {"id": mid, "entity": "medications", "code": "immutable_parent"}
+    ]
+
+
+async def test_a_refused_move_lands_no_field_of_the_row(api):
+    """The client keeps one version per row, so half a version is worse than
+    none: it would leave a name that arrived with a parent that did not.
+
+    `server_seq` must not move either. A refused row that still advanced the
+    sequence would be delivered to every other device as a change nobody made.
+    """
+    owner, pid, mid, _, _ = await _owner_with_data(api)
+    second = str(uuid.uuid4())
+    await push(api, owner, profiles=[profile(second, "Second")])
+    before = (await pull(api, owner))["cursor"]
+
+    await push(api, owner, medications=[
+        medication(mid, second, "Renamed", at=ms() + 5000,
+                   dosage_text="20 mg", dose_amount=2.0),
+    ])
+
+    assert (await pull(api, owner, before))["changes"] == {}
+    med = [m for m in (await pull(api, owner))["changes"]["medications"]
+           if m["id"] == mid][0]
+    assert med["profile_id"] == pid
+    assert med["name"] == "Aspirin"
+    assert med["dosage_text"] is None
+    assert med["dose_amount"] == 1.0
+
+
+async def test_a_watcher_cannot_move_a_medication_into_its_own_profile(api):
+    """The hole this closes on the server side, and it was not a small one.
+
+    `push` checked that the caller owns the profile a medication *claims* and
+    never the profile the stored row already belongs to. A caregiver is sent the
+    id of every medication on a profile they watch (§4.3), so resending one
+    under a profile of their own moved the row out of the owner's data — with
+    the caregiver's own name and dose on it.
+    """
+    owner, pid, mid, _, _ = await _owner_with_data(api)
+    caregiver = await _pair(api, owner, pid)
+    theirs = str(uuid.uuid4())
+    await push(api, caregiver, profiles=[profile(theirs, "Mine")])
+
+    out = await push(api, caregiver, medications=[
+        medication(mid, theirs, "Taken", at=ms() + 5000),
+    ])
+
+    assert out["rejected"][0]["code"] == "immutable_parent"
+    med = [m for m in (await pull(api, owner))["changes"]["medications"]
+           if m["id"] == mid][0]
+    assert med["profile_id"] == pid
+    assert med["name"] == "Aspirin"
+
+
+async def test_an_older_write_that_moves_the_parent_is_still_refused(api):
+    """A write that loses on last-write-wins is discarded before anything is
+    applied, so no update runs and the database is never asked. Left there, the
+    move would come back neither rejected nor applied — and the client reads
+    that silence as success and drops the row from its outbox.
+    """
+    owner, pid, mid, _, _ = await _owner_with_data(api)
+    second = str(uuid.uuid4())
+    await push(api, owner, profiles=[profile(second, "Second")])
+
+    out = await push(api, owner, medications=[medication(mid, second, at=ms() - 60_000)])
+
+    assert out["rejected"][0]["code"] == "immutable_parent"
+
+
+async def test_one_refused_move_leaves_the_rest_of_the_batch_alone(api):
+    """Per record, like every other refusal. A row the client had no business
+    sending must not cost it the offline work sent alongside."""
+    owner, pid, mid, _, _ = await _owner_with_data(api)
+    second = str(uuid.uuid4())
+    await push(api, owner, profiles=[profile(second, "Second")])
+    fresh = str(uuid.uuid4())
+
+    out = await push(api, owner, medications=[
+        medication(fresh, second, "Legitimate"),
+        medication(mid, second, "Moved", at=ms() + 5000),
+    ])
+
+    assert len(out["rejected"]) == 1
+    got = {m["id"]: m for m in (await pull(api, owner))["changes"]["medications"]}
+    assert got[fresh]["profile_id"] == second
+    assert got[mid]["profile_id"] == pid
+
+
+async def test_a_move_the_batch_could_not_see_is_stopped_by_the_database(api):
+    """The window a check before the loop cannot cover.
+
+    The row is absent when the batch is read and present by the time it is
+    written. Here that happens inside one batch — the same id twice, the second
+    copy naming another profile — which is the shape of the race with another
+    device, without the timing. The refusal comes from the trigger rather than
+    from the check, and it is the trigger that makes it atomic.
+    """
+    owner, pid, _, _, _ = await _owner_with_data(api)
+    second = str(uuid.uuid4())
+    await push(api, owner, profiles=[profile(second, "Second")])
+    fresh = str(uuid.uuid4())
+    t = ms() + 5000
+
+    out = await push(api, owner, medications=[
+        medication(fresh, pid, "Created", at=t),
+        medication(fresh, second, "Moved", at=t + 1000),
+    ])
+
+    assert out["rejected"] == [
+        {"id": fresh, "entity": "medications", "code": "immutable_parent"}
+    ]
+    med = [m for m in (await pull(api, owner))["changes"]["medications"]
+           if m["id"] == fresh][0]
+    assert med["profile_id"] == pid
+    assert med["name"] == "Created"
+
+
+async def test_a_move_racing_a_write_from_another_device_is_refused(api, session):
+    """The concurrent case with two real connections.
+
+    Another device creates the medication and has not committed, so the batch
+    below cannot see it however carefully it looks; its own insert then waits on
+    that transaction and finds the row there when it wakes.
+
+    Whichever way the two interleave the answer is the same, which is the point
+    of the assertion: reached early it comes from the check, reached late from
+    the trigger, and the client is told the same thing either way.
+    """
+    owner, pid, _, _, _ = await _owner_with_data(api)
+    second = str(uuid.uuid4())
+    await push(api, owner, profiles=[profile(second, "Second")])
+    fresh = uuid.uuid4()
+    t = ms() + 5000
+
+    session.add(Medication(
+        id=fresh, profile_id=uuid.UUID(pid), name="Created", form="tablet",
+        created_at_ms=t, updated_at_ms=t, op_seq=1,
+    ))
+    await session.flush()   # written, locked, and not yet committed
+
+    moving = asyncio.create_task(
+        push(api, owner, medications=[medication(str(fresh), second, "Moved", at=t + 1000)])
+    )
+    await asyncio.sleep(0.2)
+    await session.commit()
+    out = await asyncio.wait_for(moving, timeout=10)
+
+    assert out["rejected"][0]["code"] == "immutable_parent"
+    med = [m for m in (await pull(api, owner))["changes"]["medications"]
+           if m["id"] == str(fresh)][0]
+    assert med["profile_id"] == pid
+    assert med["name"] == "Created"
+
+
+async def test_the_database_refuses_the_move_whatever_writes_it(api, session):
+    """Not push — the schema. A backfill, a support script or the next endpoint
+    someone writes gets the same answer, which is the reason the rule is not a
+    branch in `push`."""
+    owner, pid, mid, _, _ = await _owner_with_data(api)
+    second = str(uuid.uuid4())
+    await push(api, owner, profiles=[profile(second, "Second")])
+
+    with pytest.raises(DBAPIError) as refused:
+        await session.execute(
+            update(Medication)
+            .where(Medication.id == uuid.UUID(mid))
+            .values(profile_id=uuid.UUID(second))
+        )
+
+    assert refused.value.orig.sqlstate == IMMUTABLE_PARENT_SQLSTATE
 
 
 async def test_an_oversized_batch_is_refused_whole(api):

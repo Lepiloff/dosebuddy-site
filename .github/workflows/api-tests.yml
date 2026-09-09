@@ -73,6 +73,12 @@ jobs:
       # that no test could see, because no test ever looked at the migrated
       # schema. A drift that is only cosmetic today is how a real one hides
       # tomorrow.
+      #
+      # Triggers and functions are compared for the same reason and a sharper
+      # one: a migration cannot import the models, so those statements exist
+      # twice, written out by hand. `medications_parent_is_immutable` is an
+      # invariant the client relies on — drift there is not cosmetic in any
+      # version of the story.
       - name: The models and the migrations describe the same schema
         env:
           DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/from_migrations
@@ -105,20 +111,34 @@ jobs:
           asyncio.run(build())
           EOF
           # alembic_version exists only in the migrated one, by definition.
-          q="SELECT tablename||' '||indexdef FROM pg_indexes
-             WHERE schemaname='public' AND tablename<>'alembic_version' ORDER BY 1"
-          for db in from_migrations from_models; do
-            PGPASSWORD=postgres psql -h localhost -U postgres -d $db -Atc "$q" \
-              | sed "s/$db//" > /tmp/$db.txt
+          idx="SELECT tablename||' '||indexdef FROM pg_indexes
+               WHERE schemaname='public' AND tablename<>'alembic_version' ORDER BY 1"
+          # Whitespace normalised: the same statement laid out differently is
+          # not a difference in schema, and the two copies are typed by hand.
+          trg="SELECT c.relname||' '||regexp_replace(pg_get_triggerdef(t.oid),'\s+',' ','g')
+               FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+               WHERE NOT t.tgisinternal AND c.relnamespace='public'::regnamespace
+               ORDER BY 1"
+          fn="SELECT regexp_replace(pg_get_functiondef(p.oid),'\s+',' ','g')
+              FROM pg_proc p WHERE p.pronamespace='public'::regnamespace ORDER BY 1"
+          for kind in idx trg fn; do
+            q="${!kind}"
+            for db in from_migrations from_models; do
+              PGPASSWORD=postgres psql -h localhost -U postgres -d $db -Atc "$q" \
+                | sed "s/$db//" > /tmp/$kind.$db.txt
+            done
+            if ! diff -u /tmp/$kind.from_models.txt /tmp/$kind.from_migrations.txt; then
+              echo
+              echo "The migrated schema differs from the one the models describe."
+              echo "Left: models (what the tests run against)."
+              echo "Right: migrations (what production runs)."
+              exit 1
+            fi
           done
-          if ! diff -u /tmp/from_models.txt /tmp/from_migrations.txt; then
-            echo
-            echo "The migrated schema differs from the one the models describe."
-            echo "Left: models (what the tests run against)."
-            echo "Right: migrations (what production runs)."
-            exit 1
-          fi
-          echo "models and migrations agree on all $(wc -l < /tmp/from_models.txt) indexes"
+          echo "models and migrations agree:" \
+               "$(wc -l < /tmp/idx.from_models.txt) indexes," \
+               "$(wc -l < /tmp/trg.from_models.txt) triggers," \
+               "$(wc -l < /tmp/fn.from_models.txt) functions"
 
       # The image installs from the lock file, so a dependency added to
       # requirements.txt without regenerating it is simply absent in

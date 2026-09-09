@@ -148,6 +148,24 @@ async def main() -> None:
         watcher = await c.get("/v1/sync/pull", headers=ch)
         show("GET /v1/sync/pull — ответ наблюдателю (та же выборка)", watcher.json())
 
+        # A refusal that is not about permission: a medication does not change
+        # profile, not even between two profiles of the same owner (§4.2).
+        second, moved = str(uuid.uuid4()), str(uuid.uuid4())
+        await c.post("/v1/sync/push", headers=oh, json={"changes": {
+            "profiles": [{"id": second, "created_at": t, "updated_at": t,
+                          "deleted_at": None, "op_seq": op(), "name": "Dad",
+                          "color": 4283215696, "sort_order": 0}],
+            "medications": [{"id": moved, "created_at": t, "updated_at": t,
+                             "deleted_at": None, "op_seq": op(), "profile_id": pid,
+                             "name": "Bisoprolol", "form": "tablet", "dose_amount": 1.0}],
+        }})
+        r = await c.post("/v1/sync/push", headers=oh, json={"changes": {"medications": [
+            {"id": moved, "created_at": t, "updated_at": t + 30_000, "deleted_at": None,
+             "op_seq": op(), "profile_id": second, "name": "Bisoprolol",
+             "form": "tablet", "dose_amount": 1.0},
+        ]}})
+        show("POST /v1/sync/push — смена профиля у лекарства отвергнута", r.json())
+
     await engine.dispose()
 
 

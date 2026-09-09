@@ -15,6 +15,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    DDL,
     BigInteger,
     Boolean,
     DateTime,
@@ -25,6 +26,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    event,
     text,
 )
 from sqlalchemy.dialects.postgresql import UUID
@@ -34,6 +36,11 @@ from app.core.crypto import EncryptedString
 from app.db.session import Base
 
 SERVER_SEQ = "server_seq"
+
+# The database refuses some writes on its own, and the API has to tell those
+# refusals apart from every other error without reading message text. Postgres
+# does not use the class "SD", so a code in it can only be ours.
+IMMUTABLE_PARENT_SQLSTATE = "SD001"
 
 
 def _uuid() -> uuid.UUID:
@@ -384,6 +391,63 @@ class Medication(Base, SyncMixin):
     server_seq: Mapped[int] = mapped_column(
         BigInteger, server_default=text(f"nextval('{SERVER_SEQ}')"), index=True
     )
+
+
+# A medication is created inside a profile and never moves to another one, and
+# the rule is enforced here rather than in the endpoint that writes.
+#
+# What a move breaks is on the phone. `dose_events.profile_id` is written when a
+# dose is first materialised and never rewritten, so a medication that changed
+# parent leaves its doses naming the profile it used to belong to. The device
+# reads reminder authority from the dose row rather than from the medication's
+# current parent, decides the alarm it was about to set is stale, and drops it.
+# The phone then rings for nothing at all — invariant 1 (spec §1.4) failing in
+# the direction that has no symptom until a dose is missed.
+#
+# It closes a second hole, on this side. `push` checked that the caller owns the
+# profile a medication *claims* and never the profile the stored row already
+# belongs to, so a caregiver — who is sent the id of every medication on a
+# profile they watch (contract §4.3) — could resend one under a profile of their
+# own and take the row out of the owner's data.
+#
+# In the database rather than in `push`, for two reasons. It is what makes the
+# refusal atomic: the statement aborts, so no other field of that row lands and
+# its server_seq does not move, which is exactly what the client's quarantine
+# rule needs. And an invariant kept by the one code path that happens to exist
+# today is an invariant only until the second one is written.
+#
+# The app has no way to move a medication, so the rule costs a feature nobody
+# has (the app track's own review adopted the rule, 2026-09-09; contract §4.2).
+#
+# Kept in step with migration 0014, which carries the same two statements — a
+# migration cannot import this module, because it has to keep meaning what it
+# meant when it was written.
+_PARENT_IS_IMMUTABLE_FUNCTION = f"""
+CREATE OR REPLACE FUNCTION medications_parent_is_immutable() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'medications.profile_id is immutable'
+        USING ERRCODE = '{IMMUTABLE_PARENT_SQLSTATE}',
+              DETAIL = 'medication ' || OLD.id || ' from ' || OLD.profile_id
+                       || ' to ' || NEW.profile_id;
+END;
+$$
+"""
+
+# The WHEN clause is not decoration: without it every ordinary edit to a
+# medication would enter plpgsql to find nothing to say.
+_PARENT_IS_IMMUTABLE_TRIGGER = """
+CREATE TRIGGER medications_parent_is_immutable
+BEFORE UPDATE ON medications
+FOR EACH ROW WHEN (NEW.profile_id IS DISTINCT FROM OLD.profile_id)
+EXECUTE FUNCTION medications_parent_is_immutable()
+"""
+
+# So a database built from the models has the guard too. The test suite builds
+# its schema this way, and a rule that only production runs is a rule no test
+# can fail.
+event.listen(Medication.__table__, "after_create", DDL(_PARENT_IS_IMMUTABLE_FUNCTION))
+event.listen(Medication.__table__, "after_create", DDL(_PARENT_IS_IMMUTABLE_TRIGGER))
 
 
 class Schedule(Base, SyncMixin):
