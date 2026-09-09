@@ -241,7 +241,14 @@ async def push(
                 # this batch but is by the time it is written — another device
                 # created it in between, or it arrives twice in this same batch.
                 # The check before the loop catches every other case earlier.
-                refuse(entity, row_id, "immutable_parent")
+                # `profiles` says it differently: the row on disk belongs to
+                # another account, which is a fact about permission rather than
+                # about a link between two rows of ours.
+                refuse(
+                    entity,
+                    row_id,
+                    "forbidden_role" if entity == "profiles" else "immutable_parent",
+                )
             elif isinstance(exc, IntegrityError):
                 later(entity, row_id, "missing_parent")
             else:
@@ -249,11 +256,22 @@ async def push(
         except SQLAlchemyError:
             later(entity, row_id, "conflict")
 
+    stored_owner = await _stored_parents(
+        session, Profile, Profile.owner_account_id, [p.id for p in changes.profiles]
+    )
+
     # Parents before children: foreign keys need it, and a medication arriving
     # in the same batch as its schedule has to exist before the schedule can be
     # checked against it.
     for p in changes.profiles:
-        if p.id in profiles and p.id not in mine:
+        if stored_owner.get(p.id, caller.account.id) != caller.account.id:
+            # The row on disk belongs to another account. The check this
+            # replaced asked whether the caller could *see* the profile, which
+            # let through the one caller who most obviously must not write it: a
+            # caregiver whose access was revoked still knows the id, and no
+            # longer sees the profile the revocation took away. Pushing the row
+            # then rewrote its owner to them, and with it went the schedules a
+            # watcher is never sent.
             refuse("profiles", p.id, "forbidden_role")
             continue
         await apply("profiles", Profile, p.id, {
@@ -265,13 +283,15 @@ async def push(
         })
         mine.add(p.id)
 
-    stored_parent = await _stored_medication_parents(session, changes)
+    stored_medication_parent = await _stored_parents(
+        session, Medication, Medication.profile_id, [m.id for m in changes.medications]
+    )
 
     for m in changes.medications:
         if m.profile_id not in mine:
             refuse("medications", m.id, "forbidden_role")
             continue
-        if stored_parent.get(m.id, m.profile_id) != m.profile_id:
+        if stored_medication_parent.get(m.id, m.profile_id) != m.profile_id:
             # A medication does not change profile (contract §4.2). Final: the
             # row will not be accepted however often it is sent, and the client
             # quarantines it rather than retrying.
@@ -299,6 +319,10 @@ async def push(
 
     med_owner = await _medication_profiles(session, changes)
 
+    stored_schedule_parent = await _stored_parents(
+        session, Schedule, Schedule.medication_id, [sc.id for sc in changes.schedules]
+    )
+
     for sc in changes.schedules:
         owner_profile = med_owner.get(sc.medication_id)
         if owner_profile is None:
@@ -306,6 +330,12 @@ async def push(
             continue
         if owner_profile not in mine:
             refuse("schedules", sc.id, "forbidden_role")
+            continue
+        if stored_schedule_parent.get(sc.id, sc.medication_id) != sc.medication_id:
+            # Re-pointing a schedule strands the doses already built from it:
+            # they keep naming the medication, and the profile, they were
+            # materialised for.
+            refuse("schedules", sc.id, "immutable_parent")
             continue
         await apply("schedules", Schedule, sc.id, {
             **_sync_values(sc, dev),
@@ -318,9 +348,34 @@ async def push(
             "end_date": sc.end_date,
         })
 
+    stored_dose_parent = await _stored_parents(
+        session, DoseEvent, DoseEvent.profile_id, [d.id for d in changes.dose_events]
+    )
+
     for d in changes.dose_events:
         if d.profile_id not in mine:
             refuse("dose_events", d.id, "forbidden_role")
+            continue
+        # The medication is checked too, and it was not checked at all. A dose
+        # names three things, and owning the profile it claims said nothing
+        # about the medication it points at — which could be any row in the
+        # table, including another account's.
+        #
+        # `schedule_id` is left unchecked: it is nullable, it is set null when
+        # the schedule goes, and its ids never leave the owner's own device.
+        medication_profile = med_owner.get(d.medication_id)
+        if medication_profile is None:
+            later("dose_events", d.id, "missing_parent")
+            continue
+        if medication_profile not in mine:
+            refuse("dose_events", d.id, "forbidden_role")
+            continue
+        if stored_dose_parent.get(d.id, d.profile_id) != d.profile_id:
+            # The hole with the widest reach of the five: dose ids are sent to
+            # every watcher by design (contract §4.3), so a caregiver could
+            # resend one under a profile of their own and the row left the
+            # owner's feed for theirs.
+            refuse("dose_events", d.id, "immutable_parent")
             continue
         await apply("dose_events", DoseEvent, d.id, {
             **_sync_values(d, dev),
@@ -335,6 +390,10 @@ async def push(
             "dose_amount": d.dose_amount,
         })
 
+    stored_stock_parent = await _stored_parents(
+        session, StockEvent, StockEvent.medication_id, [e.id for e in changes.stock_events]
+    )
+
     for e in changes.stock_events:
         owner_profile = med_owner.get(e.medication_id)
         if owner_profile is None:
@@ -342,6 +401,11 @@ async def push(
             continue
         if owner_profile not in mine:
             refuse("stock_events", e.id, "forbidden_role")
+            continue
+        if stored_stock_parent.get(e.id, e.medication_id) != e.medication_id:
+            # The stock balance is the sum of the journal (contract §4.2), so a
+            # moved event silently changes two of them.
+            refuse("stock_events", e.id, "immutable_parent")
             continue
         await apply("stock_events", StockEvent, e.id, {
             **_sync_values(e, dev),
@@ -357,30 +421,32 @@ async def push(
     return PushOut(cursor=encode_cursor(int(high)), rejected=rejected, retry=retry)
 
 
-async def _stored_medication_parents(
-    session: AsyncSession, changes: Changes
+async def _stored_parents(
+    session: AsyncSession, model, column, ids: list[uuid.UUID]
 ) -> dict[uuid.UUID, uuid.UUID]:
-    """The profile each incoming medication already belongs to, where it exists.
+    """Which parent each incoming row already has on the server, where it exists.
+
+    The question `push` used not to ask. Every check here reads the parent a row
+    *claims*, which says nothing about whether the caller may touch the row that
+    is already there — and for five entities the difference was the whole of the
+    authorisation.
 
     Read without a lock, deliberately. The stale answers this can give are the
     two that cost nothing, because the write is guarded as well (models.py): if
     the row appears after this read, the trigger refuses the move at the moment
     it is written; if the row is read here and hard-deleted before the write,
-    the insert that follows creates it under the parent this check just
-    approved. There is no reading of this map that lets a move through.
+    the insert that follows creates it under the parent this check approved.
+    There is no reading of this map that lets a move through.
 
     It exists for the case the trigger cannot see: a write that loses on
     last-write-wins is never applied, so no update runs and no trigger fires,
     and a row proposing a new parent would come back neither rejected nor
     applied. The client reads that silence as success.
     """
-    ids = [m.id for m in changes.medications]
     if not ids:
         return {}
     rows = (
-        await session.execute(
-            select(Medication.id, Medication.profile_id).where(Medication.id.in_(ids))
-        )
+        await session.execute(select(model.id, column).where(model.id.in_(ids)))
     ).all()
     return dict(rows)
 
@@ -392,9 +458,11 @@ async def _medication_profiles(session: AsyncSession, changes: Changes) -> dict[
     alongside its brand-new medication resolves rather than being refused for
     referring to something that "does not exist".
     """
-    ids = {s.medication_id for s in changes.schedules} | {
-        e.medication_id for e in changes.stock_events
-    }
+    ids = (
+        {s.medication_id for s in changes.schedules}
+        | {e.medication_id for e in changes.stock_events}
+        | {d.medication_id for d in changes.dose_events}
+    )
     if not ids:
         return {}
     rows = (
