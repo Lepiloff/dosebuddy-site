@@ -1057,6 +1057,64 @@ async def test_a_dose_event_cannot_point_at_another_accounts_medication(api):
     assert out["rejected"][0]["code"] == "forbidden_role"
 
 
+async def test_a_medication_whose_profile_has_not_arrived_is_retryable(api):
+    """The edge that cost the app track a row, and the reason it is not final.
+
+    Their outbox can put a medication in one batch and the profile it belongs to
+    in the next — a profile edit gives the parent a fresh sequence number, which
+    carries it behind its own children, and the batch boundary falls between
+    them. A final refusal here is quarantined on their side, and a quarantined
+    row keeps its server_seq, so no pull ever brings it back: the medication
+    stays on one phone. A retry waits instead, and the next push lands it.
+
+    Saying so tells the caller whether a profile id exists. That is not a new
+    answer: `_medication_profiles` has told every caller the same about every
+    medication id since the beginning, which is why the other three entities
+    were already retryable.
+    """
+    owner, pid, _, _, _ = await _owner_with_data(api)
+    later_profile, mid = str(uuid.uuid4()), str(uuid.uuid4())
+
+    out = await push(api, owner, medications=[medication(mid, later_profile, "Early")])
+
+    assert out["rejected"] == []
+    assert out["retry"] == [
+        {"id": mid, "entity": "medications", "code": "missing_parent"}
+    ]
+
+    # And the retry lands, which is the whole point of not being final.
+    await push(api, owner, profiles=[profile(later_profile, "Late")])
+    again = await push(api, owner, medications=[medication(mid, later_profile, "Early")])
+    assert again["rejected"] == [] and again["retry"] == []
+    assert mid in {m["id"] for m in (await pull(api, owner))["changes"]["medications"]}
+
+
+async def test_a_dose_event_whose_profile_has_not_arrived_is_retryable(api):
+    """The same edge, and doses cross it for the same reason."""
+    owner, pid, mid, sid, _ = await _owner_with_data(api)
+    later_profile = str(uuid.uuid4())
+
+    out = await push(api, owner, dose_events=[
+        dose(str(uuid.uuid4()), mid, later_profile, sid),
+    ])
+
+    assert out["rejected"] == []
+    assert out["retry"][0]["code"] == "missing_parent"
+
+
+async def test_a_profile_that_exists_and_is_not_yours_is_still_final(api):
+    """The other half. A parent that is somebody's, just not the caller's, will
+    not become theirs by being sent again — and telling them to retry it would
+    be a client looping on something that can never succeed."""
+    owner, pid, _, _, _ = await _owner_with_data(api)
+    stranger = await sign_in(api, f"stranger-{uuid.uuid4()}")
+
+    out = await push(api, stranger, medications=[medication(str(uuid.uuid4()), pid)])
+
+    assert out["retry"] == []
+    assert out["rejected"][0]["code"] == "forbidden_role"
+
+
 async def test_a_dose_event_whose_medication_has_not_arrived_is_retryable(api):
     """The medication check must not turn causal order into a rejection: a
     parent on a later page is the ordinary case, and it will land."""

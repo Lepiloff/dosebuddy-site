@@ -297,13 +297,45 @@ async def push(
     )
     mine |= {pid for pid, (owner,) in settled.items() if owner == caller.account.id}
 
+    # A profile this server has never seen is a parent that has not arrived, not
+    # a parent that belongs to somebody else.
+    #
+    # Both used to answer `forbidden_role`, which is final, and the app track
+    # measured what that costs: their outbox can put a medication in one batch
+    # and the profile it belongs to in the next, and the medication then came
+    # back finally refused. The client quarantines a final refusal, a refused
+    # row keeps its server_seq so no pull ever brings it back, and the row lived
+    # on one phone from then on. Silently — the failure of `retry` is a row that
+    # waits, the failure of `refuse` is a row that is gone.
+    #
+    # Telling the two apart says whether a profile id exists, which is the
+    # objection to doing it. It does not hold here: `_medication_profiles`
+    # already answers exactly that question for every medication id on every
+    # push, and has since the beginning. This makes the profile edge behave like
+    # the medication edge rather than adding a new kind of answer, and a v4 uuid
+    # is not a space anybody enumerates.
+    named = (
+        {m.profile_id for m in changes.medications}
+        | {d.profile_id for d in changes.dose_events}
+    ) - mine
+    unknown = named - set(
+        await _stored_parents(session, Profile, (Profile.owner_account_id,), list(named))
+    )
+
+    def profile_out_of_reach(entity: str, row_id: uuid.UUID, profile_id: uuid.UUID) -> None:
+        """Say why a child cannot be written, in the terms the client acts on."""
+        if profile_id in unknown:
+            later(entity, row_id, "missing_parent")
+        else:
+            refuse(entity, row_id, "forbidden_role")
+
     stored_medication_parent = await _stored_parents(
         session, Medication, (Medication.profile_id,), [m.id for m in changes.medications]
     )
 
     for m in changes.medications:
         if m.profile_id not in mine:
-            refuse("medications", m.id, "forbidden_role")
+            profile_out_of_reach("medications", m.id, m.profile_id)
             continue
         if _moved(stored_medication_parent, m.id, m.profile_id):
             # A medication does not change profile (contract §4.2). Final: the
@@ -371,7 +403,7 @@ async def push(
 
     for d in changes.dose_events:
         if d.profile_id not in mine:
-            refuse("dose_events", d.id, "forbidden_role")
+            profile_out_of_reach("dose_events", d.id, d.profile_id)
             continue
         # The medication is checked too, and it was not checked at all. A dose
         # names three things, and owning the profile it claims said nothing
