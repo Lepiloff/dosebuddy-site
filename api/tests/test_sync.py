@@ -11,11 +11,19 @@ import time
 import uuid
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.exc import DBAPIError
 
 from app.api.sync import PAGE_SIZE
-from app.db.models import IMMUTABLE_PARENT_SQLSTATE, Medication
+from app.db.models import (
+    IMMUTABLE_PARENT_SQLSTATE,
+    Account,
+    DoseEvent,
+    Medication,
+    Profile,
+    Schedule,
+    StockEvent,
+)
 from tests.conftest import auth_header, sign_in
 
 pytestmark = pytest.mark.asyncio
@@ -72,6 +80,12 @@ def dose(did: str, mid: str, pid: str, sid: str | None = None,
             "planned_at": planned if planned is not None else t,
             "status": status, "action_at": None,
             "snooze_count": 0, "snoozed_until": None, "dose_amount": 1.0}
+
+
+def stock(eid: str, mid: str, delta: float = 30.0, at: int | None = None) -> dict:
+    t = at or ms()
+    return {"id": eid, "created_at": t, "updated_at": t, "deleted_at": None, "op_seq": op(),
+            "medication_id": mid, "delta": delta, "reason": "manual", "dose_event_id": None}
 
 
 async def push(api, tokens, **entities):
@@ -772,15 +786,21 @@ async def test_a_forbidden_record_is_rejected_not_retried(api):
 
 
 # ---------------------------------------------------------------------------
-# A medication does not change profile
+# A row does not change parent
 # ---------------------------------------------------------------------------
 #
-# Set on creation, refused afterwards, and refused by the schema rather than by
-# this endpoint alone (models.py, migration 0014). The reason is on the phone:
+# Five links — profiles.owner_account_id, medications.profile_id,
+# dose_events.profile_id, schedules.medication_id, stock_events.medication_id —
+# written on creation and refused afterwards, by the schema rather than by this
+# endpoint alone (models.py, migrations 0014 and 0015).
+#
+# `push` authorised each row by the parent it *claims*, never by the parent the
+# stored row already has. The medication case is the one the app track measured:
 # `dose_events.profile_id` is written when a dose is first materialised and
 # never rewritten, so a medication that changed parent leaves its doses naming
 # the profile it used to belong to, and the device drops the alarm it was about
-# to set as stale. Nothing errors; the phone simply goes quiet.
+# to set as stale. Nothing errors; the phone simply goes quiet. The other four
+# are below, and two of them were reachable by somebody else's account.
 
 
 async def test_a_medication_cannot_change_profile(api):
@@ -948,22 +968,173 @@ async def test_a_move_racing_a_write_from_another_device_is_refused(api, session
     assert med["name"] == "Created"
 
 
-async def test_the_database_refuses_the_move_whatever_writes_it(api, session):
-    """Not push — the schema. A backfill, a support script or the next endpoint
-    someone writes gets the same answer, which is the reason the rule is not a
-    branch in `push`."""
+async def test_a_revoked_caregiver_cannot_take_the_profile(api):
+    """Revocation used to be the step that made the takeover possible.
+
+    The guard asked whether the caller could *see* the profile, and a caregiver
+    whose access has been revoked cannot — while still knowing the id, which is
+    the whole point of having been a caregiver. Pushing the profile row rewrote
+    its owner to them: they then pulled the owner's projection, schedules
+    included, and the real owner's `roles` map went empty.
+    """
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+    caregiver = await _pair(api, owner, pid, role="viewer")
+    members = await api.get(f"/v1/profiles/{pid}/members", headers=auth_header(owner))
+    account_id = members.json()[0]["account_id"]
+    revoked = await api.delete(
+        f"/v1/profiles/{pid}/members/{account_id}", headers=auth_header(owner)
+    )
+    assert revoked.status_code == 204
+
+    out = await push(api, caregiver, profiles=[profile(pid, "Taken", at=ms() + 5000)])
+
+    assert out["retry"] == []
+    assert out["rejected"] == [
+        {"id": pid, "entity": "profiles", "code": "forbidden_role"}
+    ]
+    theirs = await pull(api, caregiver)
+    assert theirs["roles"] == {}
+    assert theirs["changes"].get("profiles", []) == []
+    assert theirs["changes"].get("schedules", []) == []
+    assert (await pull(api, owner))["roles"][pid] == "owner"
+
+
+async def test_an_account_that_knows_a_profile_id_cannot_claim_it(api):
+    """The same rule without the revocation: a profile that exists belongs to
+    the account on the row, and no push moves it."""
+    owner, pid, _, _, _ = await _owner_with_data(api)
+    stranger = await sign_in(api, f"stranger-{uuid.uuid4()}")
+
+    out = await push(api, stranger, profiles=[profile(pid, "Mine now", at=ms() + 5000)])
+
+    assert out["rejected"][0]["code"] == "forbidden_role"
+    assert (await pull(api, stranger))["roles"] == {}
+    prof = [p for p in (await pull(api, owner))["changes"]["profiles"]
+            if p["id"] == pid][0]
+    assert prof["name"] == "Someone"
+
+
+async def test_a_watcher_cannot_move_a_dose_event_into_its_own_profile(api):
+    """Of the five this one had the widest reach: dose ids are sent to every
+    watcher by design (§4.3), so the id needed to do it arrives by ordinary
+    sync. The row left the owner's feed entirely."""
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+    caregiver = await _pair(api, owner, pid)
+    theirs, their_med = str(uuid.uuid4()), str(uuid.uuid4())
+    await push(api, caregiver, profiles=[profile(theirs, "Mine")])
+    await push(api, caregiver, medications=[medication(their_med, theirs, "Theirs")])
+    assert did in {d["id"] for d in (await pull(api, caregiver))["changes"]["dose_events"]}
+
+    # Their own profile and their own medication, so nothing here is refused for
+    # naming something that is not theirs. Only the id is the owner's, and the
+    # id is what arrives by ordinary sync.
+    out = await push(api, caregiver, dose_events=[
+        dose(did, their_med, theirs, None, status="taken", at=ms() + 5000),
+    ])
+
+    assert out["rejected"][0]["code"] == "immutable_parent"
+    still = [d for d in (await pull(api, owner))["changes"]["dose_events"]
+             if d["id"] == did][0]
+    assert still["profile_id"] == pid
+    assert still["status"] == "pending"
+
+
+async def test_a_dose_event_cannot_point_at_another_accounts_medication(api):
+    """A dose names three things, and owning the profile it claims said nothing
+    about the medication it points at — which was never checked at all."""
     owner, pid, mid, _, _ = await _owner_with_data(api)
-    second = str(uuid.uuid4())
+    stranger = await sign_in(api, f"stranger-{uuid.uuid4()}")
+    theirs = str(uuid.uuid4())
+    await push(api, stranger, profiles=[profile(theirs, "Mine")])
+
+    out = await push(api, stranger, dose_events=[
+        dose(str(uuid.uuid4()), mid, theirs, None),
+    ])
+
+    assert out["retry"] == []
+    assert out["rejected"][0]["code"] == "forbidden_role"
+
+
+async def test_a_dose_event_whose_medication_has_not_arrived_is_retryable(api):
+    """The medication check must not turn causal order into a rejection: a
+    parent on a later page is the ordinary case, and it will land."""
+    owner, pid, _, _, _ = await _owner_with_data(api)
+
+    out = await push(api, owner, dose_events=[
+        dose(str(uuid.uuid4()), str(uuid.uuid4()), pid, None),
+    ])
+
+    assert out["rejected"] == []
+    assert out["retry"][0]["code"] == "missing_parent"
+
+
+async def test_a_schedule_cannot_change_medication(api):
+    """Re-pointing a schedule strands the doses already built from it: they keep
+    naming the medication, and the profile, they were materialised for."""
+    owner, pid, mid, sid, _ = await _owner_with_data(api)
+    second, other_med = str(uuid.uuid4()), str(uuid.uuid4())
     await push(api, owner, profiles=[profile(second, "Second")])
+    await push(api, owner, medications=[medication(other_med, second, "Other")])
 
-    with pytest.raises(DBAPIError) as refused:
-        await session.execute(
-            update(Medication)
-            .where(Medication.id == uuid.UUID(mid))
-            .values(profile_id=uuid.UUID(second))
-        )
+    out = await push(api, owner, schedules=[schedule(sid, other_med, at=ms() + 5000)])
 
-    assert refused.value.orig.sqlstate == IMMUTABLE_PARENT_SQLSTATE
+    assert out["rejected"] == [
+        {"id": sid, "entity": "schedules", "code": "immutable_parent"}
+    ]
+    row = [x for x in (await pull(api, owner))["changes"]["schedules"]
+           if x["id"] == sid][0]
+    assert row["medication_id"] == mid
+
+
+async def test_a_stock_event_cannot_change_medication(api):
+    """The balance is the sum of the journal (§4.2), so a moved event changes
+    two balances and reports neither."""
+    owner, pid, mid, _, _ = await _owner_with_data(api)
+    second, other_med, eid = (str(uuid.uuid4()) for _ in range(3))
+    await push(api, owner, profiles=[profile(second, "Second")])
+    await push(api, owner, medications=[medication(other_med, second, "Other")])
+    await push(api, owner, stock_events=[stock(eid, mid)])
+
+    out = await push(api, owner, stock_events=[
+        stock(eid, other_med, delta=99.0, at=ms() + 5000),
+    ])
+
+    assert out["rejected"][0]["code"] == "immutable_parent"
+    row = [x for x in (await pull(api, owner))["changes"]["stock_events"]
+           if x["id"] == eid][0]
+    assert row["medication_id"] == mid
+    assert row["delta"] == 30.0
+
+
+async def test_the_database_refuses_every_parent_move_whatever_writes_it(api, session):
+    """Not push — the schema. A backfill, a support script or the next endpoint
+    someone writes gets the same answer for all five, which is the reason the
+    rule is not five branches in `push`."""
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+    second, other_med, eid = (str(uuid.uuid4()) for _ in range(3))
+    await push(api, owner, profiles=[profile(second, "Second")])
+    await push(api, owner, medications=[medication(other_med, second, "Other")])
+    await push(api, owner, stock_events=[stock(eid, mid)])
+    sub = f"stranger-{uuid.uuid4()}"
+    await sign_in(api, sub)
+    elsewhere = (
+        await session.execute(select(Account.id).where(Account.google_sub == sub))
+    ).scalar_one()
+
+    moves = [
+        (Profile, uuid.UUID(pid), {"owner_account_id": elsewhere}),
+        (Medication, uuid.UUID(mid), {"profile_id": uuid.UUID(second)}),
+        (DoseEvent, uuid.UUID(did), {"profile_id": uuid.UUID(second)}),
+        (Schedule, uuid.UUID(sid), {"medication_id": uuid.UUID(other_med)}),
+        (StockEvent, uuid.UUID(eid), {"medication_id": uuid.UUID(other_med)}),
+    ]
+    for model, row_id, values in moves:
+        with pytest.raises(DBAPIError) as refused:
+            await session.execute(
+                update(model).where(model.id == row_id).values(**values)
+            )
+        assert refused.value.orig.sqlstate == IMMUTABLE_PARENT_SQLSTATE, model.__name__
+        await session.rollback()
 
 
 async def test_an_oversized_batch_is_refused_whole(api):

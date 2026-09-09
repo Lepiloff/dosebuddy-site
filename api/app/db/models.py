@@ -393,63 +393,6 @@ class Medication(Base, SyncMixin):
     )
 
 
-# A medication is created inside a profile and never moves to another one, and
-# the rule is enforced here rather than in the endpoint that writes.
-#
-# What a move breaks is on the phone. `dose_events.profile_id` is written when a
-# dose is first materialised and never rewritten, so a medication that changed
-# parent leaves its doses naming the profile it used to belong to. The device
-# reads reminder authority from the dose row rather than from the medication's
-# current parent, decides the alarm it was about to set is stale, and drops it.
-# The phone then rings for nothing at all — invariant 1 (spec §1.4) failing in
-# the direction that has no symptom until a dose is missed.
-#
-# It closes a second hole, on this side. `push` checked that the caller owns the
-# profile a medication *claims* and never the profile the stored row already
-# belongs to, so a caregiver — who is sent the id of every medication on a
-# profile they watch (contract §4.3) — could resend one under a profile of their
-# own and take the row out of the owner's data.
-#
-# In the database rather than in `push`, for two reasons. It is what makes the
-# refusal atomic: the statement aborts, so no other field of that row lands and
-# its server_seq does not move, which is exactly what the client's quarantine
-# rule needs. And an invariant kept by the one code path that happens to exist
-# today is an invariant only until the second one is written.
-#
-# The app has no way to move a medication, so the rule costs a feature nobody
-# has (the app track's own review adopted the rule, 2026-09-09; contract §4.2).
-#
-# Kept in step with migration 0014, which carries the same two statements — a
-# migration cannot import this module, because it has to keep meaning what it
-# meant when it was written.
-_PARENT_IS_IMMUTABLE_FUNCTION = f"""
-CREATE OR REPLACE FUNCTION medications_parent_is_immutable() RETURNS trigger
-LANGUAGE plpgsql AS $$
-BEGIN
-    RAISE EXCEPTION 'medications.profile_id is immutable'
-        USING ERRCODE = '{IMMUTABLE_PARENT_SQLSTATE}',
-              DETAIL = 'medication ' || OLD.id || ' from ' || OLD.profile_id
-                       || ' to ' || NEW.profile_id;
-END;
-$$
-"""
-
-# The WHEN clause is not decoration: without it every ordinary edit to a
-# medication would enter plpgsql to find nothing to say.
-_PARENT_IS_IMMUTABLE_TRIGGER = """
-CREATE TRIGGER medications_parent_is_immutable
-BEFORE UPDATE ON medications
-FOR EACH ROW WHEN (NEW.profile_id IS DISTINCT FROM OLD.profile_id)
-EXECUTE FUNCTION medications_parent_is_immutable()
-"""
-
-# So a database built from the models has the guard too. The test suite builds
-# its schema this way, and a rule that only production runs is a rule no test
-# can fail.
-event.listen(Medication.__table__, "after_create", DDL(_PARENT_IS_IMMUTABLE_FUNCTION))
-event.listen(Medication.__table__, "after_create", DDL(_PARENT_IS_IMMUTABLE_TRIGGER))
-
-
 class Schedule(Base, SyncMixin):
     __tablename__ = "schedules"
 
@@ -658,4 +601,101 @@ class AlertDelivery(Base):
     # the attempt, which made it a record of intent wearing the name of a fact.
     sent_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+
+
+# ---------------------------------------------------------------------------
+# A row does not change parent
+# ---------------------------------------------------------------------------
+#
+# Five columns, one rule: the link that says where a row belongs is written when
+# the row is created and never again.
+#
+#     profiles.owner_account_id      medications.profile_id
+#     dose_events.profile_id         schedules.medication_id
+#                                    stock_events.medication_id
+#
+# `push` authorised a row by the parent it *claims* and never by the parent the
+# stored row already has. That is one mistake written five times, and on
+# 2026-09-09 all five reproduced against a real database:
+#
+#   profiles      — a caregiver whose access had been *revoked* still knew the
+#                   profile id, and the guard only covered profiles the caller
+#                   could currently see. Pushing the profile row rewrote
+#                   owner_account_id to theirs: they then pulled the owner's
+#                   projection — names, notes, and the schedules a watcher is
+#                   never sent — and the real owner's `roles` went empty.
+#                   Revocation was not merely ineffective, it was the step that
+#                   made the takeover possible.
+#   dose_events   — dose ids are sent to every watcher by design (contract
+#                   §4.3), so a caregiver could resend one under a profile of
+#                   their own and the row left the owner's feed.
+#   medications   — the same, closed on 2026-09-09 by migration 0014.
+#   schedules     — a schedule could be re-pointed at a medication in another
+#                   profile, which strands the doses already materialised from
+#                   it: they keep naming the medication and profile they were
+#                   built for.
+#   stock_events  — the stock balance is the sum of the journal (contract §4.2),
+#                   so moving one event silently changes two balances.
+#
+# In the schema rather than in `push`, for the reason the pull projection lives
+# in the feed rather than in a filter. It is what makes the refusal atomic — the
+# statement aborts, so no other field of the row lands and its server_seq does
+# not move, which is what the client's quarantine rule needs — and it holds for
+# writers that are not this endpoint.
+#
+# None of the five has a legitimate move. Handing reminder authority to another
+# device writes profiles.owner_device_id, not owner_account_id; pairing grants
+# membership, never ownership; and the app cannot move a medication, a schedule
+# or a stock event between parents at all.
+#
+# Kept in step with migrations 0014 and 0015, which carry the same statements —
+# a migration cannot import this module, because it has to keep meaning what it
+# meant on the day it ran.
+_PARENT_IS_IMMUTABLE_FUNCTION = f"""
+CREATE OR REPLACE FUNCTION parent_is_immutable() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION USING
+        ERRCODE = '{IMMUTABLE_PARENT_SQLSTATE}',
+        MESSAGE = TG_TABLE_NAME || '.' || TG_ARGV[0] || ' is immutable',
+        DETAIL = 'row ' || OLD.id;
+END;
+$$
+"""
+
+# One function, five triggers. The column each one guards is named twice — in
+# the WHEN clause, which is what actually decides, and as the argument, which
+# only makes the message say which column it was.
+#
+# The WHEN clause is not decoration: without it every ordinary edit to any of
+# these tables would enter plpgsql to find nothing to say.
+_PARENT_IS_IMMUTABLE_TRIGGERS = [
+    ("profiles", "profiles_owner_is_immutable", "owner_account_id"),
+    ("medications", "medications_parent_is_immutable", "profile_id"),
+    ("dose_events", "dose_events_parent_is_immutable", "profile_id"),
+    ("schedules", "schedules_parent_is_immutable", "medication_id"),
+    ("stock_events", "stock_events_parent_is_immutable", "medication_id"),
+]
+
+
+def _parent_is_immutable_trigger(table: str, name: str, column: str) -> str:
+    return f"""
+CREATE TRIGGER {name}
+BEFORE UPDATE ON {table}
+FOR EACH ROW WHEN (NEW.{column} IS DISTINCT FROM OLD.{column})
+EXECUTE FUNCTION parent_is_immutable('{column}')
+"""
+
+
+# On the metadata rather than on each table, so the function is created once and
+# before every trigger that calls it. Attached at all so that a database built
+# from the models carries the guard: the test suite builds its schema that way,
+# and a rule only production runs is a rule no test can fail.
+event.listen(Base.metadata, "after_create", DDL(_PARENT_IS_IMMUTABLE_FUNCTION))
+for _table, _name, _column in _PARENT_IS_IMMUTABLE_TRIGGERS:
+    event.listen(
+        Base.metadata,
+        "after_create",
+        DDL(_parent_is_immutable_trigger(_table, _name, _column)),
     )
