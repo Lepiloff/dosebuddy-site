@@ -256,15 +256,16 @@ async def push(
         except SQLAlchemyError:
             later(entity, row_id, "conflict")
 
+    batch_profiles = [p.id for p in changes.profiles]
     stored_owner = await _stored_parents(
-        session, Profile, Profile.owner_account_id, [p.id for p in changes.profiles]
+        session, Profile, (Profile.owner_account_id,), batch_profiles
     )
 
     # Parents before children: foreign keys need it, and a medication arriving
     # in the same batch as its schedule has to exist before the schedule can be
     # checked against it.
     for p in changes.profiles:
-        if stored_owner.get(p.id, caller.account.id) != caller.account.id:
+        if _moved(stored_owner, p.id, caller.account.id):
             # The row on disk belongs to another account. The check this
             # replaced asked whether the caller could *see* the profile, which
             # let through the one caller who most obviously must not write it: a
@@ -281,17 +282,30 @@ async def push(
             "color": p.color,
             "sort_order": p.sort_order,
         })
-        mine.add(p.id)
+
+    # What the caller may write under is what the database says it owns, not
+    # what `apply` failed to complain about.
+    #
+    # `apply` swallows its outcome by design — one bad row must not cost the
+    # batch — so a profile that was refused, or that silently lost
+    # last-write-wins to a row another account created between the read above
+    # and this write, used to be added to `mine` all the same. Every child of it
+    # in the same batch was then free to write itself into somebody else's
+    # profile, and did: measured 2026-09-09, the medication landed.
+    settled = await _stored_parents(
+        session, Profile, (Profile.owner_account_id,), batch_profiles
+    )
+    mine |= {pid for pid, (owner,) in settled.items() if owner == caller.account.id}
 
     stored_medication_parent = await _stored_parents(
-        session, Medication, Medication.profile_id, [m.id for m in changes.medications]
+        session, Medication, (Medication.profile_id,), [m.id for m in changes.medications]
     )
 
     for m in changes.medications:
         if m.profile_id not in mine:
             refuse("medications", m.id, "forbidden_role")
             continue
-        if stored_medication_parent.get(m.id, m.profile_id) != m.profile_id:
+        if _moved(stored_medication_parent, m.id, m.profile_id):
             # A medication does not change profile (contract §4.2). Final: the
             # row will not be accepted however often it is sent, and the client
             # quarantines it rather than retrying.
@@ -320,7 +334,7 @@ async def push(
     med_owner = await _medication_profiles(session, changes)
 
     stored_schedule_parent = await _stored_parents(
-        session, Schedule, Schedule.medication_id, [sc.id for sc in changes.schedules]
+        session, Schedule, (Schedule.medication_id,), [sc.id for sc in changes.schedules]
     )
 
     for sc in changes.schedules:
@@ -331,7 +345,7 @@ async def push(
         if owner_profile not in mine:
             refuse("schedules", sc.id, "forbidden_role")
             continue
-        if stored_schedule_parent.get(sc.id, sc.medication_id) != sc.medication_id:
+        if _moved(stored_schedule_parent, sc.id, sc.medication_id):
             # Re-pointing a schedule strands the doses already built from it:
             # they keep naming the medication, and the profile, they were
             # materialised for.
@@ -348,8 +362,11 @@ async def push(
             "end_date": sc.end_date,
         })
 
-    stored_dose_parent = await _stored_parents(
-        session, DoseEvent, DoseEvent.profile_id, [d.id for d in changes.dose_events]
+    stored_dose_parents = await _stored_parents(
+        session,
+        DoseEvent,
+        (DoseEvent.profile_id, DoseEvent.medication_id),
+        [d.id for d in changes.dose_events],
     )
 
     for d in changes.dose_events:
@@ -370,11 +387,16 @@ async def push(
         if medication_profile not in mine:
             refuse("dose_events", d.id, "forbidden_role")
             continue
-        if stored_dose_parent.get(d.id, d.profile_id) != d.profile_id:
-            # The hole with the widest reach of the five: dose ids are sent to
-            # every watcher by design (contract §4.3), so a caregiver could
-            # resend one under a profile of their own and the row left the
-            # owner's feed for theirs.
+        if _moved(stored_dose_parents, d.id, d.profile_id, d.medication_id):
+            # Both parents, and the second one was the gap this closes. Moving
+            # the profile had the widest reach — dose ids are sent to every
+            # watcher by design (contract §4.3), so a caregiver could resend one
+            # under a profile of their own and the row left the owner's feed for
+            # theirs. Moving the *medication* was quieter and worse: reminder
+            # authority is read from profile_id, so the phone goes on ringing on
+            # time, while the text it reads comes from the medication and the
+            # confirmation takes stock off that medication. A reminder for the
+            # wrong medicine, and the wrong packet counted down.
             refuse("dose_events", d.id, "immutable_parent")
             continue
         await apply("dose_events", DoseEvent, d.id, {
@@ -391,7 +413,7 @@ async def push(
         })
 
     stored_stock_parent = await _stored_parents(
-        session, StockEvent, StockEvent.medication_id, [e.id for e in changes.stock_events]
+        session, StockEvent, (StockEvent.medication_id,), [e.id for e in changes.stock_events]
     )
 
     for e in changes.stock_events:
@@ -402,7 +424,7 @@ async def push(
         if owner_profile not in mine:
             refuse("stock_events", e.id, "forbidden_role")
             continue
-        if stored_stock_parent.get(e.id, e.medication_id) != e.medication_id:
+        if _moved(stored_stock_parent, e.id, e.medication_id):
             # The stock balance is the sum of the journal (contract §4.2), so a
             # moved event silently changes two of them.
             refuse("stock_events", e.id, "immutable_parent")
@@ -421,10 +443,19 @@ async def push(
     return PushOut(cursor=encode_cursor(int(high)), rejected=rejected, retry=retry)
 
 
+def _moved(stored: dict[uuid.UUID, tuple], row_id: uuid.UUID, *claimed) -> bool:
+    """True when the row is already on the server under a different parent.
+
+    A row that is not there yet cannot have moved, so the claim stands in for
+    the stored value and the answer is no.
+    """
+    return stored.get(row_id, claimed) != claimed
+
+
 async def _stored_parents(
-    session: AsyncSession, model, column, ids: list[uuid.UUID]
-) -> dict[uuid.UUID, uuid.UUID]:
-    """Which parent each incoming row already has on the server, where it exists.
+    session: AsyncSession, model, columns: tuple, ids: list[uuid.UUID]
+) -> dict[uuid.UUID, tuple]:
+    """Which parents each incoming row already has on the server, where it exists.
 
     The question `push` used not to ask. Every check here reads the parent a row
     *claims*, which says nothing about whether the caller may touch the row that
@@ -442,13 +473,17 @@ async def _stored_parents(
     last-write-wins is never applied, so no update runs and no trigger fires,
     and a row proposing a new parent would come back neither rejected nor
     applied. The client reads that silence as success.
+
+    More than one column, because a dose has two parents and guarding one of
+    them guarded nothing: a dose re-pointed at another medication keeps ringing
+    on time and names the wrong medicine while it does it.
     """
     if not ids:
         return {}
     rows = (
-        await session.execute(select(model.id, column).where(model.id.in_(ids)))
+        await session.execute(select(model.id, *columns).where(model.id.in_(ids)))
     ).all()
-    return dict(rows)
+    return {row[0]: tuple(row[1:]) for row in rows}
 
 
 async def _medication_profiles(session: AsyncSession, changes: Changes) -> dict[uuid.UUID, uuid.UUID]:

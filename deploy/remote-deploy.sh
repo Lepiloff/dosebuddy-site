@@ -81,6 +81,13 @@ api_after=$(api_fingerprint)
 
 docker compose run --rm -T api alembic upgrade head
 
+# And assert it actually applied, before anything is restarted. `/health/ready`
+# answers "database ok" for a database whose migration silently did not land,
+# and CI compares the models against the migrations on a scratch database, never
+# on this one. A failure here stops the deploy with the old code still serving,
+# which is the safe end of a bad migration.
+docker compose run --rm -T api python -m app.db.schema_check
+
 # Leave the API alone when neither its image nor its service config moved.
 #
 # Both halves are required. The image alone is not enough: a change to an

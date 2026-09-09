@@ -611,9 +611,9 @@ class AlertDelivery(Base):
 # Five columns, one rule: the link that says where a row belongs is written when
 # the row is created and never again.
 #
-#     profiles.owner_account_id      medications.profile_id
-#     dose_events.profile_id         schedules.medication_id
-#                                    stock_events.medication_id
+#     profiles.owner_account_id      schedules.medication_id
+#     medications.profile_id         stock_events.medication_id
+#     dose_events.profile_id and dose_events.medication_id
 #
 # `push` authorised a row by the parent it *claims* and never by the parent the
 # stored row already has. That is one mistake written five times, and on
@@ -629,7 +629,12 @@ class AlertDelivery(Base):
 #                   made the takeover possible.
 #   dose_events   — dose ids are sent to every watcher by design (contract
 #                   §4.3), so a caregiver could resend one under a profile of
-#                   their own and the row left the owner's feed.
+#                   their own and the row left the owner's feed. A dose has two
+#                   parents, and guarding one of them guarded nothing: with the
+#                   profile unchanged the phone rings on time, while a
+#                   re-pointed medication_id changes the text it reads and the
+#                   packet the confirmation counts down (the app track's review,
+#                   2026-09-09, with both call sites named in their code).
 #   medications   — the same, closed on 2026-09-09 by migration 0014.
 #   schedules     — a schedule could be re-pointed at a medication in another
 #                   profile, which strands the doses already materialised from
@@ -649,9 +654,9 @@ class AlertDelivery(Base):
 # membership, never ownership; and the app cannot move a medication, a schedule
 # or a stock event between parents at all.
 #
-# Kept in step with migrations 0014 and 0015, which carry the same statements —
-# a migration cannot import this module, because it has to keep meaning what it
-# meant on the day it ran.
+# Kept in step with migrations 0014, 0015 and 0016, which carry the same
+# statements — a migration cannot import this module, because it has to keep
+# meaning what it meant on the day it ran.
 _PARENT_IS_IMMUTABLE_FUNCTION = f"""
 CREATE OR REPLACE FUNCTION parent_is_immutable() RETURNS trigger
 LANGUAGE plpgsql AS $$
@@ -664,16 +669,20 @@ END;
 $$
 """
 
-# One function, five triggers. The column each one guards is named twice — in
+# One function, one trigger per guarded column. The column is named twice — in
 # the WHEN clause, which is what actually decides, and as the argument, which
 # only makes the message say which column it was.
 #
+# Public, because the deploy reads it: `app.db.schema_check` asserts that every
+# trigger named here is actually on the box after a migration.
+#
 # The WHEN clause is not decoration: without it every ordinary edit to any of
 # these tables would enter plpgsql to find nothing to say.
-_PARENT_IS_IMMUTABLE_TRIGGERS = [
+PARENT_IS_IMMUTABLE_TRIGGERS = [
     ("profiles", "profiles_owner_is_immutable", "owner_account_id"),
     ("medications", "medications_parent_is_immutable", "profile_id"),
     ("dose_events", "dose_events_parent_is_immutable", "profile_id"),
+    ("dose_events", "dose_events_medication_is_immutable", "medication_id"),
     ("schedules", "schedules_parent_is_immutable", "medication_id"),
     ("stock_events", "stock_events_parent_is_immutable", "medication_id"),
 ]
@@ -693,7 +702,7 @@ EXECUTE FUNCTION parent_is_immutable('{column}')
 # from the models carries the guard: the test suite builds its schema that way,
 # and a rule only production runs is a rule no test can fail.
 event.listen(Base.metadata, "after_create", DDL(_PARENT_IS_IMMUTABLE_FUNCTION))
-for _table, _name, _column in _PARENT_IS_IMMUTABLE_TRIGGERS:
+for _table, _name, _column in PARENT_IS_IMMUTABLE_TRIGGERS:
     event.listen(
         Base.metadata,
         "after_create",
