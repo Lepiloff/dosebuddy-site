@@ -789,10 +789,12 @@ async def test_a_forbidden_record_is_rejected_not_retried(api):
 # A row does not change parent
 # ---------------------------------------------------------------------------
 #
-# Five links — profiles.owner_account_id, medications.profile_id,
-# dose_events.profile_id, schedules.medication_id, stock_events.medication_id —
-# written on creation and refused afterwards, by the schema rather than by this
-# endpoint alone (models.py, migrations 0014 and 0015).
+# Six links — profiles.owner_account_id, medications.profile_id,
+# dose_events.profile_id, dose_events.medication_id, schedules.medication_id,
+# stock_events.medication_id — written on creation and refused afterwards, by
+# the schema rather than by this endpoint alone (models.py, migrations 0014,
+# 0015 and 0016). Six and not five because a dose has two parents, and the first
+# pass guarded one of them.
 #
 # `push` authorised each row by the parent it *claims*, never by the parent the
 # stored row already has. The medication case is the one the app track measured:
@@ -1106,6 +1108,96 @@ async def test_a_stock_event_cannot_change_medication(api):
     assert row["delta"] == 30.0
 
 
+async def test_a_dose_event_cannot_change_medication(api):
+    """The half of the row the first pass left open, and the quieter half.
+
+    Reminder authority is read from `profile_id`, which this leaves alone, so
+    the phone rings on time — while the text of the reminder is joined through
+    `medication_id` and the confirmation takes stock off that medication. The
+    right alarm for the wrong medicine, and the wrong packet counted down.
+    """
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+    other_med = str(uuid.uuid4())
+    await push(api, owner, medications=[medication(other_med, pid, "Second med")])
+
+    out = await push(api, owner, dose_events=[
+        dose(did, other_med, pid, sid, at=ms() + 5000),
+    ])
+
+    assert out["retry"] == []
+    assert out["rejected"] == [
+        {"id": did, "entity": "dose_events", "code": "immutable_parent"}
+    ]
+    row = [d for d in (await pull(api, owner))["changes"]["dose_events"]
+           if d["id"] == did][0]
+    assert row["medication_id"] == mid
+
+
+async def test_a_dose_event_cannot_be_moved_to_a_medication_in_another_profile(api):
+    """Both profiles are the caller's own, so no permission check stands in the
+    way — and the dose would end up naming one profile while its medication sits
+    in another."""
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+    second, elsewhere = str(uuid.uuid4()), str(uuid.uuid4())
+    await push(api, owner, profiles=[profile(second, "Second")])
+    await push(api, owner, medications=[medication(elsewhere, second, "Elsewhere")])
+
+    out = await push(api, owner, dose_events=[
+        dose(did, elsewhere, pid, sid, at=ms() + 5000),
+    ])
+
+    assert out["rejected"][0]["code"] == "immutable_parent"
+    row = [d for d in (await pull(api, owner))["changes"]["dose_events"]
+           if d["id"] == did][0]
+    assert row["medication_id"] == mid
+    assert row["profile_id"] == pid
+
+
+async def test_a_child_of_a_refused_profile_is_not_written_under_it(api, session):
+    """What `mine` is allowed to mean.
+
+    `apply` swallows its outcome so that one bad row does not cost the batch,
+    and the profile loop used to read that silence as success: every profile it
+    did not refuse outright was added to the set the rest of the batch is
+    checked against. Here the profile row is refused — another account created
+    it while the batch was in flight — and the medication that came with it must
+    not be written into that account's profile. Before this it was: measured,
+    the row landed.
+    """
+    attacker = await sign_in(api, f"attacker-{uuid.uuid4()}")
+    sub = f"victim-{uuid.uuid4()}"
+    await sign_in(api, sub)
+    victim = (
+        await session.execute(select(Account.id).where(Account.google_sub == sub))
+    ).scalar_one()
+
+    contested, injected = uuid.uuid4(), str(uuid.uuid4())
+    t = ms()
+    session.add(Profile(id=contested, owner_account_id=victim, name="Theirs",
+                        created_at_ms=t, updated_at_ms=t))
+    await session.flush()   # created, and not yet committed
+
+    pushing = asyncio.create_task(push(
+        api, attacker,
+        profiles=[profile(str(contested), "Mine now", at=t + 5000)],
+        medications=[medication(injected, str(contested), "Injected", at=t + 5000)],
+    ))
+    await asyncio.sleep(0.2)
+    await session.commit()
+    out = await asyncio.wait_for(pushing, timeout=10)
+
+    assert {o["entity"]: o["code"] for o in out["rejected"]} == {
+        "profiles": "forbidden_role",
+        "medications": "forbidden_role",
+    }
+    landed = (
+        await session.execute(
+            select(Medication.id).where(Medication.profile_id == contested)
+        )
+    ).scalars().all()
+    assert landed == []
+
+
 async def test_the_database_refuses_every_parent_move_whatever_writes_it(api, session):
     """Not push — the schema. A backfill, a support script or the next endpoint
     someone writes gets the same answer for all five, which is the reason the
@@ -1125,6 +1217,7 @@ async def test_the_database_refuses_every_parent_move_whatever_writes_it(api, se
         (Profile, uuid.UUID(pid), {"owner_account_id": elsewhere}),
         (Medication, uuid.UUID(mid), {"profile_id": uuid.UUID(second)}),
         (DoseEvent, uuid.UUID(did), {"profile_id": uuid.UUID(second)}),
+        (DoseEvent, uuid.UUID(did), {"medication_id": uuid.UUID(other_med)}),
         (Schedule, uuid.UUID(sid), {"medication_id": uuid.UUID(other_med)}),
         (StockEvent, uuid.UUID(eid), {"medication_id": uuid.UUID(other_med)}),
     ]
