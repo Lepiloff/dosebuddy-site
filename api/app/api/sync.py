@@ -33,13 +33,14 @@ from sqlalchemy import tuple_ as sa_tuple
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.api.deps import Caller, get_session, sync_caller
 from app.api.schemas import Changes, Outcome, PullOut, PushIn, PushOut
 from app.db.models import (
+    IMMUTABLE_PARENT_SQLSTATE,
     SERVER_SEQ,
     Device,
     DoseEvent,
@@ -164,6 +165,17 @@ async def _upsert(session: AsyncSession, model, values: dict[str, Any]) -> None:
     await session.execute(stmt)
 
 
+def _sqlstate(exc: DBAPIError) -> str | None:
+    """The five characters Postgres sent, whatever the driver wrapped them in.
+
+    Read from the code and never from the message: the message is written to be
+    read by a person and is free to change, while the code is the part the
+    schema and this file agreed on.
+    """
+    orig = getattr(exc, "orig", None)
+    return getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
+
+
 def _sync_values(row, device_id: uuid.UUID) -> dict[str, Any]:
     return {
         "id": row.id,
@@ -218,8 +230,22 @@ async def push(
         try:
             async with session.begin_nested():
                 await _upsert(session, model, values)
-        except IntegrityError:
-            later(entity, row_id, "missing_parent")
+        except DBAPIError as exc:
+            if _sqlstate(exc) == IMMUTABLE_PARENT_SQLSTATE:
+                # The row asked to change its parent and the database refused
+                # the statement whole (models.py, migration 0014). Nothing of
+                # this record was written, which is the point: the client keeps
+                # one version per row and cannot apply half of one.
+                #
+                # Reached when the row was not on the server at the start of
+                # this batch but is by the time it is written — another device
+                # created it in between, or it arrives twice in this same batch.
+                # The check before the loop catches every other case earlier.
+                refuse(entity, row_id, "immutable_parent")
+            elif isinstance(exc, IntegrityError):
+                later(entity, row_id, "missing_parent")
+            else:
+                later(entity, row_id, "conflict")
         except SQLAlchemyError:
             later(entity, row_id, "conflict")
 
@@ -239,9 +265,23 @@ async def push(
         })
         mine.add(p.id)
 
+    stored_parent = await _stored_medication_parents(session, changes)
+
     for m in changes.medications:
         if m.profile_id not in mine:
             refuse("medications", m.id, "forbidden_role")
+            continue
+        if stored_parent.get(m.id, m.profile_id) != m.profile_id:
+            # A medication does not change profile (contract §4.2). Final: the
+            # row will not be accepted however often it is sent, and the client
+            # quarantines it rather than retrying.
+            #
+            # Refused before the write is even attempted, so the answer does not
+            # depend on how old the row is. The database refuses the move too,
+            # but only when the update actually runs — a write that loses on
+            # last-write-wins never reaches it, and would leave the client
+            # believing a row the server ignored had been applied.
+            refuse("medications", m.id, "immutable_parent")
             continue
         await apply("medications", Medication, m.id, {
             **_sync_values(m, dev),
@@ -315,6 +355,34 @@ async def push(
 
     high = (await session.execute(sql_text("SELECT last_value FROM server_seq"))).scalar_one()
     return PushOut(cursor=encode_cursor(int(high)), rejected=rejected, retry=retry)
+
+
+async def _stored_medication_parents(
+    session: AsyncSession, changes: Changes
+) -> dict[uuid.UUID, uuid.UUID]:
+    """The profile each incoming medication already belongs to, where it exists.
+
+    Read without a lock, deliberately. The stale answers this can give are the
+    two that cost nothing, because the write is guarded as well (models.py): if
+    the row appears after this read, the trigger refuses the move at the moment
+    it is written; if the row is read here and hard-deleted before the write,
+    the insert that follows creates it under the parent this check just
+    approved. There is no reading of this map that lets a move through.
+
+    It exists for the case the trigger cannot see: a write that loses on
+    last-write-wins is never applied, so no update runs and no trigger fires,
+    and a row proposing a new parent would come back neither rejected nor
+    applied. The client reads that silence as success.
+    """
+    ids = [m.id for m in changes.medications]
+    if not ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(Medication.id, Medication.profile_id).where(Medication.id.in_(ids))
+        )
+    ).all()
+    return dict(rows)
 
 
 async def _medication_profiles(session: AsyncSession, changes: Changes) -> dict[uuid.UUID, uuid.UUID]:
