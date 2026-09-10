@@ -7,6 +7,8 @@ a pull that returns rows is the easy half.
 
 import asyncio
 import itertools
+import logging
+import re
 import time
 import uuid
 
@@ -1196,6 +1198,69 @@ async def test_a_child_of_a_refused_profile_is_not_written_under_it(api, session
         )
     ).scalars().all()
     assert landed == []
+
+
+def logged(caplog, event: str) -> list[str]:
+    """The lines this server actually wrote, with the console colours removed.
+
+    Read through `caplog` rather than `structlog.testing.capture_logs`, which
+    cannot see these at all: the logger is configured with
+    `cache_logger_on_first_use`, so whichever test emits first binds the module's
+    logger for the whole run and every later capture watches an empty chair. It
+    passed alone and failed in the suite, which is the worst way to learn it.
+    """
+    plain = [re.sub(r"\x1b\[[0-9;]*m", "", record.getMessage()) for record in caplog.records]
+    return [line for line in plain if event in line]
+
+
+async def test_a_page_that_moved_nothing_is_logged_and_an_ordinary_one_is_not(api, caplog):
+    """The stall has no other way of being noticed.
+
+    A page where every record is held applies nothing and refuses nothing, so
+    the client's journal loses nothing and the next page it sends is the same
+    page. From here each request looks ordinary and answers 200; from the phone
+    the queue never moves, silently, until somebody complains. One of the two
+    known causes was running in production before it was reported by hand.
+
+    The negative half matters as much: a line that also fires on healthy pages
+    is a line nobody reads.
+    """
+    owner, pid, mid, _, _ = await _owner_with_data(api)
+    orphan = str(uuid.uuid4())
+
+    with caplog.at_level(logging.WARNING, logger="app.api.sync"):
+        caplog.clear()
+        out = await push(api, owner, schedules=[schedule(str(uuid.uuid4()), orphan)])
+        stuck = logged(caplog, "sync.push_no_progress")
+
+        assert len(out["retry"]) == 1
+        assert len(stuck) == 1
+        assert "records=1" in stuck[0]
+        assert "held={'schedules:missing_parent': 1}" in stuck[0]
+        # Identifiers, never contents (core/logging.py).
+        assert "Aspirin" not in stuck[0]
+
+        caplog.clear()
+        await push(api, owner, medications=[medication(str(uuid.uuid4()), pid, "Fine")])
+        assert logged(caplog, "sync.push_no_progress") == []
+
+
+async def test_a_page_that_moved_something_is_not_called_stuck(api, caplog):
+    """One row held beside one applied is progress: the applied row leaves the
+    client's journal, so the next page is a different page."""
+    owner, pid, mid, _, _ = await _owner_with_data(api)
+
+    with caplog.at_level(logging.WARNING, logger="app.api.sync"):
+        caplog.clear()
+        out = await push(
+            api,
+            owner,
+            medications=[medication(str(uuid.uuid4()), pid, "Lands")],
+            schedules=[schedule(str(uuid.uuid4()), str(uuid.uuid4()))],
+        )
+
+        assert len(out["retry"]) == 1
+        assert logged(caplog, "sync.push_no_progress") == []
 
 
 async def test_the_database_refuses_every_parent_move_whatever_writes_it(api, session):

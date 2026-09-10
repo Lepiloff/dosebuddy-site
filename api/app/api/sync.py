@@ -20,7 +20,10 @@ from __future__ import annotations
 
 import base64
 import uuid
+from collections import Counter
 from typing import Any
+
+import structlog
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import cast as sa_cast
@@ -51,6 +54,8 @@ from app.db.models import (
     Schedule,
     StockEvent,
 )
+
+log = structlog.get_logger(__name__)
 
 router = APIRouter(tags=["sync"])
 
@@ -438,6 +443,31 @@ async def push(
         })
 
     await session.commit()
+
+    if total and len(retry) == total:
+        # Every record held, none applied and none refused — so the client's
+        # journal loses nothing, and the next page it sends is this page again.
+        # One line is not a stall; the same device repeating it is, and that is
+        # the only way anyone finds out.
+        #
+        # Both known causes are the client sending a child ahead of its parent,
+        # and both were invisible from here until they were reported: a
+        # medication ahead of its profile, and — measured in production on
+        # 2026-09-09 — the doses of a medication ahead of the medication, which
+        # an ordinary edit is enough to arrange. The app track's fix orders the
+        # journal parents-first, so this line should fall silent as that release
+        # lands; if it does not, the assumption to check is that one.
+        #
+        # Identifiers and counts only. Which rows were held says which entities
+        # a device is stuck on; what is in them is article 9 material and has no
+        # business in a log (core/logging.py).
+        log.warning(
+            "sync.push_no_progress",
+            device_id=str(caller.device_id),
+            account_id=str(caller.account.id),
+            records=total,
+            held=dict(Counter(f"{o.entity}:{o.code}" for o in retry)),
+        )
 
     high = (await session.execute(sql_text("SELECT last_value FROM server_seq"))).scalar_one()
     return PushOut(cursor=encode_cursor(int(high)), rejected=rejected, retry=retry)
