@@ -657,7 +657,7 @@ class AlertDelivery(Base):
 # Kept in step with migrations 0014, 0015 and 0016, which carry the same
 # statements — a migration cannot import this module, because it has to keep
 # meaning what it meant on the day it ran.
-_PARENT_IS_IMMUTABLE_FUNCTION = f"""
+PARENT_IS_IMMUTABLE_FUNCTION = f"""
 CREATE OR REPLACE FUNCTION parent_is_immutable() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
@@ -673,8 +673,10 @@ $$
 # the WHEN clause, which is what actually decides, and as the argument, which
 # only makes the message say which column it was.
 #
-# Public, because the deploy reads it: `app.db.schema_check` asserts that every
-# trigger named here is actually on the box after a migration.
+# Public, because the deploy reads both: `app.db.schema_check` asserts that every
+# trigger named here is on the box after a migration, and that the function they
+# all call still has the body written here — a trigger proves only the name it
+# calls, and a name can be pointed at anything.
 #
 # The WHEN clause is not decoration: without it every ordinary edit to any of
 # these tables would enter plpgsql to find nothing to say.
@@ -701,7 +703,7 @@ EXECUTE FUNCTION parent_is_immutable('{column}')
 # before every trigger that calls it. Attached at all so that a database built
 # from the models carries the guard: the test suite builds its schema that way,
 # and a rule only production runs is a rule no test can fail.
-event.listen(Base.metadata, "after_create", DDL(_PARENT_IS_IMMUTABLE_FUNCTION))
+event.listen(Base.metadata, "after_create", DDL(PARENT_IS_IMMUTABLE_FUNCTION))
 for _table, _name, _column in PARENT_IS_IMMUTABLE_TRIGGERS:
     event.listen(
         Base.metadata,
