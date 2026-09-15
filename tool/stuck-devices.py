@@ -11,12 +11,23 @@ Runs where the log is read rather than on the box: nothing is installed there,
 and the log leaves the box already — into a terminal — either way.
 
 **Two counts, not one, and the difference is the whole point.** A device that
-appears for three days and then stops has updated: the fix reached it and the
-queue drained, which is the mechanism working. A device that has been there
-since the first day and has not left is the tail — the population that never
-updates, and the only one for whom this trade is a loss. Reporting them as one
-number would hide the second inside the first, which is how "how big is the
-tail" stayed unanswerable.
+has been there since the first day and has not left is the tail — the
+population that never updates, and the only one for whom this trade is a loss.
+A device that stops appearing is not that. Reporting them as one number would
+hide the second inside the first, which is how "how big is the tail" stayed
+unanswerable.
+
+**What stopping does not prove.** It is tempting to read it as "updated, queue
+drained" — that is what it means when it means anything good — but a phone that
+was uninstalled, switched off, or simply not opened for a week stops appearing
+in exactly the same way, because a phone that pushes nothing cannot push a page
+that goes nowhere. This prints what was seen and names both readings. Telling
+them apart needs something this log does not carry: `devices.last_seen_at` in
+the database, which a live phone keeps fresh and a silent one does not.
+
+Also absent, deliberately, until it can happen: a device that stops and comes
+back is a third thing — updated and stalled again — and that needs 1.4.3 to be
+in people's hands first.
 
 Prints no medication or profile names, and cannot: the log line carries
 identifiers and counts by construction (see `core/logging.py`), and this reads
@@ -33,6 +44,10 @@ EVENT = "sync.push_no_progress"
 
 
 def main() -> int:
+    # Every line's date, ours or not: it is what makes an empty answer readable.
+    # "Nobody is stuck" over a week is a finding; over four hours it is the log
+    # being young, and the two look identical without this.
+    covered: list[str] = []
     seen: dict[str, list[str]] = defaultdict(list)
     pushes: dict[str, int] = defaultdict(int)
     records: dict[str, int] = defaultdict(int)
@@ -41,12 +56,15 @@ def main() -> int:
         # Any line that is not ours, including docker's own noise, is skipped
         # rather than guessed at.
         start = line.find("{")
-        if start < 0 or EVENT not in line:
+        if start < 0:
             continue
         try:
             row = json.loads(line[start:])
         except ValueError:
             continue
+        when = row.get("timestamp", "")
+        if len(when) >= 10:
+            covered.append(when[:10])
         if row.get("event") != EVENT:
             continue
         device = row.get("device_id")
@@ -58,8 +76,13 @@ def main() -> int:
         records[device] = max(records[device], int(row.get("records") or 0))
 
     if not seen:
-        print(f"no {EVENT} lines in this input — nothing is stuck, or the log "
-              "does not go back far enough")
+        if covered:
+            span = sorted(set(covered))
+            print(f"no {EVENT} lines in {len(span)} day(s) of log "
+                  f"({span[0]} … {span[-1]}): nothing was stuck in that window")
+        else:
+            print(f"no {EVENT} lines, and no dated lines at all — this input is "
+                  "not the api log, or the log is empty")
         return 0
 
     days = sorted({day for stamps in seen.values() for day in stamps})
@@ -76,13 +99,16 @@ def main() -> int:
             state = "still stuck"
             still += 1
         else:
-            state = f"stopped after {len(set(stamps))} day(s)"
+            state = f"stopped after {len(set(stamps))} day(s)"  # see below
             healed += 1
         print(f"{device:38} {pushes[device]:>7} {records[device]:>5}  "
               f"{first:10} {last:10}  {state}")
 
-    print(f"\ntail: {still} still stuck on {last_day}; "
-          f"{healed} stopped appearing — those updated and drained")
+    print(f"\ntail: {still} still stuck on {last_day}; {healed} stopped appearing")
+    if healed:
+        print("      stopped = updated and drained, OR not pushing at all "
+              "(uninstalled, off, unused).\n"
+              "      devices.last_seen_at tells them apart; this log cannot.")
     return 0
 
 
