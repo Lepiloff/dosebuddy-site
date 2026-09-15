@@ -13,7 +13,7 @@ import time
 import uuid
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import select, text as sql_text, update
 from sqlalchemy.exc import DBAPIError
 
 from app.api.sync import PAGE_SIZE
@@ -1301,6 +1301,52 @@ async def test_a_page_that_moved_nothing_is_logged_and_an_ordinary_one_is_not(ap
         caplog.clear()
         await push(api, owner, medications=[medication(str(uuid.uuid4()), pid, "Fine")])
         assert logged(caplog, "sync.push_no_progress") == []
+
+
+async def test_the_stall_redaction_19_can_cause_is_visible_and_costs_nothing(api, caplog, session):
+    """The page this change makes possible, and what the server sees of it.
+
+    An unfixed client can send a whole batch of medications ahead of the profile
+    they belong to. Before redaction 19 they were refused finally and the client
+    dropped them; now they are held, which means the client keeps them and sends
+    the same page again — a stall, and one that ends the moment that phone
+    updates.
+
+    Two things have to be true for that to be the better trade, and neither is
+    obvious from the code that makes the trade:
+
+    * the server says so, every time, so a stuck phone is visible instead of
+      silent — `push_no_progress` was written for a different shape of page and
+      has to fire on this one too;
+    * holding costs nothing to hold. Nothing is written, so `server_seq` does
+      not move: a stalled phone cannot push the cursor away from every other
+      device's feed by retrying.
+    """
+    owner, pid, _, _, _ = await _owner_with_data(api)
+    absent = str(uuid.uuid4())
+    before = (
+        await session.execute(sql_text("SELECT last_value FROM server_seq"))
+    ).scalar_one()
+
+    with caplog.at_level(logging.WARNING, logger="app.api.sync"):
+        caplog.clear()
+        out = await push(api, owner, medications=[
+            medication(str(uuid.uuid4()), absent, f"m{i}") for i in range(25)
+        ])
+        stuck = logged(caplog, "sync.push_no_progress")
+
+    assert out["rejected"] == []
+    assert len(out["retry"]) == 25
+    assert {o["code"] for o in out["retry"]} == {"missing_parent"}
+
+    assert len(stuck) == 1
+    assert "records=25" in stuck[0]
+    assert "held={'medications:missing_parent': 25}" in stuck[0]
+
+    after = (
+        await session.execute(sql_text("SELECT last_value FROM server_seq"))
+    ).scalar_one()
+    assert after == before
 
 
 async def test_a_page_that_moved_something_is_not_called_stuck(api, caplog):
