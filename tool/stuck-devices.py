@@ -21,9 +21,21 @@ unanswerable.
 drained" — that is what it means when it means anything good — but a phone that
 was uninstalled, switched off, or simply not opened for a week stops appearing
 in exactly the same way, because a phone that pushes nothing cannot push a page
-that goes nowhere. This prints what was seen and names both readings. Telling
-them apart needs something this log does not carry: `devices.last_seen_at` in
-the database, which a live phone keeps fresh and a silent one does not.
+that goes nowhere. This prints what was seen and names both readings.
+
+**And `devices.last_seen_at` does not tell them apart**, which this file said
+until the app track checked its callers: it is written when the app is *opened*,
+from `main()` and from resume, and never by the background task. So a handset
+that updated, drained its queue in the background and was never opened — an
+elder-mode user confirming doses from the notification is exactly that — shows a
+stale `last_seen_at` and reads as abandoned. That is this trade succeeding,
+counted as a user lost.
+
+What does tell them apart is whether the device still pushes at all: the
+`push_no_progress` lines stop while ordinary requests from the same device
+continue. That needs `device_id` on the request log line, which it does not
+carry yet — see `docs/debts.md`. Until it does, "stopped appearing" is reported
+as the ambiguity it is.
 
 Also absent, deliberately, until it can happen: a device that stops and comes
 back is a third thing — updated and stalled again — and that needs 1.4.3 to be
@@ -108,7 +120,8 @@ def main() -> int:
     if healed:
         print("      stopped = updated and drained, OR not pushing at all "
               "(uninstalled, off, unused).\n"
-              "      devices.last_seen_at tells them apart; this log cannot.")
+              "      telling them apart needs device_id on the request log "
+              "line; it is not there yet.")
     return 0
 
 
