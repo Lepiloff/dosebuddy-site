@@ -13,7 +13,7 @@ import time
 import uuid
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import select, text as sql_text, update
 from sqlalchemy.exc import DBAPIError
 
 from app.api.sync import PAGE_SIZE
@@ -1059,6 +1059,64 @@ async def test_a_dose_event_cannot_point_at_another_accounts_medication(api):
     assert out["rejected"][0]["code"] == "forbidden_role"
 
 
+async def test_a_medication_whose_profile_has_not_arrived_is_retryable(api):
+    """The edge that cost the app track a row, and the reason it is not final.
+
+    Their outbox can put a medication in one batch and the profile it belongs to
+    in the next — a profile edit gives the parent a fresh sequence number, which
+    carries it behind its own children, and the batch boundary falls between
+    them. A final refusal here is quarantined on their side, and a quarantined
+    row keeps its server_seq, so no pull ever brings it back: the medication
+    stays on one phone. A retry waits instead, and the next push lands it.
+
+    Saying so tells the caller whether a profile id exists. That is not a new
+    answer: `_medication_profiles` has told every caller the same about every
+    medication id since the beginning, which is why the other three entities
+    were already retryable.
+    """
+    owner, pid, _, _, _ = await _owner_with_data(api)
+    later_profile, mid = str(uuid.uuid4()), str(uuid.uuid4())
+
+    out = await push(api, owner, medications=[medication(mid, later_profile, "Early")])
+
+    assert out["rejected"] == []
+    assert out["retry"] == [
+        {"id": mid, "entity": "medications", "code": "missing_parent"}
+    ]
+
+    # And the retry lands, which is the whole point of not being final.
+    await push(api, owner, profiles=[profile(later_profile, "Late")])
+    again = await push(api, owner, medications=[medication(mid, later_profile, "Early")])
+    assert again["rejected"] == [] and again["retry"] == []
+    assert mid in {m["id"] for m in (await pull(api, owner))["changes"]["medications"]}
+
+
+async def test_a_dose_event_whose_profile_has_not_arrived_is_retryable(api):
+    """The same edge, and doses cross it for the same reason."""
+    owner, pid, mid, sid, _ = await _owner_with_data(api)
+    later_profile = str(uuid.uuid4())
+
+    out = await push(api, owner, dose_events=[
+        dose(str(uuid.uuid4()), mid, later_profile, sid),
+    ])
+
+    assert out["rejected"] == []
+    assert out["retry"][0]["code"] == "missing_parent"
+
+
+async def test_a_profile_that_exists_and_is_not_yours_is_still_final(api):
+    """The other half. A parent that is somebody's, just not the caller's, will
+    not become theirs by being sent again — and telling them to retry it would
+    be a client looping on something that can never succeed."""
+    owner, pid, _, _, _ = await _owner_with_data(api)
+    stranger = await sign_in(api, f"stranger-{uuid.uuid4()}")
+
+    out = await push(api, stranger, medications=[medication(str(uuid.uuid4()), pid)])
+
+    assert out["retry"] == []
+    assert out["rejected"][0]["code"] == "forbidden_role"
+
+
 async def test_a_dose_event_whose_medication_has_not_arrived_is_retryable(api):
     """The medication check must not turn causal order into a rejection: a
     parent on a later page is the ordinary case, and it will land."""
@@ -1243,6 +1301,52 @@ async def test_a_page_that_moved_nothing_is_logged_and_an_ordinary_one_is_not(ap
         caplog.clear()
         await push(api, owner, medications=[medication(str(uuid.uuid4()), pid, "Fine")])
         assert logged(caplog, "sync.push_no_progress") == []
+
+
+async def test_the_stall_redaction_19_can_cause_is_visible_and_costs_nothing(api, caplog, session):
+    """The page this change makes possible, and what the server sees of it.
+
+    An unfixed client can send a whole batch of medications ahead of the profile
+    they belong to. Before redaction 19 they were refused finally and the client
+    dropped them; now they are held, which means the client keeps them and sends
+    the same page again — a stall, and one that ends the moment that phone
+    updates.
+
+    Two things have to be true for that to be the better trade, and neither is
+    obvious from the code that makes the trade:
+
+    * the server says so, every time, so a stuck phone is visible instead of
+      silent — `push_no_progress` was written for a different shape of page and
+      has to fire on this one too;
+    * holding costs nothing to hold. Nothing is written, so `server_seq` does
+      not move: a stalled phone cannot push the cursor away from every other
+      device's feed by retrying.
+    """
+    owner, pid, _, _, _ = await _owner_with_data(api)
+    absent = str(uuid.uuid4())
+    before = (
+        await session.execute(sql_text("SELECT last_value FROM server_seq"))
+    ).scalar_one()
+
+    with caplog.at_level(logging.WARNING, logger="app.api.sync"):
+        caplog.clear()
+        out = await push(api, owner, medications=[
+            medication(str(uuid.uuid4()), absent, f"m{i}") for i in range(25)
+        ])
+        stuck = logged(caplog, "sync.push_no_progress")
+
+    assert out["rejected"] == []
+    assert len(out["retry"]) == 25
+    assert {o["code"] for o in out["retry"]} == {"missing_parent"}
+
+    assert len(stuck) == 1
+    assert "records=25" in stuck[0]
+    assert "held={'medications:missing_parent': 25}" in stuck[0]
+
+    after = (
+        await session.execute(sql_text("SELECT last_value FROM server_seq"))
+    ).scalar_one()
+    assert after == before
 
 
 async def test_a_page_that_moved_something_is_not_called_stuck(api, caplog):
