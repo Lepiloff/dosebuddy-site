@@ -20,10 +20,36 @@ volumes:
   postgres_data:
   redis_data:
 
+# Docker's default json-file driver keeps everything, for ever, unless the
+# daemon says otherwise — and what the daemon says is not in this repository, so
+# from here it reads as "unbounded". On a t4g.small that is a disk that fills
+# quietly while nothing appears to be wrong.
+#
+# It stopped being theoretical with `sync.push_no_progress`: a phone whose queue
+# has stalled writes one line per push, which is roughly a hundred a day, for as
+# long as it stays stalled. That is the signal working as intended — and a
+# thousand such phones is tens of megabytes a day of it.
+#
+# Two ceilings rather than one. The api and the worker are what anybody reads
+# when answering "which devices are stuck and since when", so they get a week or
+# so of history; the rest get enough to explain a restart and no more.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-logging-app: &logging-app
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
 services:
   nginx:
     image: nginx:1.27-alpine
     container_name: dosebuddy-nginx
+    logging: *logging
     restart: unless-stopped
     ports:
       - "80:80"
@@ -54,6 +80,7 @@ services:
   certbot:
     image: certbot/certbot
     container_name: dosebuddy-certbot
+    logging: *logging
     restart: unless-stopped
     volumes:
       - ./data/certbot/conf:/etc/letsencrypt
@@ -74,6 +101,7 @@ services:
       context: ../api
     image: dosebuddy-api:local
     container_name: dosebuddy-worker
+    logging: *logging-app
     restart: unless-stopped
     command: ["python", "-m", "app.worker"]
     environment:
@@ -99,6 +127,7 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: dosebuddy-postgres
+    logging: *logging
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
@@ -118,6 +147,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: dosebuddy-redis
+    logging: *logging
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
@@ -135,6 +165,7 @@ services:
       context: ../api
     image: dosebuddy-api:local
     container_name: dosebuddy-api
+    logging: *logging-app
     restart: unless-stopped
     environment:
       ENVIRONMENT: production
