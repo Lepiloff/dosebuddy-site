@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import select
 
-from app.api.sync import encode_cursor
+from app.api.sync import decode_cursor, encode_cursor
 from app.core.security import mint_access_token
 from app.db.models import (
     AlertDelivery,
@@ -26,7 +26,15 @@ from app.services import alerts
 from app.services.push import Delivery
 from app.worker import scan_once
 from tests.conftest import auth_header, sign_in
-from tests.test_sync import _owner_with_data, _pair, dose, ms, preview, push
+from tests.test_sync import (
+    _owner_with_data,
+    _pair,
+    dose,
+    medication,
+    ms,
+    preview,
+    push,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -827,6 +835,67 @@ async def test_a_reporting_device_is_not_released_by_the_cursor_alone(
     await session.commit()
     await scan_once(async_sessionmaker(db_engine, expire_on_commit=False), pusher)
     assert pusher.sent, "once the phone says it can ring, the other one stops"
+
+
+async def test_a_late_child_row_holds_the_revocation_until_the_winner_has_it(
+    api, session, db_engine
+):
+    """The chain the app track asked for, in the order they asked for it.
+
+    A dose or a schedule takes its own number from the shared sequence and does
+    not touch `profile.server_seq`. So a readiness report made at the handover
+    stayed satisfied for ever, and the gate would have silenced the previous
+    phone while a dose written a second later sat on neither handset.
+
+    ready → late child row → revocation held → fresh pull and report → sent.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.db.models import Device as DeviceModel
+
+    owner, pid, losing, winning = await _handover(api, session, db_engine)
+    profile = await session.get(Profile, uuid.UUID(pid))
+    device = await session.get(DeviceModel, winning.id)
+    device.ready_protocol_at = utcnow()
+    await session.commit()
+
+    # Ready as of the handover: with only the profile's own revision to compare
+    # against, this would open the gate and keep it open.
+    assert (
+        await _ready(api, winning, pid, profile.server_seq, profile.server_seq)
+    ).status_code == 204
+
+    # A medication and a dose arrive afterwards. Neither touches the profile row.
+    mid = str(uuid.uuid4())
+    await push(api, owner, medications=[medication(mid, pid, "Later")])
+    await push(api, owner, dose_events=[dose(str(uuid.uuid4()), mid, pid)])
+    await session.refresh(profile)
+
+    pusher = RecordingPush()
+    await scan_once(async_sessionmaker(db_engine, expire_on_commit=False), pusher)
+    assert pusher.sent == [], "the winner has not been handed the dose it must ring"
+
+    # The winner pulls, so it now holds them, and says so.
+    access, _ttl = mint_access_token(
+        api.app.state.settings.jwt_secret, winning.account_id, winning.id
+    )
+    page = await api.get(
+        "/v1/sync/pull?ready=1", headers={"Authorization": f"Bearer {access}"}
+    )
+    assert page.status_code == 200
+    reached = decode_cursor(page.json()["cursor"])
+    assert (
+        await _ready(api, winning, pid, profile.server_seq, reached)
+    ).status_code == 204
+
+    row = (await session.execute(
+        select(AlertDelivery).where(AlertDelivery.kind == AlertKind.reminder_authority_lost)
+    )).scalars().one()
+    row.next_attempt_at = utcnow() - timedelta(seconds=1)
+    await session.commit()
+    await scan_once(async_sessionmaker(db_engine, expire_on_commit=False), pusher)
+
+    assert pusher.sent, "and now silencing the other phone loses nothing"
 
 
 async def test_an_old_build_is_still_released_by_the_cursor(api, session, db_engine):

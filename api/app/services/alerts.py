@@ -19,7 +19,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select, union_all
 from sqlalchemy import update as sa_update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,9 +33,12 @@ from app.db.models import (
     Device,
     DeviceReadiness,
     DoseEvent,
+    Medication,
     Profile,
     ProfileMembership,
     Role,
+    Schedule,
+    StockEvent,
 )
 
 MISSED = "missed"
@@ -412,6 +415,41 @@ class Nudge:
     ttl_seconds: int
 
 
+async def _profile_high_water(session: AsyncSession, profile: Profile) -> int:
+    """The newest thing that exists for this profile, anywhere in its data.
+
+    Comparing readiness against `profile.server_seq` alone was not enough, and
+    the app track found why: a child row — a dose, a schedule — takes its own
+    number from the shared sequence and does not touch the profile's. So a
+    report made at the handover stays satisfied for ever, and the gate would
+    silence the previous phone while a dose written a second later had reached
+    neither handset.
+
+    Against the profile as it stands now, then, which also gives the gate a
+    useful shape rather than only a safer one. While the losing phone is awake
+    it keeps writing, the mark keeps moving, and the nudge waits — which costs
+    nothing, because a phone that is awake and syncing learns from `pull` that
+    it is no longer the owner. When the loser is quiet — the case the nudge
+    exists for, and the case where silence would go unnoticed — the mark stands
+    still and the gate opens as soon as the winner catches up.
+    """
+    medications = select(Medication.id).where(Medication.profile_id == profile.id)
+    marks = union_all(
+        select(func.max(Profile.server_seq).label("seq")).where(Profile.id == profile.id),
+        select(func.max(Medication.server_seq)).where(Medication.profile_id == profile.id),
+        select(func.max(DoseEvent.server_seq)).where(DoseEvent.profile_id == profile.id),
+        select(func.max(Schedule.server_seq)).where(Schedule.medication_id.in_(medications)),
+        select(func.max(StockEvent.server_seq)).where(
+            StockEvent.medication_id.in_(medications)
+        ),
+    ).subquery()
+
+    highest = (await session.execute(select(func.max(marks.c.seq)))).scalar_one()
+    # The profile row itself always exists, so the coalesce is for a profile
+    # with no data at all rather than for an impossible case.
+    return max(int(highest or 0), profile.server_seq)
+
+
 async def resolve_nudge(
     session: AsyncSession, delivery: AlertDelivery, now: datetime
 ) -> Nudge | NoNudge:
@@ -482,7 +520,7 @@ async def resolve_nudge(
         if (
             ready is None
             or ready.revision < profile.server_seq
-            or ready.applied_cursor < profile.server_seq
+            or ready.applied_cursor < await _profile_high_water(session, profile)
         ):
             return NoNudge.awaiting_winner
     elif owner_device.cursor_seq is None or owner_device.cursor_seq < profile.server_seq:
