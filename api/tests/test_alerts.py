@@ -117,6 +117,31 @@ async def test_a_reported_miss_alerts_the_watcher(api, session, db_engine):
     assert payload["profile_id"] == pid
 
 
+async def test_the_payload_says_which_account_it_was_raised_for(api, session, db_engine):
+    """So a phone can refuse an alert that outlived the session it belongs to.
+
+    Delivery is at-least-once with a TTL in hours, so a push can arrive after
+    the person signed out of that account and into another. With only type,
+    profile and subject there was nothing to tell that apart from an alert about
+    the phone's own data, and a caregiver was shown a signal about a profile
+    their current session has no relation to. Agreed with the app track on
+    2026-09-17: the field ships before the guard that reads it.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    owner, caregiver, pid, mid, sid, did = await _with_watcher(api, session)
+    await push(api, owner, dose_events=[
+        dose(did, mid, pid, sid, "missed", at=ms() + 1000, planned=ms() - 3600_000)
+    ])
+
+    pusher = RecordingPush()
+    assert await scan_once(async_sessionmaker(db_engine, expire_on_commit=False), pusher) == 1
+
+    _token, payload = pusher.sent[0]
+    assert payload["account_id"] == caregiver["account_id"], "the recipient, not the subject"
+    assert all(isinstance(v, str) for v in payload.values()), "FCM data is map<string,string>"
+
+
 async def test_the_payload_carries_no_medication_name(api, session, db_engine):
     """FCM is Google. A notification body naming the drug would hand a third
     party exactly what the rest of the design keeps from them; the app already
@@ -764,6 +789,9 @@ async def test_the_worker_sends_the_queued_authority_nudge(api, session, db_engi
 
     profile = await session.get(Profile, uuid.UUID(pid))
     assert payload["revision"] == str(profile.server_seq)
+    # The nudge tells a phone to stop ringing, so it carries the account too:
+    # one that outlived a sign-out has to be refusable at the door.
+    assert payload["account_id"] == str(profile.owner_account_id)
     assert payload["expires_at"].endswith("Z")
 
     # FCM's data is map<string,string>; saying so here keeps the sending side

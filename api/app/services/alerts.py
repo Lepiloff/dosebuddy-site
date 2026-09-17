@@ -483,6 +483,10 @@ async def resolve_nudge(
         token=device.push_token,
         payload={
             "type": delivery.kind.value,
+            # Same reason as in `payload_for`, and it matters more here: this
+            # message tells a phone to stop ringing. A nudge that outlived a
+            # sign-out must be refusable at the door rather than reasoned about.
+            "account_id": str(delivery.account_id),
             "profile_id": str(delivery.profile_id),
             "owner_device_id": str(profile.owner_device_id),
             # The profile's position in the change feed, which is also what the
@@ -527,14 +531,28 @@ def collapse_key(delivery: AlertDelivery) -> str:
 
 
 def payload_for(delivery: AlertDelivery) -> dict[str, str]:
-    """The same three fields Alert carries, rebuilt from the stored row.
+    """What the row says, rebuilt from the row.
 
     Built here rather than kept on the Alert, because by the time an alert is
     delivered the object that detected it is long gone — and it must still carry
     no medication name.
+
+    **`account_id` is the account this was raised for, and it is here so a phone
+    can refuse it.** Delivery is at-least-once with a TTL measured in hours, so a
+    push can arrive after the person has signed out of that account and into
+    another one — and with only `{type, profile_id, subject_id}` the phone had
+    nothing to tell that apart from an alert about its own data. It showed a
+    caregiver a signal about a profile their current session has no relation to.
+    The client compares this with the account it is signed into and drops what
+    does not match. Agreed with the app track 2026-09-17; the field ships first
+    so the guard has something to check when it arrives.
+
+    Values are strings because FCM `data` is map<string,string> — a type, not a
+    choice.
     """
     return {
         "type": delivery.kind.value,
+        "account_id": str(delivery.account_id),
         "profile_id": str(delivery.profile_id),
         "subject_id": delivery.subject_id,
     }
