@@ -20,6 +20,7 @@ from app.api.sync import PAGE_SIZE
 from app.db.models import (
     IMMUTABLE_PARENT_SQLSTATE,
     Account,
+    Device,
     DoseEvent,
     Medication,
     Profile,
@@ -1365,6 +1366,68 @@ async def test_a_page_that_moved_something_is_not_called_stuck(api, caplog):
 
         assert len(out["retry"]) == 1
         assert logged(caplog, "sync.push_no_progress") == []
+
+
+# ---------------------------------------------------------------------------
+# Reading the feed without admitting to having read it
+# ---------------------------------------------------------------------------
+
+
+async def preview(api, tokens, cursor=None):
+    url = "/v1/sync/preview" + (f"?cursor={cursor}" if cursor else "")
+    r = await api.get(url, headers=auth_header(tokens))
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+async def test_preview_returns_what_pull_returns(api):
+    """Same authorisation, visibility, projection, paging and body. If the two
+    ever disagree, the client is previewing a different server than the one it
+    will sync against."""
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+
+    assert await preview(api, owner) == await pull(api, owner)
+
+
+async def test_preview_projects_by_role_exactly_as_pull_does(api):
+    """The watcher's cut belongs to the feed, not to `pull` — and a preview that
+    forgot it would hand a caregiver the schedules that the whole
+    one-reminder-owner design keeps from them."""
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+    caregiver = await _pair(api, owner, pid)
+
+    seen = await preview(api, caregiver)
+
+    assert "schedules" not in seen["changes"]
+    assert "stock_events" not in seen["changes"]
+    assert "notes" not in seen["changes"]["medications"][0]
+
+
+async def test_preview_does_not_move_the_cursor_and_pull_still_does(api, session):
+    """The whole endpoint, in one assertion and then its opposite.
+
+    `cursor_seq` is not bookkeeping: it is the evidence the authority gate waits
+    for before telling the previous phone to stop ringing. A client reading
+    ahead to show somebody a choice must not spend that evidence on a page it
+    has not applied and may never apply.
+    """
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+    device = (
+        await session.execute(
+            select(Device).where(Device.account_id == uuid.UUID(owner["account_id"]))
+        )
+    ).scalars().one()
+
+    first = await preview(api, owner)
+    await preview(api, owner, first["cursor"])
+    await preview(api, owner, first["cursor"])
+
+    await session.refresh(device)
+    assert device.cursor_seq is None, "previewing is not being handed anything"
+
+    await pull(api, owner)
+    await session.refresh(device)
+    assert device.cursor_seq is not None, "pull still records what it hands out"
 
 
 async def test_the_database_refuses_every_parent_move_whatever_writes_it(api, session):

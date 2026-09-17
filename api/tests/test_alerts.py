@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import select
 
+from app.core.security import mint_access_token
 from app.db.models import (
     AlertDelivery,
     AlertKind,
@@ -24,7 +25,7 @@ from app.services import alerts
 from app.services.push import Delivery
 from app.worker import scan_once
 from tests.conftest import auth_header, sign_in
-from tests.test_sync import _owner_with_data, _pair, dose, ms, push
+from tests.test_sync import _owner_with_data, _pair, dose, ms, preview, push
 
 pytestmark = pytest.mark.asyncio
 
@@ -650,6 +651,98 @@ async def _winner_has_pulled(session, winning, pid) -> None:
     device = await session.get(DeviceModel, winning.id)
     device.cursor_seq = profile.server_seq
     await session.commit()
+
+
+async def test_previewing_does_not_release_the_nudge(api, session, db_engine):
+    """The composition the two halves were separated for.
+
+    `GET /sync/preview` exists so a phone can read the feed before deciding
+    whether to adopt it. The gate here exists so the previous phone is not
+    silenced until the new one has actually been handed the handover. If preview
+    moved `cursor_seq`, looking would count as being handed — and a person still
+    deciding which profile to keep would silence a phone by reading a screen.
+
+    So: the winner previews the whole feed, twice, and the losing phone must go
+    on ringing. Then it pulls, and the nudge goes.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.db.models import Device as DeviceModel
+
+    owner, pid, losing, winning = await _handover(api, session, db_engine)
+    device = await session.get(DeviceModel, winning.id)
+    device.cursor_seq = None
+    await session.commit()
+
+    # The winning device reads everything there is to read, on a token of its
+    # own: the point is that *this* device previewed, and a token minted for
+    # another one would prove nothing about which cursor moves.
+    access, _ttl = mint_access_token(
+        api.app.state.settings.jwt_secret, winning.account_id, winning.id
+    )
+    winner_tokens = {"access_token": access}
+    page = await preview(api, winner_tokens)
+    await preview(api, winner_tokens, page["cursor"])
+
+    await session.refresh(device)
+    assert device.cursor_seq is None
+
+    pusher = RecordingPush()
+    await scan_once(async_sessionmaker(db_engine, expire_on_commit=False), pusher)
+    assert pusher.sent == [], "reading is not receiving, and the phone keeps ringing"
+
+    # And the ordinary pull, which is receiving, lets it through.
+    await _winner_has_pulled(session, winning, pid)
+    row = (await session.execute(
+        select(AlertDelivery).where(AlertDelivery.kind == AlertKind.reminder_authority_lost)
+    )).scalars().one()
+    row.next_attempt_at = utcnow() - timedelta(seconds=1)
+    await session.commit()
+    await scan_once(async_sessionmaker(db_engine, expire_on_commit=False), pusher)
+    assert pusher.sent, "once it has actually been handed the page, the nudge goes"
+
+
+async def test_the_gate_opens_on_a_page_that_was_only_handed_out(api, session, db_engine):
+    """What `cursor_seq` actually proves today, pinned deliberately.
+
+    The gate reads it as "the winner is ready". The column says something
+    weaker: the server *produced* a page for that device. Nothing here knows
+    whether the response arrived, whether the transaction that applies it
+    committed, or whether a single alarm was materialised — the write happens
+    while the bytes are still on their way.
+
+    So this test asserts the exposure rather than a guarantee: one pull, no
+    application of any kind, and the previous phone is told to stop. If the
+    response had been lost in flight, that is silence — which invariant 1 ranks
+    below a duplicate, and which the gate exists to prevent.
+
+    The stricter form is to advance `cursor_seq` from the cursor the client
+    *sends back*, since a client that asks for rows after N has applied N. It
+    costs one pull cycle of extra duplicate and is assessed in contract §4.3;
+    when it lands, this test is the one that has to change, which is the point
+    of writing it down as a test and not as a note.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.db.models import Device as DeviceModel
+
+    owner, pid, losing, winning = await _handover(api, session, db_engine)
+    device = await session.get(DeviceModel, winning.id)
+    device.cursor_seq = None
+    await session.commit()
+
+    access, _ttl = mint_access_token(
+        api.app.state.settings.jwt_secret, winning.account_id, winning.id
+    )
+    r = await api.get("/v1/sync/pull", headers={"Authorization": f"Bearer {access}"})
+    assert r.status_code == 200
+
+    await session.refresh(device)
+    assert device.cursor_seq is not None, "recorded from producing the page, not from applying it"
+
+    pusher = RecordingPush()
+    await scan_once(async_sessionmaker(db_engine, expire_on_commit=False), pusher)
+    assert pusher.sent, "the losing phone is silenced on the strength of bytes in flight"
 
 
 async def test_the_worker_sends_the_queued_authority_nudge(api, session, db_engine):

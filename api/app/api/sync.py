@@ -752,12 +752,16 @@ def feed_query(plan, since: int):
     )
 
 
-@router.get("/sync/pull", response_model=PullOut)
-async def pull(
-    cursor: str | None = Query(default=None),
-    caller: Caller = Depends(sync_caller),
-    session: AsyncSession = Depends(get_session),
-) -> PullOut:
+async def _page(
+    session: AsyncSession, caller: Caller, cursor: str | None
+) -> tuple[PullOut, int]:
+    """One page of the feed, and where it ends.
+
+    The body of both `/sync/pull` and `/sync/preview`, which differ by exactly
+    one thing: whether the device is recorded as having been handed the page.
+    Kept as one function so the difference stays one line rather than two
+    implementations that agree today.
+    """
     since = decode_cursor(cursor)
     profiles = await visible_profiles(session, caller)
     # Sent on every response, including this one. A caller who can see nothing
@@ -765,7 +769,10 @@ async def pull(
     roles = {str(pid): role.value for pid, role in profiles.items()}
 
     if not profiles:
-        return PullOut(cursor=encode_cursor(since), has_more=False, changes={}, roles=roles)
+        return (
+            PullOut(cursor=encode_cursor(since), has_more=False, changes={}, roles=roles),
+            since,
+        )
 
     mine = owned_ids(profiles)
     all_ids = set(profiles)
@@ -842,6 +849,22 @@ async def pull(
 
     new_cursor = page[-1][0] if page else since
 
+    return (
+        PullOut(
+            cursor=encode_cursor(new_cursor), has_more=has_more, changes=changes, roles=roles
+        ),
+        new_cursor,
+    )
+
+
+@router.get("/sync/pull", response_model=PullOut)
+async def pull(
+    cursor: str | None = Query(default=None),
+    caller: Caller = Depends(sync_caller),
+    session: AsyncSession = Depends(get_session),
+) -> PullOut:
+    page, reached = await _page(session, caller, cursor)
+
     # Remember how far this device has been handed. The cursor is still the
     # client's — this is a copy of the last value it was given, kept for one
     # decision: whether the device taking over a profile has seen that it did.
@@ -853,16 +876,46 @@ async def pull(
     # not walk this backwards and shut a gate on a device that has since caught
     # up, so the guard sits in the WHERE rather than in the value: the statement
     # matches no row instead of writing a smaller number.
+    #
+    # What it records is "handed out", not "applied" — see `/sync/preview` and
+    # contract §4.3 for why that distinction has an endpoint of its own.
     await session.execute(
         sa_update(Device)
         .where(
             Device.id == caller.device_id,
-            func.coalesce(Device.cursor_seq, -1) < new_cursor,
+            func.coalesce(Device.cursor_seq, -1) < reached,
         )
-        .values(cursor_seq=new_cursor)
+        .values(cursor_seq=reached)
     )
     await session.commit()
+    return page
 
-    return PullOut(
-        cursor=encode_cursor(new_cursor), has_more=has_more, changes=changes, roles=roles
-    )
+
+@router.get("/sync/preview", response_model=PullOut)
+async def preview(
+    cursor: str | None = Query(default=None),
+    caller: Caller = Depends(sync_caller),
+    session: AsyncSession = Depends(get_session),
+) -> PullOut:
+    """The same feed, read without admitting to having read it.
+
+    Same authorisation, same visibility, same projection by role, same paging,
+    same body. The single difference is that `Device.cursor_seq` does not move,
+    and the difference is the whole endpoint.
+
+    The client needs to show a person what is on the server before deciding
+    whether to adopt it — which profile is theirs, how many medications it
+    holds — and doing that with `/sync/pull` made the server believe the device
+    had been handed rows it has not applied and may never apply. `cursor_seq` is
+    not bookkeeping: it is the evidence the authority gate waits for before
+    telling the previous phone to stop ringing. Reading ahead with `pull` could
+    therefore silence a phone on the strength of a page that was only ever
+    looked at.
+
+    So a read that does not commit the reader to anything gets its own route
+    rather than a flag on the old one: a caller that does not know about this
+    endpoint cannot accidentally get its semantics, and an old client keeps the
+    behaviour it was written against.
+    """
+    page, _reached = await _page(session, caller, cursor)
+    return page

@@ -474,3 +474,110 @@ async def test_signing_back_in_restores_the_device(api, session):
     })
     assert r.status_code == 200, r.text
     assert (await api.get("/v1/sync/pull", headers=auth_header(r.json()))).status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Finishing a deletion whose answer was lost
+# ---------------------------------------------------------------------------
+
+
+async def retry_delete(api, account_id, token):
+    return await api.post(
+        "/v1/account/delete-retry", json={"account_id": str(account_id), "id_token": token}
+    )
+
+
+async def test_the_retry_deletes_the_account_it_was_aimed_at(api, session):
+    """The case the endpoint exists for, played out in order.
+
+    The DELETE succeeds and its answer is lost. The phone, holding credentials
+    for an account that no longer exists, signs in again — and `/auth/google`
+    does what it is supposed to: it creates a new one. The old retry then had a
+    session for the *new* account and deleted that. Here the retry names the id
+    instead, so the new account is untouched and the caller learns the original
+    is gone.
+    """
+    first = await sign_in(api, "sub-lost-answer")
+    original = uuid.UUID(first["account_id"])
+    await api.delete("/v1/account", headers=auth_header(first))   # answer lost
+
+    second = await sign_in(api, "sub-lost-answer")
+    replacement = uuid.UUID(second["account_id"])
+    assert replacement != original, "signing in again makes a new account, as designed"
+
+    r = await retry_delete(api, original, "google-token-sub-lost-answer")
+
+    assert r.status_code == 204
+    assert await session.get(Account, replacement) is not None, "the new one is not touched"
+
+
+async def test_the_retry_erases_an_account_that_is_still_there(api, session):
+    """The other half: the DELETE never landed at all."""
+    pair = await sign_in(api, "sub-never-landed")
+    account_id = uuid.UUID(pair["account_id"])
+
+    r = await retry_delete(api, account_id, "google-token-sub-never-landed")
+
+    assert r.status_code == 204
+    assert await session.get(Account, account_id) is None
+
+
+async def test_the_retry_will_not_delete_somebody_elses_account(api, session):
+    """403, and the row stays. A 204 here would end the client's retry loop with
+    'deleted' while the account stood — the one answer that could be acted on
+    wrongly."""
+    theirs = await sign_in(api, "sub-owner-of-it")
+    mine = await sign_in(api, "sub-asking-about-it")
+    del mine
+
+    r = await retry_delete(api, uuid.UUID(theirs["account_id"]), "google-token-sub-asking-about-it")
+
+    assert r.status_code == 403
+    assert await session.get(Account, uuid.UUID(theirs["account_id"])) is not None
+
+
+async def test_the_retry_answers_an_unknown_id_as_done(api):
+    """Nothing to delete is the outcome the caller was retrying for. Whether it
+    was ever an account here is not something they need told."""
+    await sign_in(api, "sub-asking")
+
+    r = await retry_delete(api, uuid.uuid4(), "google-token-sub-asking")
+
+    assert r.status_code == 204
+
+
+async def test_the_retry_refuses_a_token_it_cannot_verify(api, session):
+    """And leaves the account alone, which is the part worth asserting."""
+    pair = await sign_in(api, "sub-bad-token")
+    account_id = uuid.UUID(pair["account_id"])
+
+    r = await retry_delete(api, account_id, "not-a-token-google-ever-issued")
+
+    assert r.status_code == 401
+    assert await session.get(Account, account_id) is not None
+
+
+async def test_the_retry_creates_no_account_of_its_own(api, session):
+    """It must never reach for `/auth/google`: creating an account here would
+    put back the very row whose existence caused the confusion."""
+    await sign_in(api, "sub-counting")
+    before = len((await session.execute(select(Account))).scalars().all())
+
+    await retry_delete(api, uuid.uuid4(), "google-token-sub-counting")
+
+    after = len((await session.execute(select(Account))).scalars().all())
+    assert after == before
+
+
+async def test_the_retry_is_rate_limited(api):
+    """A rate that only matters under a leak still matters: the answer for a
+    stranger's id differs from the answer for an absent one."""
+    await sign_in(api, "sub-hammering")
+
+    codes = [
+        (await retry_delete(api, uuid.uuid4(), "google-token-sub-hammering")).status_code
+        for _ in range(12)
+    ]
+
+    assert codes[:10] == [204] * 10
+    assert codes[10:] == [429, 429]

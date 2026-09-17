@@ -37,6 +37,18 @@ class GoogleSignIn(BaseModel):
     device: DeviceIn
 
 
+class DeleteRetry(BaseModel):
+    """What a client has left when the answer to `DELETE /account` was lost.
+
+    Not a session: the device may hold nothing usable by then — that is the
+    situation this exists for — so the Google token is the credential and the
+    account id says which row the caller means.
+    """
+
+    account_id: uuid.UUID
+    id_token: str
+
+
 class TokenPair(BaseModel):
     access_token: str
     expires_in: int
@@ -233,6 +245,20 @@ async def logout(
     # window for the credentials that outlive it.
 
 
+MAX_DELETE_RETRIES_PER_HOUR = 10
+
+
+async def _erase_account(session: AsyncSession, account_id: uuid.UUID) -> None:
+    """The erasure itself, in one place so the two doors cannot drift apart.
+
+    Profiles it owns go with it, and their memberships cascade — anyone
+    watching loses access because the data no longer exists.
+    """
+    await session.execute(delete(Profile).where(Profile.owner_account_id == account_id))
+    await session.execute(delete(Account).where(Account.id == account_id))
+    await session.commit()
+
+
 @router.delete("/account", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_account(
     caller: Caller = Depends(current_caller), session: AsyncSession = Depends(get_session)
@@ -252,10 +278,83 @@ async def delete_account(
     anyway — what went is what should have gone, and only the account-deletion
     half of the rule in ProfileMembership was wrong.
     """
-    account_id = caller.account.id
+    await _erase_account(session, caller.account.id)
 
-    # Profiles it owns go with it, and their memberships cascade — anyone
-    # watching loses access because the data no longer exists.
-    await session.execute(delete(Profile).where(Profile.owner_account_id == account_id))
-    await session.execute(delete(Account).where(Account.id == account_id))
-    await session.commit()
+
+@router.post("/account/delete-retry", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_account_retry(
+    body: DeleteRetry,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    """Finish a deletion whose answer was lost, on the account that was meant.
+
+    `DELETE /account` is idempotent in the only sense that mattered when it was
+    written: send it twice and the row is gone once. It is not idempotent in the
+    sense the client needs, because the second attempt has to be made by a
+    *session*, and by then there may not be one — the account is gone, so the
+    refresh fails, so the phone signs in again, and `/auth/google` creates a new
+    account. The retry then deleted a row that had existed for ten seconds while
+    the row it was aimed at stayed. The client now compares ids before every
+    DELETE and stops when they differ, which is correct and leaves it stuck:
+    correct about not deleting the wrong thing, stuck because nothing can
+    delete the right one.
+
+    So this takes the id explicitly and proves the caller by the Google token
+    rather than by a session. It never calls `/auth/google` and never creates an
+    account — creating one here would reintroduce exactly the row that caused
+    the confusion.
+
+    **Three answers, and each says only what the caller is entitled to know.**
+    Gone already is 204: the operation the caller is retrying has succeeded,
+    whoever completed it. Theirs is deleted and 204. Somebody else's is 403 and
+    untouched.
+
+    That third answer does tell a caller holding a live Google identity that
+    some uuid is an account and is not theirs, which is more than
+    `/pairing/redeem` will say about a code. The difference is that a pairing
+    code is six characters and this is a v4 uuid: there is no enumeration to
+    protect against, only a question about an id the caller already has. The
+    alternative — 204 for a stranger's account — would end the client's retry
+    loop with "deleted" while the account stood, which is the one answer here
+    that could be acted on wrongly. Attempts are counted per Google subject all
+    the same, because a rate that only matters under a leak still matters.
+    """
+    verifier = request.app.state.google_verifier
+    if verifier is None:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "google_sign_in_not_configured"
+        )
+
+    try:
+        identity: GoogleIdentity = verifier.verify(body.id_token)
+    except InvalidGoogleToken as exc:
+        log.warning("account.delete_retry_rejected", reason=redact(str(exc)))
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid_google_token") from None
+
+    # Counted after the token is proven and keyed by the subject it proves:
+    # before that there is no caller to attribute attempts to, and an unproven
+    # one could spend somebody else's budget by naming their id.
+    attempts_key = f"account:delete_retry:{identity.subject}"
+    redis = request.app.state.redis
+    attempts = await redis.incr(attempts_key)
+    if attempts == 1:
+        await redis.expire(attempts_key, 3600)
+    if attempts > MAX_DELETE_RETRIES_PER_HOUR:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "too_many_attempts")
+
+    account = await session.get(Account, body.account_id)
+    if account is None:
+        # Already gone, by this path or the other. The caller asked for an
+        # outcome, not for an action.
+        log.info("account.delete_retry", account_id=str(body.account_id), outcome="absent")
+        return
+
+    if account.google_sub != identity.subject:
+        log.warning(
+            "account.delete_retry", account_id=str(body.account_id), outcome="not_yours"
+        )
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "not_your_account")
+
+    await _erase_account(session, account.id)
+    log.info("account.delete_retry", account_id=str(body.account_id), outcome="erased")
