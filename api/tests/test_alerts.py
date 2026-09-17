@@ -890,6 +890,48 @@ async def test_readiness_is_refused_when_it_cannot_be_true(api, session, db_engi
     assert r.json()["error"]["code"] == "cursor_behind_revision"
 
 
+async def test_readiness_can_be_reported_by_the_background_worker(api, session, db_engine):
+    """The credential the background half actually holds.
+
+    A sync token is what the worker has, and the worker is the half that pulls
+    while nobody is looking. With this endpoint on an access token, a background
+    pull could switch the strict gate on with `?ready=1` and then be unable to
+    report readiness at all — the previous phone ringing until somebody opened
+    the app. Found by the app track before a phone found it.
+
+    The token is obtained the way the app obtains it, from the foreground, so
+    the test exercises the same pair of credentials the device ends up holding.
+    """
+    from app.db.models import DeviceReadiness
+
+    owner, pid, losing, winning = await _handover(api, session, db_engine)
+    profile = await session.get(Profile, uuid.UUID(pid))
+
+    access, _ttl = mint_access_token(
+        api.app.state.settings.jwt_secret, winning.account_id, winning.id
+    )
+    issued = await api.post(
+        f"/v1/devices/{winning.id}/sync-token",
+        headers={"Authorization": f"Bearer {access}"},
+    )
+    assert issued.status_code == 200, issued.text
+    sync_token = issued.json()["sync_token"]
+
+    r = await api.post(
+        f"/v1/devices/{winning.id}/ready",
+        headers={"Authorization": f"Bearer {sync_token}"},
+        json={
+            "profile_id": pid,
+            "revision": str(profile.server_seq),
+            "applied_cursor": encode_cursor(profile.server_seq),
+        },
+    )
+
+    assert r.status_code == 204, r.text
+    stored = (await session.execute(select(DeviceReadiness))).scalars().one()
+    assert stored.device_id == winning.id
+
+
 async def test_readiness_said_twice_is_stored_once(api, session, db_engine):
     """A device repeating itself after a restart is doing the right thing."""
     from app.db.models import DeviceReadiness

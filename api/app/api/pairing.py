@@ -22,7 +22,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import Caller, current_caller, get_session
+from app.api.deps import Caller, current_caller, get_session, sync_caller
 from app.api.sync import decode_cursor, encode_cursor
 from app.services import alerts
 from app.core.security import (
@@ -510,7 +510,7 @@ class ReadyIn(BaseModel):
 async def report_ready(
     device_id: uuid.UUID,
     body: ReadyIn,
-    caller: Caller = Depends(current_caller),
+    caller: Caller = Depends(sync_caller),
     session: AsyncSession = Depends(get_session),
 ) -> None:
     """The device says it can actually ring for this profile now.
@@ -538,6 +538,21 @@ async def report_ready(
 
     Idempotent: saying it twice stores it once, and a device that repeats itself
     after a restart is doing the right thing.
+
+    **Reachable by the sync token, and it has to be.** The background worker
+    holds that credential and nothing else, and it is the half of the app that
+    pulls while nobody is looking. Written against an access token — as this was
+    at first — a background pull could turn the strict gate *on* by sending
+    `?ready=1` and then never be able to report readiness, leaving the previous
+    phone ringing until somebody opened the app. The app track found that before
+    a phone did.
+
+    It does not widen what a leaked sync token can do, which is the test the
+    scope is meant to pass: that token already opens this gate the loose way, by
+    pulling and advancing `cursor_seq`. Reporting readiness narrows the
+    conditions under which the gate opens rather than adding a power — and the
+    three checks below still hold, so it can only speak for its own device, for
+    a profile that device owns, at the revision the profile is at.
     """
     if device_id != caller.device_id:
         # A device may speak for itself. Reporting readiness for another one
