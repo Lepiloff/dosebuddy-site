@@ -143,3 +143,14 @@ class PullOut(BaseModel):
     # A map, so the answer is always there and never depends on arrival order.
     # It is small: a family has a handful of profiles, not thousands.
     roles: dict[str, str] = {}
+
+    # Who holds reminders for each owned profile, who has claimed them and not
+    # yet confirmed, and whether the holder can actually ring. Present on every
+    # response, empty ones included, and for the same reason `roles` is: it is
+    # state rather than an event, and readiness changes without any row
+    # changing — a report lands, a lease runs out. A device whose cursor is past
+    # the profile row would never hear of it from an incremental feed.
+    #
+    # Owned profiles only: which of somebody's phones rings is not a caregiver's
+    # business, and the watcher projection already removes `owner_device_id`.
+    authority: dict[str, dict] = {}

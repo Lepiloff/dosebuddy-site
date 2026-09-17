@@ -19,7 +19,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, select, union_all
+import structlog
+from sqlalchemy import func, select, text, union_all
 from sqlalchemy import update as sa_update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,6 +41,8 @@ from app.db.models import (
     Schedule,
     StockEvent,
 )
+
+log = structlog.get_logger(__name__)
 
 MISSED = "missed"
 
@@ -413,6 +416,87 @@ class Nudge:
     token: str
     payload: dict[str, str]
     ttl_seconds: int
+
+
+async def hand_back_unconfirmed(
+    session: AsyncSession, now: datetime, lease: timedelta | None
+) -> int:
+    """Give reminders back where the new phone never confirmed it can ring.
+
+    Only for handovers claimed under the protocol that renews readiness, and
+    only while a lease is configured. That restriction is the app track's
+    rollout gate, and it is the difference between this and a way to break
+    working phones: the client shipping today reports readiness **once** per
+    (revision, cursor) and does not repeat it on an empty sync, so a lease
+    applied to every device that can report would start taking authority off
+    healthy handsets an hour later.
+
+    The handback is the server's act and carries a new revision, so the phone
+    receiving its reminders back learns in the ordinary way rather than by
+    arithmetic on a `ready_until` it was handed earlier — which may have been
+    renewed since it read it.
+
+    Known and deliberately not solved here: background work delayed longer than
+    the lease will hand a profile back while the new phone is alive and well.
+    That is what the lease being off by default is for, and what has to be
+    measured on two handsets before the clock is allowed to run.
+    """
+    if lease is None:
+        return 0
+
+    stale = (
+        await session.execute(
+            select(Profile, DeviceReadiness.updated_at)
+            .join(
+                DeviceReadiness,
+                (DeviceReadiness.profile_id == Profile.id)
+                & (DeviceReadiness.device_id == Profile.owner_device_id),
+                isouter=True,
+            )
+            .where(
+                Profile.authority_leased.is_(True),
+                Profile.previous_owner_device_id.is_not(None),
+                Profile.deleted_at_ms.is_(None),
+            )
+        )
+    ).all()
+
+    handed = 0
+    for profile, reported_at in stale:
+        if reported_at is not None and now - reported_at <= lease:
+            continue
+        previous = await session.get(Device, profile.previous_owner_device_id)
+        if previous is None or previous.revoked_at is not None:
+            # Nowhere to hand back to. Leaving authority where it is keeps a
+            # phone that may yet report, which is better than a profile no
+            # device claims at all.
+            continue
+        await session.execute(
+            sa_update(Profile)
+            .where(Profile.id == profile.id)
+            .values(
+                owner_device_id=previous.id,
+                previous_owner_device_id=profile.owner_device_id,
+                pending_owner_device_id=None,
+                # The handback is not itself leased: the phone receiving it may
+                # be a published client that will never report, and a lease it
+                # cannot renew would take the profile away again.
+                authority_leased=False,
+                server_seq=text("nextval('server_seq')"),
+            )
+        )
+        handed += 1
+        log.warning(
+            "authority.handed_back",
+            profile_id=str(profile.id),
+            from_device_id=str(profile.owner_device_id),
+            to_device_id=str(previous.id),
+            silent_for_s=int((now - reported_at).total_seconds()) if reported_at else None,
+        )
+
+    if handed:
+        await session.commit()
+    return handed
 
 
 async def _profile_high_water(session: AsyncSession, profile: Profile) -> int:

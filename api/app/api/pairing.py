@@ -358,6 +358,41 @@ async def heartbeat(
 class ReminderAuthorityIn(BaseModel):
     device_id: uuid.UUID
 
+    # Declared by the claim itself, not learned from a later pull. Sign-in
+    # claims before the first ordinary `pull`, so `devices.ready_protocol_at`
+    # is still empty exactly when the first handover happens — the moment the
+    # strictness matters most. The app track found that; the flag is the answer.
+    #
+    # It turns on two things together, and they belong together: the handover
+    # waits for a readiness report instead of moving at once, and *this*
+    # handover is leased, meaning the server may hand it back if readiness
+    # stops being renewed.
+    reports_ready: bool = False
+
+
+class AuthorityState(BaseModel):
+    """Who holds reminders for a profile, who is waiting to, and since when.
+
+    Sent for every owned profile on every `pull`, empty pages included, because
+    it is state rather than an event: readiness changes without any row
+    changing — a report lands, a lease runs out — and a device whose cursor is
+    past the profile row would never hear about it from an incremental feed.
+    """
+
+    owner_device_id: uuid.UUID | None
+    pending_device_id: uuid.UUID | None
+    previous_device_id: uuid.UUID | None
+    revision: str
+    owner_ready: bool
+    # When the owner's report stops counting, for handovers under the lease.
+    # A reason to go and ask the server, never a licence to take the alarms
+    # back: the owner may have renewed while this copy was in flight, and the
+    # handback is the server's to make and to confirm with a new revision.
+    ready_until: datetime | None
+    # Orders responses. A block that arrives late, with an older `as_of` than
+    # one already applied, is describing a world that has moved on.
+    as_of: datetime
+
 
 class ReminderAuthorityOut(BaseModel):
     """The receipt, which this endpoint used to compute and then throw away.
@@ -386,6 +421,13 @@ class ReminderAuthorityOut(BaseModel):
 
     owner_device_id: uuid.UUID
     revision: int
+
+    # Set when the claim was made under `reports_ready` and the handover is
+    # therefore waiting: `owner_device_id` above is still the phone that holds
+    # the alarms, and this is the one that asked for them. The claimant reads
+    # itself here, arms, checks, and only then reports — and if the response is
+    # lost it finds the same thing in the `authority` block of its next pull.
+    pending_device_id: uuid.UUID | None = None
 
 
 @router.post(
@@ -423,6 +465,32 @@ async def set_reminder_authority(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "device_not_found")
 
     previous = profile.owner_device_id
+
+    if body.reports_ready and previous is not None and previous != device.id:
+        # Two-phase, and only here. Authority stays where the alarms are until
+        # the claimant says it can ring, which is what lets a published client
+        # in the losing role keep its alarms: it never sees a foreign owner id,
+        # because there is not one yet.
+        #
+        # There is a brief overlap by construction — for the report to be true
+        # the claimant must already have armed, and the old phone is still the
+        # owner while it does. That is the acceptable side of invariant 1, and
+        # reporting before arming would buy it back with the unacceptable one.
+        #
+        # Only when somebody already holds it: a first claim has nothing to
+        # protect and nothing to wait for.
+        await session.execute(
+            sa_update(Profile)
+            .where(Profile.id == profile.id)
+            .values(pending_owner_device_id=device.id, authority_leased=True)
+        )
+        await session.commit()
+        return ReminderAuthorityOut(
+            owner_device_id=previous,
+            revision=profile.server_seq,
+            pending_device_id=device.id,
+        )
+
     if previous == device.id:
         # Nothing to write, but everything still to say. This branch is exactly
         # the case the fence exists for: the caller is claiming what the server
@@ -446,7 +514,17 @@ async def set_reminder_authority(
         await session.execute(
             sa_update(Profile)
             .where(Profile.id == profile.id)
-            .values(owner_device_id=device.id, server_seq=text("nextval('server_seq')"))
+            .values(
+                owner_device_id=device.id,
+                previous_owner_device_id=previous,
+                pending_owner_device_id=None,
+                # A handover claimed without the flag is not leased, and one
+                # claimed with it has already returned above. Written here so a
+                # profile that changes hands between protocols cannot keep a
+                # lease the new claimant never asked for.
+                authority_leased=False,
+                server_seq=text("nextval('server_seq')"),
+            )
             .returning(Profile.server_seq)
         )
     ).scalar_one()
@@ -577,7 +655,14 @@ async def report_ready(
     if applied_cursor == 0 and body.applied_cursor != encode_cursor(0):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "unreadable_position")
 
-    if profile.owner_device_id != device_id:
+    claiming = profile.pending_owner_device_id == device_id
+
+    if not claiming and profile.owner_device_id != device_id:
+        if profile.pending_owner_device_id is not None:
+            # Somebody else claimed after this device did. Retrying will not
+            # help and neither will arming: the claim this report belongs to no
+            # longer exists.
+            raise HTTPException(status.HTTP_409_CONFLICT, "claim_superseded")
         # Not a failure of this device: authority moved, and the answer is to
         # pull and find out rather than to retry this.
         raise HTTPException(status.HTTP_409_CONFLICT, "not_owner")
@@ -589,6 +674,53 @@ async def report_ready(
         # Ready for a revision it has not been handed. Whatever the phone
         # believes, it cannot have the rows this one is about.
         raise HTTPException(status.HTTP_409_CONFLICT, "cursor_behind_revision")
+
+    if claiming:
+        # The report is what completes the handover. Until this line the alarms
+        # were the previous phone's, which is the point of waiting: the claimant
+        # has now armed and checked, so moving authority costs no silence.
+        #
+        # A fresh revision, because this is the handover: every device learns of
+        # it by the ordinary cursor, and the previous phone is nudged as before.
+        moved = (
+            await session.execute(
+                sa_update(Profile)
+                .where(Profile.id == profile.id)
+                .values(
+                    owner_device_id=device_id,
+                    previous_owner_device_id=profile.owner_device_id,
+                    pending_owner_device_id=None,
+                    server_seq=text("nextval('server_seq')"),
+                )
+                .returning(Profile.server_seq)
+            )
+        ).scalar_one()
+
+        # The report named the revision it was ready for, and the handover has
+        # just given the profile a new one. Storing the old number would leave
+        # the gate holding against a device that is ready by every measure it
+        # was asked about.
+        #
+        # Claiming to have applied through the new mark is not a fiction worth
+        # worrying about: the only thing in that profile row this device has not
+        # pulled is the ownership change it has just caused itself.
+        revision = moved
+        applied_cursor = max(applied_cursor, moved)
+
+        losing = profile.owner_device_id
+        if losing is not None:
+            old_device = await session.get(Device, losing)
+            if old_device is not None and old_device.revoked_at is None:
+                await alerts.claim(
+                    session,
+                    alerts.authority_lost(
+                        account_id=caller.account.id,
+                        profile_id=profile.id,
+                        device_id=old_device.id,
+                        revision=moved,
+                    ),
+                    utcnow(),
+                )
 
     await session.execute(
         insert(DeviceReadiness)

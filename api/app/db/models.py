@@ -199,6 +199,40 @@ class Profile(Base):
         ForeignKey("devices.id", ondelete="SET NULL"), nullable=True
     )
 
+    # Where to hand reminders back to if the new owner never confirms it can
+    # ring. It used to live only as a local variable inside the handover
+    # request, which was enough while nothing outlived that request.
+    previous_owner_device_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("devices.id", ondelete="SET NULL"), nullable=True
+    )
+
+    # A device that has claimed authority and has not yet said it can ring.
+    # Authority does not move until it does, so the phone that holds the alarms
+    # today goes on holding them — including a published client that knows
+    # nothing about any of this and would otherwise cancel them on sight.
+    pending_owner_device_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("devices.id", ondelete="SET NULL"), nullable=True
+    )
+
+    # Whether *this* handover was claimed under the protocol that renews
+    # readiness, and therefore whether the lease applies to it.
+    #
+    # On the handover and not on the device, which is the app track's rollout
+    # gate and the reason it exists: the client shipping today reports readiness
+    # **once** per (revision, cursor) and does not repeat it on an empty sync.
+    # Its `ready_protocol_at` means "can report", not "will renew". A lease
+    # applied to every device with that column set would start handing authority
+    # back an hour later on perfectly healthy phones.
+    #
+    # `server_default` as well as the Python one, and not for symmetry: the
+    # migration writes a server default, so without this the schema the tests
+    # build differs from the one production runs — and differs in a way the
+    # drift check cannot see, because it compares indexes, triggers and
+    # functions rather than column defaults. A raw insert found it.
+    authority_leased: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False
+    )
+
     name: Mapped[str] = mapped_column(EncryptedString)
 
     # BIGINT, not INTEGER. An Android colour is unsigned ARGB — 0xFF2A9D8F is

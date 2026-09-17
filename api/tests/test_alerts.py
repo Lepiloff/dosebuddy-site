@@ -13,11 +13,14 @@ from sqlalchemy import select
 
 from app.api.sync import decode_cursor, encode_cursor
 from app.core.security import mint_access_token
+from sqlalchemy import update as sa_update
+
 from app.db.models import (
     AlertDelivery,
     AlertKind,
     AlertState,
     Device,
+    DeviceReadiness,
     Profile,
     ProfileMembership,
     utcnow,
@@ -792,6 +795,148 @@ async def _ready(api, device, profile_id, revision, applied_cursor):
             "applied_cursor": encode_cursor(applied_cursor),
         },
     )
+
+
+async def _claim(api, device, pid, reports_ready: bool):
+    access, _ttl = mint_access_token(
+        api.app.state.settings.jwt_secret, device.account_id, device.id
+    )
+    return await api.post(
+        f"/v1/profiles/{pid}/reminder-authority",
+        headers={"Authorization": f"Bearer {access}"},
+        json={"device_id": str(device.id), "reports_ready": reports_ready},
+    )
+
+
+async def test_a_two_phase_claim_leaves_the_alarms_where_they_are(api, session, db_engine):
+    """What the published client needs, and it needs nothing of its own.
+
+    1.4.4 cancels its alarms the moment it sees a foreign `owner_device_id`, and
+    it will never report readiness. So the handover does not move until the
+    claimant says it can ring: until then the old phone is still the owner, and
+    a published client in the losing role keeps its alarms by doing exactly what
+    it already does.
+    """
+    owner, pid, losing, winning = await _handover(api, session, db_engine)
+    profile = await session.get(Profile, uuid.UUID(pid))
+    # Start from the losing device holding it, as it would after the first claim.
+    await session.execute(
+        sa_update(Profile).where(Profile.id == profile.id).values(
+            owner_device_id=losing.id, pending_owner_device_id=None, authority_leased=False
+        )
+    )
+    await session.commit()
+    await session.refresh(profile)
+
+    claimed = await _claim(api, winning, pid, reports_ready=True)
+
+    assert claimed.status_code == 200, claimed.text
+    assert claimed.json()["owner_device_id"] == str(losing.id), "alarms stay put"
+    assert claimed.json()["pending_device_id"] == str(winning.id)
+    await session.refresh(profile)
+    assert profile.owner_device_id == losing.id
+    assert profile.authority_leased is True
+
+    # The claimant arms, checks, and only then reports — which is what moves it.
+    assert (
+        await _ready(api, winning, pid, profile.server_seq, profile.server_seq)
+    ).status_code == 204
+    await session.refresh(profile)
+    assert profile.owner_device_id == winning.id
+    assert profile.previous_owner_device_id == losing.id
+    assert profile.pending_owner_device_id is None
+
+
+async def test_a_superseded_claim_cannot_report(api, session, db_engine):
+    """Two phones claim; the second wins the pending slot. A report from the
+    first belongs to a claim that no longer exists, and storing it would let a
+    phone that gave up open the gate."""
+    owner, pid, losing, winning = await _handover(api, session, db_engine)
+    profile = await session.get(Profile, uuid.UUID(pid))
+    await session.execute(
+        sa_update(Profile).where(Profile.id == profile.id).values(
+            owner_device_id=losing.id, pending_owner_device_id=winning.id
+        )
+    )
+    await session.commit()
+    await session.refresh(profile)
+
+    # `losing` is the owner, so its own report is fine; it is a *third* state we
+    # are after: a device that is neither owner nor the pending claimant.
+    await session.execute(
+        sa_update(Profile).where(Profile.id == profile.id).values(
+            owner_device_id=winning.id, pending_owner_device_id=winning.id
+        )
+    )
+    await session.commit()
+    await session.refresh(profile)
+
+    r = await _ready(api, losing, pid, profile.server_seq, profile.server_seq)
+
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "claim_superseded"
+
+
+async def test_the_lease_is_off_unless_it_is_configured(api, session, db_engine):
+    """The rollout gate, asserted rather than trusted.
+
+    The client shipping today reports readiness once per (revision, cursor) and
+    does not repeat it on an empty sync. A lease applied to every device that
+    can report would start taking authority off healthy phones an hour later, so
+    it is off unless switched on, and only ever applies to handovers claimed
+    under the protocol that renews.
+    """
+    from app.db.models import Device as DeviceModel
+
+    owner, pid, losing, winning = await _handover(api, session, db_engine)
+    profile = await session.get(Profile, uuid.UUID(pid))
+    await session.execute(
+        sa_update(Profile).where(Profile.id == profile.id).values(
+            authority_leased=True, previous_owner_device_id=losing.id
+        )
+    )
+    session.add(DeviceReadiness(
+        device_id=winning.id, profile_id=profile.id, revision=profile.server_seq,
+        applied_cursor=profile.server_seq, updated_at=utcnow() - timedelta(days=2),
+    ))
+    await session.commit()
+
+    # Two days silent, and with no lease configured nothing happens at all.
+    assert await alerts.hand_back_unconfirmed(session, utcnow(), None) == 0
+    await session.refresh(profile)
+    assert profile.owner_device_id == winning.id
+
+    # With one, it goes back — and by a new revision, which is how the phone
+    # receiving it finds out, rather than by arithmetic on its own copy.
+    before = profile.server_seq
+    assert await alerts.hand_back_unconfirmed(session, utcnow(), timedelta(hours=1)) == 1
+    await session.refresh(profile)
+    assert profile.owner_device_id == losing.id
+    assert profile.server_seq > before
+    assert profile.authority_leased is False, "the phone it went back to may never report"
+
+
+async def test_an_unleased_handover_is_never_taken_back(api, session, db_engine):
+    """The other half of the gate: a handover claimed by a client that reports
+    once is not a handover anyone promised to renew."""
+    from app.db.models import Device as DeviceModel
+
+    owner, pid, losing, winning = await _handover(api, session, db_engine)
+    profile = await session.get(Profile, uuid.UUID(pid))
+    await session.execute(
+        sa_update(Profile).where(Profile.id == profile.id).values(
+            authority_leased=False, previous_owner_device_id=losing.id
+        )
+    )
+    session.add(DeviceReadiness(
+        device_id=winning.id, profile_id=profile.id, revision=profile.server_seq,
+        applied_cursor=profile.server_seq, updated_at=utcnow() - timedelta(days=2),
+    ))
+    await session.commit()
+
+    assert await alerts.hand_back_unconfirmed(session, utcnow(), timedelta(hours=1)) == 0
+    await session.refresh(profile)
+    assert profile.owner_device_id == winning.id
 
 
 async def test_a_reporting_device_is_not_released_by_the_cursor_alone(

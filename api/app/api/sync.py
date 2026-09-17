@@ -21,11 +21,12 @@ from __future__ import annotations
 import base64
 import uuid
 from collections import Counter
+from datetime import timedelta
 from typing import Any
 
 import structlog
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import cast as sa_cast
 from sqlalchemy import column as sa_column
 from sqlalchemy import func, literal as sa_literal, select, union_all
@@ -41,11 +42,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.api.deps import Caller, get_session, sync_caller
+from app.services.alerts import _profile_high_water
 from app.api.schemas import Changes, Outcome, PullOut, PushIn, PushOut
 from app.db.models import (
     IMMUTABLE_PARENT_SQLSTATE,
     SERVER_SEQ,
     Device,
+    DeviceReadiness,
     DoseEvent,
     Medication,
     Profile,
@@ -515,6 +518,74 @@ def _moved(stored: dict[uuid.UUID, tuple], row_id: uuid.UUID, *claimed) -> bool:
     return stored.get(row_id, claimed) != claimed
 
 
+async def _authority(
+    session: AsyncSession, mine: set[uuid.UUID], lease: timedelta | None
+) -> dict[str, dict[str, Any]]:
+    """Who holds reminders for each owned profile, and whether they can ring.
+
+    On every response, empty ones included, for the same reason `roles` is: it
+    is state, not an event. Readiness changes with no row changing — a report
+    lands, a lease runs out — so a device whose cursor is past the profile row
+    would never learn of it from an incremental feed. The app track made that
+    correction, and it is the whole reason this is a block rather than a field.
+
+    Owned profiles only. Which of somebody's phones rings for their mother is
+    not a caregiver's business, which is why `owner_device_id` is already absent
+    from the watcher projection, and a block that reinstated it beside the
+    projection that removes it would be a strange way to keep that promise.
+    """
+    if not mine:
+        return {}
+
+    rows = (
+        await session.execute(select(Profile).where(Profile.id.in_(mine)))
+    ).scalars().all()
+    ready_rows = {
+        (r.device_id, r.profile_id): r
+        for r in (
+            await session.execute(
+                select(DeviceReadiness).where(DeviceReadiness.profile_id.in_(mine))
+            )
+        ).scalars()
+    }
+
+    now = utcnow()
+    block: dict[str, dict[str, Any]] = {}
+    for profile in rows:
+        ready = ready_rows.get((profile.owner_device_id, profile.id))
+        # Ready means ready for the profile as it stands, not as it stood when
+        # the report was made: a dose written since is a dose the owner may not
+        # have, and readiness is the claim that it can ring for what exists.
+        covered = bool(
+            ready
+            and ready.revision >= profile.server_seq
+            and ready.applied_cursor >= await _profile_high_water(session, profile)
+        )
+        until = (
+            ready.updated_at + lease
+            if ready and profile.authority_leased and lease
+            else None
+        )
+        block[str(profile.id)] = {
+            "owner_device_id": str(profile.owner_device_id) if profile.owner_device_id else None,
+            "pending_device_id": (
+                str(profile.pending_owner_device_id)
+                if profile.pending_owner_device_id
+                else None
+            ),
+            "previous_device_id": (
+                str(profile.previous_owner_device_id)
+                if profile.previous_owner_device_id
+                else None
+            ),
+            "revision": str(profile.server_seq),
+            "owner_ready": covered,
+            "ready_until": until.isoformat().replace("+00:00", "Z") if until else None,
+            "as_of": now.isoformat().replace("+00:00", "Z"),
+        }
+    return block
+
+
 async def _stored_parents(
     session: AsyncSession, model, columns: tuple, ids: list[uuid.UUID]
 ) -> dict[uuid.UUID, tuple]:
@@ -754,7 +825,7 @@ def feed_query(plan, since: int):
 
 
 async def _page(
-    session: AsyncSession, caller: Caller, cursor: str | None
+    session: AsyncSession, caller: Caller, cursor: str | None, lease: timedelta | None
 ) -> tuple[PullOut, int]:
     """One page of the feed, and where it ends.
 
@@ -852,7 +923,11 @@ async def _page(
 
     return (
         PullOut(
-            cursor=encode_cursor(new_cursor), has_more=has_more, changes=changes, roles=roles
+            cursor=encode_cursor(new_cursor),
+            has_more=has_more,
+            changes=changes,
+            roles=roles,
+            authority=await _authority(session, mine, lease),
         ),
         new_cursor,
     )
@@ -860,6 +935,7 @@ async def _page(
 
 @router.get("/sync/pull", response_model=PullOut)
 async def pull(
+    request: Request,
     cursor: str | None = Query(default=None),
     ready: bool = Query(
         default=False,
@@ -868,7 +944,9 @@ async def pull(
     caller: Caller = Depends(sync_caller),
     session: AsyncSession = Depends(get_session),
 ) -> PullOut:
-    page, reached = await _page(session, caller, cursor)
+    page, reached = await _page(
+        session, caller, cursor, request.app.state.settings.authority_lease
+    )
 
     # Remember how far this device has been handed. The cursor is still the
     # client's — this is a copy of the last value it was given, kept for one
@@ -919,6 +997,7 @@ async def pull(
 
 @router.get("/sync/preview", response_model=PullOut)
 async def preview(
+    request: Request,
     cursor: str | None = Query(default=None),
     caller: Caller = Depends(sync_caller),
     session: AsyncSession = Depends(get_session),
@@ -943,5 +1022,7 @@ async def preview(
     endpoint cannot accidentally get its semantics, and an old client keeps the
     behaviour it was written against.
     """
-    page, _reached = await _page(session, caller, cursor)
+    page, _reached = await _page(
+        session, caller, cursor, request.app.state.settings.authority_lease
+    )
     return page

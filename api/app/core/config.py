@@ -6,6 +6,7 @@ process at startup, not surface later as a connection to something unintended.
 """
 
 from functools import lru_cache
+from datetime import timedelta
 from typing import Literal
 
 from pydantic import Field, PostgresDsn, RedisDsn
@@ -32,6 +33,27 @@ class Settings(BaseSettings):
     api_prefix: str = "/v1"
 
     log_level: str = "INFO"
+
+    # How long a readiness report keeps counting, for handovers claimed under
+    # the protocol that renews it. Zero — the default — means no lease at all:
+    # nothing expires, nothing is handed back, and the mechanism is inert.
+    #
+    # Off by default on purpose. The app track's measurement has to come first:
+    # background work delayed longer than the lease would hand a profile back
+    # while the new phone is alive and well, and that scenario is checked on two
+    # handsets before the clock is allowed to run. Shipping the code dark is
+    # what lets the client be built against it in the meantime.
+    authority_lease_minutes: int = 0
+
+
+    @property
+    def authority_lease(self) -> timedelta | None:
+        """The lease as a duration, or None when it is switched off."""
+        return (
+            timedelta(minutes=self.authority_lease_minutes)
+            if self.authority_lease_minutes > 0
+            else None
+        )
 
     # Off in production by default. The schema is not a secret, but a service
     # holding article 9 health data has no reason to publish its surface to

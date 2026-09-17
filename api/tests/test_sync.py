@@ -1380,13 +1380,31 @@ async def preview(api, tokens, cursor=None):
     return r.json()
 
 
+def _without_as_of(page: dict) -> dict:
+    """Everything but the moment the block was computed.
+
+    `as_of` is what orders two responses, so two responses must not share it.
+    It is the one field that is allowed — required — to differ between an
+    otherwise identical preview and pull.
+    """
+    trimmed = dict(page)
+    trimmed["authority"] = {
+        pid: {k: v for k, v in state.items() if k != "as_of"}
+        for pid, state in page.get("authority", {}).items()
+    }
+    return trimmed
+
+
 async def test_preview_returns_what_pull_returns(api):
     """Same authorisation, visibility, projection, paging and body. If the two
     ever disagree, the client is previewing a different server than the one it
     will sync against."""
     owner, pid, mid, sid, did = await _owner_with_data(api)
 
-    assert await preview(api, owner) == await pull(api, owner)
+    seen, taken = await preview(api, owner), await pull(api, owner)
+
+    assert _without_as_of(seen) == _without_as_of(taken)
+    assert seen["authority"][pid]["as_of"] != taken["authority"][pid]["as_of"]
 
 
 async def test_preview_projects_by_role_exactly_as_pull_does(api):

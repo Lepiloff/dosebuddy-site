@@ -12,7 +12,7 @@ handling with it, and vice versa.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import structlog
 
@@ -27,7 +27,9 @@ SCAN_INTERVAL_SECONDS = 60
 log = structlog.get_logger(__name__)
 
 
-async def scan_once(sessionmaker, push: Push, now: datetime | None = None) -> int:
+async def scan_once(
+    sessionmaker, push: Push, now: datetime | None = None, lease: timedelta | None = None
+) -> int:
     """Detect, then deliver. Two phases, and the split is the point.
 
     They used to be one: claim a row and send in the same breath, with the claim
@@ -46,6 +48,11 @@ async def scan_once(sessionmaker, push: Push, now: datetime | None = None) -> in
     delivered = 0
 
     async with sessionmaker() as session:
+        # Before anything is detected: a profile whose new owner never
+        # confirmed it can ring belongs back with the phone that can, and the
+        # alerts raised in this pass should be about the world after that.
+        await alerts.hand_back_unconfirmed(session, now, lease)
+
         found = await alerts.find_missed_dose_alerts(session, now)
         found += await alerts.find_stale_profile_alerts(session, now)
         for alert in found:
