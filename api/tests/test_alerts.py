@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import select
 
+from app.api.sync import encode_cursor
 from app.core.security import mint_access_token
 from app.db.models import (
     AlertDelivery,
@@ -768,6 +769,141 @@ async def test_the_gate_opens_on_a_page_that_was_only_handed_out(api, session, d
     pusher = RecordingPush()
     await scan_once(async_sessionmaker(db_engine, expire_on_commit=False), pusher)
     assert pusher.sent, "the losing phone is silenced on the strength of bytes in flight"
+
+
+async def _ready(api, device, profile_id, revision, applied_cursor):
+    access, _ttl = mint_access_token(
+        api.app.state.settings.jwt_secret, device.account_id, device.id
+    )
+    return await api.post(
+        f"/v1/devices/{device.id}/ready",
+        headers={"Authorization": f"Bearer {access}"},
+        json={
+            "profile_id": str(profile_id),
+            "revision": str(revision),
+            "applied_cursor": encode_cursor(applied_cursor),
+        },
+    )
+
+
+async def test_a_reporting_device_is_not_released_by_the_cursor_alone(
+    api, session, db_engine
+):
+    """The case that made the first transition rule wrong, and it is the first
+    handover — the one where strictness matters most.
+
+    I proposed: no readiness on file, fall back to the cursor. A new client has
+    no readiness *before its first report*, so the fallback would have opened
+    the gate on exactly the handover the protocol was written for. The app track
+    caught it, and the answer is that a device says it speaks the protocol on
+    every pull, before it has anything to report.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.db.models import Device as DeviceModel
+
+    owner, pid, losing, winning = await _handover(api, session, db_engine)
+    profile = await session.get(Profile, uuid.UUID(pid))
+    device = await session.get(DeviceModel, winning.id)
+
+    # It has been handed everything — the old rule would let the nudge go — and
+    # it has said it reports readiness, so the old rule does not apply to it.
+    device.cursor_seq = profile.server_seq
+    device.ready_protocol_at = utcnow()
+    await session.commit()
+
+    pusher = RecordingPush()
+    await scan_once(async_sessionmaker(db_engine, expire_on_commit=False), pusher)
+    assert pusher.sent == [], "handed is not ready, and this build can say so"
+
+    # And the report releases it.
+    r = await _ready(api, winning, pid, profile.server_seq, profile.server_seq)
+    assert r.status_code == 204, r.text
+
+    row = (await session.execute(
+        select(AlertDelivery).where(AlertDelivery.kind == AlertKind.reminder_authority_lost)
+    )).scalars().one()
+    row.next_attempt_at = utcnow() - timedelta(seconds=1)
+    await session.commit()
+    await scan_once(async_sessionmaker(db_engine, expire_on_commit=False), pusher)
+    assert pusher.sent, "once the phone says it can ring, the other one stops"
+
+
+async def test_an_old_build_is_still_released_by_the_cursor(api, session, db_engine):
+    """The other half of the transition, and the reason the weaker rule stays.
+
+    A gate that waited for a report this build cannot make would leave the
+    previous phone ringing for ever. A permanent duplicate is not an improvement
+    on a brief silence.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.db.models import Device as DeviceModel
+
+    owner, pid, losing, winning = await _handover(api, session, db_engine)
+    device = await session.get(DeviceModel, winning.id)
+    assert device.ready_protocol_at is None, "the helper's pull did not claim the protocol"
+
+    pusher = RecordingPush()
+    await scan_once(async_sessionmaker(db_engine, expire_on_commit=False), pusher)
+
+    assert pusher.sent, "no readiness to wait for, so the cursor still decides"
+
+
+async def test_readiness_is_refused_when_it_cannot_be_true(api, session, db_engine):
+    """The three things the server can check, each on its own.
+
+    It cannot check the claim itself — whether alarms exist is a fact on the
+    phone — so it refuses the cases where the claim is knowably about something
+    else, and says which, because "409" alone would have the client retrying the
+    same wrong thing.
+    """
+    owner, pid, losing, winning = await _handover(api, session, db_engine)
+    profile = await session.get(Profile, uuid.UUID(pid))
+
+    # Someone else's device: a phone must not open the gate that silences its
+    # own sibling.
+    access, _ttl = mint_access_token(
+        api.app.state.settings.jwt_secret, winning.account_id, winning.id
+    )
+    r = await api.post(
+        f"/v1/devices/{losing.id}/ready",
+        headers={"Authorization": f"Bearer {access}"},
+        json={"profile_id": pid, "revision": str(profile.server_seq),
+              "applied_cursor": encode_cursor(profile.server_seq)},
+    )
+    assert r.status_code == 403
+
+    # Not the owner any more: authority moved while this was in flight.
+    r = await _ready(api, losing, pid, profile.server_seq, profile.server_seq)
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "not_owner"
+
+    # A revision the profile has moved past.
+    r = await _ready(api, winning, pid, profile.server_seq - 1, profile.server_seq)
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "stale_revision"
+
+    # Ready for rows it has not been handed.
+    r = await _ready(api, winning, pid, profile.server_seq, profile.server_seq - 1)
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "cursor_behind_revision"
+
+
+async def test_readiness_said_twice_is_stored_once(api, session, db_engine):
+    """A device repeating itself after a restart is doing the right thing."""
+    from app.db.models import DeviceReadiness
+
+    owner, pid, losing, winning = await _handover(api, session, db_engine)
+    profile = await session.get(Profile, uuid.UUID(pid))
+
+    for _ in range(3):
+        r = await _ready(api, winning, pid, profile.server_seq, profile.server_seq)
+        assert r.status_code == 204
+
+    rows = (await session.execute(select(DeviceReadiness))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].revision == profile.server_seq
 
 
 async def test_the_worker_sends_the_queued_authority_nudge(api, session, db_engine):

@@ -18,10 +18,12 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select, text, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import Caller, current_caller, get_session
+from app.api.sync import decode_cursor, encode_cursor
 from app.services import alerts
 from app.core.security import (
     PAIRING_CODE_TTL,
@@ -31,6 +33,7 @@ from app.core.security import (
 )
 from app.db.models import (
     Device,
+    DeviceReadiness,
     DoseEvent,
     Medication,
     PairingCode,
@@ -480,3 +483,114 @@ async def set_reminder_authority(
             await session.commit()
 
     return ReminderAuthorityOut(owner_device_id=device.id, revision=revision)
+
+
+class ReadyIn(BaseModel):
+    """What a device asserts about one profile, and what the server can check.
+
+    `revision` is the profile's `server_seq` as the device saw it — the same
+    number the claim response and the nudge carry. `applied_cursor` is how far
+    it had applied when it said so, because the revision alone proves nothing:
+    the client learns it from the claim response *before* loading a single row,
+    so a report carrying only that could come from a phone holding none of the
+    data.
+
+    Both are strings on the wire for one reason: `revision` already crosses as a
+    string in the FCM payload, where map<string,string> is FCM's type rather
+    than anyone's choice, and a number that is a string in one channel and an
+    integer in another is a parse bug waiting for a quiet afternoon.
+    """
+
+    profile_id: uuid.UUID
+    revision: str
+    applied_cursor: str
+
+
+@router.post("/devices/{device_id}/ready", status_code=status.HTTP_204_NO_CONTENT)
+async def report_ready(
+    device_id: uuid.UUID,
+    body: ReadyIn,
+    caller: Caller = Depends(current_caller),
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    """The device says it can actually ring for this profile now.
+
+    Everything else the gate has ever had was inferred. `cursor_seq` says a page
+    was produced; an acknowledged cursor would say bytes reached a database.
+    Neither says an alarm exists, and the app track measured the distance: rows
+    inside an applied page can sit quarantined or waiting for a parent, and the
+    next page is requested before alarms are rebuilt.
+
+    So the assertion comes from the only party that can make it, and it means
+    what they defined on 2026-09-17: the rows for this profile are applied,
+    materialisation and alarm reconciliation have run, nothing is left waiting
+    or quarantined for it, and the alarm outbox holds no unfinished placement.
+
+    The server cannot verify any of that. It verifies the three things it can,
+    and refuses with `409` rather than storing a claim it knows is stale:
+
+    * the report comes from the device that *currently* owns the profile —
+      authority may have moved on while this was in flight;
+    * the revision is the one the profile is at — a profile written again since
+      the handover is a profile this device has not seen whole;
+    * the cursor it applied through reaches that revision, which is what makes
+      the claim about data rather than about a number it was told.
+
+    Idempotent: saying it twice stores it once, and a device that repeats itself
+    after a restart is doing the right thing.
+    """
+    if device_id != caller.device_id:
+        # A device may speak for itself. Reporting readiness for another one
+        # would let a phone open the gate that silences its own sibling.
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "not_your_device")
+
+    profile = await session.get(Profile, body.profile_id)
+    if profile is None or profile.deleted_at_ms is not None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no_such_profile")
+
+    try:
+        revision = int(body.revision)
+    except (TypeError, ValueError):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "unreadable_position") from None
+
+    # The opaque cursor the client holds, read strictly. `decode_cursor` is
+    # deliberately forgiving where `pull` uses it — a client that cannot sync is
+    # worse than one that syncs too much — but forgiveness here would turn an
+    # unreadable position into "applied nothing", and then into a refusal that
+    # blames the phone for a string this endpoint mangled.
+    applied_cursor = decode_cursor(body.applied_cursor)
+    if applied_cursor == 0 and body.applied_cursor != encode_cursor(0):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "unreadable_position")
+
+    if profile.owner_device_id != device_id:
+        # Not a failure of this device: authority moved, and the answer is to
+        # pull and find out rather than to retry this.
+        raise HTTPException(status.HTTP_409_CONFLICT, "not_owner")
+
+    if revision != profile.server_seq:
+        raise HTTPException(status.HTTP_409_CONFLICT, "stale_revision")
+
+    if applied_cursor < profile.server_seq:
+        # Ready for a revision it has not been handed. Whatever the phone
+        # believes, it cannot have the rows this one is about.
+        raise HTTPException(status.HTTP_409_CONFLICT, "cursor_behind_revision")
+
+    await session.execute(
+        insert(DeviceReadiness)
+        .values(
+            device_id=device_id,
+            profile_id=profile.id,
+            revision=revision,
+            applied_cursor=applied_cursor,
+            updated_at=utcnow(),
+        )
+        .on_conflict_do_update(
+            index_elements=[DeviceReadiness.device_id, DeviceReadiness.profile_id],
+            set_={
+                "revision": revision,
+                "applied_cursor": applied_cursor,
+                "updated_at": utcnow(),
+            },
+        )
+    )
+    await session.commit()

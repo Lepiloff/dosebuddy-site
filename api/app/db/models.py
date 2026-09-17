@@ -133,6 +133,25 @@ class Device(Base):
     # it holds the nudge rather than releasing it.
     cursor_seq: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
+    # When this device first said it speaks the readiness protocol, and null for
+    # every device that does not.
+    #
+    # It is a property of the build, not of the session, so it cannot be learned
+    # at sign-in: a phone that updates keeps its token and goes on pulling in the
+    # background without ever authenticating again. It is therefore carried on
+    # every `GET /sync/pull` and written in the same statement as `cursor_seq`,
+    # which is also what makes it safe — the moment the server knows a device
+    # can report readiness is the same moment it records what that device was
+    # handed, so there is no window in which the weaker rule applies to a device
+    # that deserved the stronger one.
+    #
+    # Null is what makes the old rule survive: a device that never says this
+    # keeps being gated on `cursor_seq`, because a gate that waited for a signal
+    # such a device cannot send would leave the previous phone ringing for ever.
+    ready_protocol_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -216,6 +235,51 @@ class Profile(Base):
     memberships: Mapped[list[ProfileMembership]] = relationship(
         back_populates="profile", cascade="all, delete-orphan"
     )
+
+
+class DeviceReadiness(Base):
+    """What a device says it has actually finished doing for one profile.
+
+    `cursor_seq` records that a page was *produced* for a device: not that it
+    arrived, not that it was applied, and certainly not that an alarm exists.
+    The authority gate reads it as "the new owner is ready", which is a stronger
+    claim than the column can support, and the failure it hides is the one this
+    project ranks worst — the previous phone silenced while the new one has
+    nothing to ring with.
+
+    A row here is the client's own assertion, defined by the app track on
+    2026-09-17 and narrower than "applied": the rows for this profile are
+    applied, materialisation and alarm reconciliation have run, nothing is left
+    waiting or quarantined for it, and no placement is outstanding in the alarm
+    outbox. The server cannot check any of that — the facts live on the phone —
+    so it checks the three things it *can*: that the claim comes from the device
+    that currently owns the profile, that it names the revision the profile is
+    at, and that the cursor it applied through reaches that revision.
+
+    Per profile, because that is the unit the phone can answer for. Per device,
+    because two phones of one account are answering about different alarms.
+    """
+
+    __tablename__ = "device_readiness"
+
+    device_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("devices.id", ondelete="CASCADE"), primary_key=True
+    )
+    profile_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("profiles.id", ondelete="CASCADE"), primary_key=True
+    )
+
+    # The profile's `server_seq` as the device saw it — the same number the
+    # claim response and the nudge carry, so all three channels say one thing.
+    revision: Mapped[int] = mapped_column(BigInteger)
+
+    # How far the device had applied when it said this. Revision alone is not
+    # enough: the client learns the revision from the claim response, before it
+    # has loaded anything, so a report carrying only that could be sent by a
+    # phone holding none of the data.
+    applied_cursor: Mapped[int] = mapped_column(BigInteger)
+
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class ProfileMembership(Base):

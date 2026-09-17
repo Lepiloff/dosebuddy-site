@@ -53,6 +53,7 @@ from app.db.models import (
     Role,
     Schedule,
     StockEvent,
+    utcnow,
 )
 
 log = structlog.get_logger(__name__)
@@ -860,6 +861,10 @@ async def _page(
 @router.get("/sync/pull", response_model=PullOut)
 async def pull(
     cursor: str | None = Query(default=None),
+    ready: bool = Query(
+        default=False,
+        description="This client reports readiness per profile; gate on that, not on the cursor.",
+    ),
     caller: Caller = Depends(sync_caller),
     session: AsyncSession = Depends(get_session),
 ) -> PullOut:
@@ -878,7 +883,8 @@ async def pull(
     # matches no row instead of writing a smaller number.
     #
     # What it records is "handed out", not "applied" — see `/sync/preview` and
-    # contract §4.3 for why that distinction has an endpoint of its own.
+    # contract §4.3 for why that distinction has an endpoint of its own, and
+    # `?ready=1` for the signal that replaces it where it is load-bearing.
     await session.execute(
         sa_update(Device)
         .where(
@@ -887,6 +893,26 @@ async def pull(
         )
         .values(cursor_seq=reached)
     )
+
+    if ready:
+        # Recorded here rather than at sign-in, and the app track is right that
+        # it has to be: speaking this protocol is a property of the build, and a
+        # phone that updates keeps its token and goes on pulling in the
+        # background without ever authenticating again. A flag on the token
+        # endpoint would miss exactly the devices that matter.
+        #
+        # Same transaction as the cursor, so there is no page for which the
+        # weaker rule applied to a device that deserved the stronger one.
+        #
+        # Written once and left alone: it is a fact about the build, and
+        # refreshing the timestamp every pull would be a write per request that
+        # records nothing new.
+        await session.execute(
+            sa_update(Device)
+            .where(Device.id == caller.device_id, Device.ready_protocol_at.is_(None))
+            .values(ready_protocol_at=utcnow())
+        )
+
     await session.commit()
     return page
 

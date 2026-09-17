@@ -31,6 +31,7 @@ from app.db.models import (
     AlertKind,
     AlertState,
     Device,
+    DeviceReadiness,
     DoseEvent,
     Profile,
     ProfileMembership,
@@ -465,7 +466,30 @@ async def resolve_nudge(
     owner_device = await session.get(Device, profile.owner_device_id)
     if owner_device is None:
         return NoNudge.moot
-    if owner_device.cursor_seq is None or owner_device.cursor_seq < profile.server_seq:
+
+    if owner_device.ready_protocol_at is not None:
+        # This build reports readiness, so nothing weaker will do. `cursor_seq`
+        # would say the page was produced; the app track measured what that
+        # leaves out — rows quarantined or waiting for a parent inside an
+        # applied page, and the next page requested before alarms are rebuilt.
+        # Only the phone knows it can ring, and only it can say so.
+        #
+        # Both numbers are checked against the profile as it stands now, not as
+        # it stood at the handover: a profile written again since is one this
+        # device has not seen whole, and the gate holds — the same conservative
+        # reading `cursor_seq` already had.
+        ready = await session.get(DeviceReadiness, (owner_device.id, profile.id))
+        if (
+            ready is None
+            or ready.revision < profile.server_seq
+            or ready.applied_cursor < profile.server_seq
+        ):
+            return NoNudge.awaiting_winner
+    elif owner_device.cursor_seq is None or owner_device.cursor_seq < profile.server_seq:
+        # The old rule, kept for devices that cannot send the new signal. It is
+        # weaker and it stays: a gate waiting for a report such a build will
+        # never make would leave the previous phone ringing for ever, and a
+        # permanent duplicate is not an improvement on a brief silence.
         return NoNudge.awaiting_winner
 
     if not device.push_token:

@@ -1430,6 +1430,42 @@ async def test_preview_does_not_move_the_cursor_and_pull_still_does(api, session
     assert device.cursor_seq is not None, "pull still records what it hands out"
 
 
+async def test_a_pull_can_say_the_client_reports_readiness(api, session):
+    """Carried on the pull rather than learned at sign-in, and it has to be.
+
+    Speaking the readiness protocol is a property of the build. A phone that
+    updates keeps its token and goes on pulling in the background without ever
+    authenticating again, so a flag on the token endpoint would miss exactly the
+    devices that matter — the ones already signed in when the update lands.
+
+    Written in the same statement as the cursor, so there is no page for which
+    the weaker rule applied to a device that deserved the stronger one.
+    """
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+    device = (
+        await session.execute(
+            select(Device).where(Device.account_id == uuid.UUID(owner["account_id"]))
+        )
+    ).scalars().one()
+
+    await pull(api, owner)
+    await session.refresh(device)
+    assert device.ready_protocol_at is None, "an ordinary pull claims nothing"
+
+    r = await api.get("/v1/sync/pull?ready=1", headers=auth_header(owner))
+    assert r.status_code == 200
+    await session.refresh(device)
+    first = device.ready_protocol_at
+    assert first is not None
+
+    # Said again, stored once: it is a fact about the build, and rewriting it
+    # every pull would be a write per request that records nothing new.
+    r = await api.get("/v1/sync/pull?ready=1", headers=auth_header(owner))
+    assert r.status_code == 200
+    await session.refresh(device)
+    assert device.ready_protocol_at == first
+
+
 async def test_the_database_refuses_every_parent_move_whatever_writes_it(api, session):
     """Not push — the schema. A backfill, a support script or the next endpoint
     someone writes gets the same answer for all five, which is the reason the
