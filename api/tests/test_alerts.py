@@ -35,6 +35,7 @@ from tests.test_sync import (
     dose,
     medication,
     ms,
+    schedule,
     preview,
     push,
 )
@@ -835,7 +836,7 @@ async def test_a_two_phase_claim_leaves_the_alarms_where_they_are(api, session, 
     assert claimed.json()["pending_device_id"] == str(winning.id)
     await session.refresh(profile)
     assert profile.owner_device_id == losing.id
-    assert profile.authority_leased is True
+    assert profile.authority_leased is False, "nothing has completed yet"
 
     # The claimant arms, checks, and only then reports — which is what moves it.
     assert (
@@ -845,6 +846,88 @@ async def test_a_two_phase_claim_leaves_the_alarms_where_they_are(api, session, 
     assert profile.owner_device_id == winning.id
     assert profile.previous_owner_device_id == losing.id
     assert profile.pending_owner_device_id is None
+    assert profile.authority_leased is True, "the lease begins with the handover"
+
+
+async def test_a_claimant_that_missed_a_late_child_row_cannot_complete(
+    api, session, db_engine
+):
+    """The hole the app track read out of this path, and it worked with the
+    lease switched off.
+
+    A pending claim leaves the profile at R. A schedule then lands at H > R. The
+    claimant, which applied only through R, reports ready — and the old check
+    compared its cursor with R alone, so the report passed, the handover
+    completed, and the stored cursor was raised to the *new* revision. The gate
+    then read H as applied, the previous phone was silenced, and the new one did
+    not have the schedule it had just become responsible for.
+
+    pending R → child at H → ready with cursor R: authority stays put, and no
+    nudge goes out.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    owner, pid, losing, winning = await _handover(api, session, db_engine)
+    profile = await session.get(Profile, uuid.UUID(pid))
+    await session.execute(
+        sa_update(Profile).where(Profile.id == profile.id).values(
+            owner_device_id=losing.id, pending_owner_device_id=None, authority_leased=False
+        )
+    )
+    await session.commit()
+    await session.refresh(profile)
+
+    assert (await _claim(api, winning, pid, reports_ready=True)).status_code == 200
+    await session.refresh(profile)
+    at_claim = profile.server_seq
+
+    # A schedule arrives after the claim and takes a number above it.
+    mid = str(uuid.uuid4())
+    await push(api, owner, medications=[medication(mid, pid, "After the claim")])
+    await push(api, owner, schedules=[schedule(str(uuid.uuid4()), mid)])
+
+    r = await _ready(api, winning, pid, at_claim, at_claim)
+
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "cursor_behind_revision"
+    await session.refresh(profile)
+    assert profile.owner_device_id == losing.id, "the handover did not complete"
+    assert profile.pending_owner_device_id == winning.id, "the claim is still waiting"
+
+    pusher = RecordingPush()
+    await scan_once(async_sessionmaker(db_engine, expire_on_commit=False), pusher)
+    assert pusher.sent == [], "and nobody was told to stop ringing"
+
+
+async def test_a_pending_claim_does_not_mark_the_lease(api, session, db_engine):
+    """The lease belongs to a handover that completed.
+
+    Marked at claim time, it would let the worker hand the profile back to a
+    still earlier owner while this handover is in flight: the current owner has
+    no readiness of its own to renew, so it looks expired the moment a lease
+    exists.
+    """
+    owner, pid, losing, winning = await _handover(api, session, db_engine)
+    profile = await session.get(Profile, uuid.UUID(pid))
+    await session.execute(
+        sa_update(Profile).where(Profile.id == profile.id).values(
+            owner_device_id=losing.id, pending_owner_device_id=None,
+            previous_owner_device_id=None, authority_leased=False,
+        )
+    )
+    await session.commit()
+
+    assert (await _claim(api, winning, pid, reports_ready=True)).status_code == 200
+    await session.refresh(profile)
+
+    assert profile.authority_leased is False, "nothing has completed yet"
+    assert await alerts.hand_back_unconfirmed(session, utcnow(), timedelta(hours=1)) == 0
+
+    assert (
+        await _ready(api, winning, pid, profile.server_seq, profile.server_seq)
+    ).status_code == 204
+    await session.refresh(profile)
+    assert profile.authority_leased is True, "and now there is something to measure"
 
 
 async def test_a_superseded_claim_cannot_report(api, session, db_engine):

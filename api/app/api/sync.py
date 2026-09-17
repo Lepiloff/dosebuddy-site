@@ -42,7 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.api.deps import Caller, get_session, sync_caller
-from app.services.alerts import _profile_high_water
+from app.services.alerts import profile_high_water
 from app.api.schemas import Changes, Outcome, PullOut, PushIn, PushOut
 from app.db.models import (
     IMMUTABLE_PARENT_SQLSTATE,
@@ -559,7 +559,7 @@ async def _authority(
         covered = bool(
             ready
             and ready.revision >= profile.server_seq
-            and ready.applied_cursor >= await _profile_high_water(session, profile)
+            and ready.applied_cursor >= await profile_high_water(session, profile)
         )
         until = (
             ready.updated_at + lease

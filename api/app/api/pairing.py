@@ -479,10 +479,16 @@ async def set_reminder_authority(
         #
         # Only when somebody already holds it: a first claim has nothing to
         # protect and nothing to wait for.
+        # The claim is recorded; the lease is not. Marking it here would let
+        # the worker hand the profile back to a still earlier owner while this
+        # handover is in flight — the current owner has no readiness of its own
+        # to renew, so it would look expired the moment a lease existed. The
+        # lease is a property of a handover that completed, and it is written
+        # when it completes. Also the app track's finding.
         await session.execute(
             sa_update(Profile)
             .where(Profile.id == profile.id)
-            .values(pending_owner_device_id=device.id, authority_leased=True)
+            .values(pending_owner_device_id=device.id)
         )
         await session.commit()
         return ReminderAuthorityOut(
@@ -670,9 +676,17 @@ async def report_ready(
     if revision != profile.server_seq:
         raise HTTPException(status.HTTP_409_CONFLICT, "stale_revision")
 
-    if applied_cursor < profile.server_seq:
-        # Ready for a revision it has not been handed. Whatever the phone
-        # believes, it cannot have the rows this one is about.
+    # Against everything the profile has, not against the profile row alone.
+    #
+    # The row's own number stands still while a claim is pending, and child
+    # rows — a schedule, a dose — take theirs from the same sequence without
+    # touching it. Checking only the row therefore passed a claimant that had
+    # applied nothing since it claimed, and the handover below would then have
+    # been completed by a phone missing the very schedule it is about to become
+    # responsible for ringing. Found by the app track reading this path.
+    if applied_cursor < await alerts.profile_high_water(session, profile):
+        # Ready for rows it has not been handed. Whatever the phone believes, it
+        # cannot have what this report is about.
         raise HTTPException(status.HTTP_409_CONFLICT, "cursor_behind_revision")
 
     if claiming:
@@ -690,22 +704,32 @@ async def report_ready(
                     owner_device_id=device_id,
                     previous_owner_device_id=profile.owner_device_id,
                     pending_owner_device_id=None,
+                    # Now, not at the claim: this device has just proved it
+                    # renews readiness by sending one, so the lease has
+                    # something to measure.
+                    authority_leased=True,
                     server_seq=text("nextval('server_seq')"),
                 )
                 .returning(Profile.server_seq)
             )
         ).scalar_one()
 
-        # The report named the revision it was ready for, and the handover has
-        # just given the profile a new one. Storing the old number would leave
-        # the gate holding against a device that is ready by every measure it
-        # was asked about.
+        # The revision moves with the handover; the applied cursor does **not**.
         #
-        # Claiming to have applied through the new mark is not a fiction worth
-        # worrying about: the only thing in that profile row this device has not
-        # pulled is the ownership change it has just caused itself.
+        # It said `max(applied_cursor, moved)` and called the difference
+        # harmless, on the reasoning that the only unread thing was the
+        # ownership change the device had just caused. That reasoning is wrong
+        # whenever a child row landed between the claim and the report: the
+        # fabricated number then cleared the gate for rows the phone had never
+        # seen, the previous phone was silenced, and the new one could not ring
+        # what it did not have. Raising a proven cursor through an unread record
+        # is the one thing this protocol exists to stop.
+        #
+        # Left alone, the gate holds until the winner pulls the handover it has
+        # just caused and reports again. That costs one more round trip of the
+        # previous phone still ringing, which is the side of invariant 1 we are
+        # allowed to be on.
         revision = moved
-        applied_cursor = max(applied_cursor, moved)
 
         losing = profile.owner_device_id
         if losing is not None:

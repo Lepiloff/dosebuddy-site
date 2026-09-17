@@ -457,6 +457,10 @@ async def hand_back_unconfirmed(
                 Profile.authority_leased.is_(True),
                 Profile.previous_owner_device_id.is_not(None),
                 Profile.deleted_at_ms.is_(None),
+                # A handover in flight is not an owner who has gone quiet.
+                # Taking the profile back mid-claim would also drop a claim the
+                # claimant is still working through.
+                Profile.pending_owner_device_id.is_(None),
             )
         )
     ).all()
@@ -499,7 +503,7 @@ async def hand_back_unconfirmed(
     return handed
 
 
-async def _profile_high_water(session: AsyncSession, profile: Profile) -> int:
+async def profile_high_water(session: AsyncSession, profile: Profile) -> int:
     """The newest thing that exists for this profile, anywhere in its data.
 
     Comparing readiness against `profile.server_seq` alone was not enough, and
@@ -604,7 +608,7 @@ async def resolve_nudge(
         if (
             ready is None
             or ready.revision < profile.server_seq
-            or ready.applied_cursor < await _profile_high_water(session, profile)
+            or ready.applied_cursor < await profile_high_water(session, profile)
         ):
             return NoNudge.awaiting_winner
     elif owner_device.cursor_seq is None or owner_device.cursor_seq < profile.server_seq:
