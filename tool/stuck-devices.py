@@ -5,10 +5,18 @@ Reads `sync.push_no_progress` lines and answers the one question nobody could
 answer before redaction 19 shipped: how many real handsets are caught in the
 window where a child row is sent ahead of its parent.
 
-    ssh ubuntu@<box> 'docker logs dosebuddy-api 2>&1' | tool/stuck-devices.py
+    ssh -i <key> ubuntu@<box> 'docker logs dosebuddy-api 2>&1' \
+        | ~/Projects/own/dosebuddy-site/tool/stuck-devices.py
 
 Runs where the log is read rather than on the box: nothing is installed there,
-and the log leaves the box already — into a terminal — either way.
+and the log leaves the box already — into a terminal — either way. Full paths
+because it is run from wherever the terminal happens to be, which on 18.09 was
+not the repository.
+
+⚠️ **The window starts at the last deploy, not at the last rotation.** The api
+container is recreated on every deploy and its json-file log goes with it, so
+`docker logs` never reaches further back than the most recent one. Rotation is
+the outer bound; the deploy is the real one, and it is much closer.
 
 **Two counts, not one, and the difference is the whole point.** A device that
 has been there since the first day and has not left is the tail — the
@@ -93,8 +101,13 @@ def main() -> int:
             print(f"no {EVENT} lines in {len(span)} day(s) of log "
                   f"({span[0]} … {span[-1]}): nothing was stuck in that window")
         else:
-            print(f"no {EVENT} lines, and no dated lines at all — this input is "
-                  "not the api log, or the log is empty")
+            print(
+                f"no {EVENT} lines, and no dated application lines at all.\n"
+                "The api log starts fresh at every deploy — the container is "
+                "recreated and its log goes with it — so a log holding only "
+                "uvicorn's startup lines means this window began minutes ago, "
+                "not that nothing is stuck."
+            )
         return 0
 
     days = sorted({day for stamps in seen.values() for day in stamps})
