@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import Caller, current_caller, get_session
@@ -237,6 +237,37 @@ async def logout(
         # someone reads when asking why a phone is silent.
         device.push_token = None
         device.revoked_at = utcnow()
+
+        # And it stops owning reminders. A signed-out phone arms nothing, so
+        # leaving its id on the profile leaves a profile whose named owner
+        # cannot ring and whose other devices will not, because they read a
+        # foreign id and stand down. Nobody rings, and nothing says so.
+        #
+        # Cleared rather than handed to a particular device: an empty owner is
+        # read by every device of the account as "ours" (spec §1.4), so they all
+        # arm until one claims it. That is a duplicate, which is the side of
+        # invariant 1 we are allowed to be on, and it needs no guess about which
+        # phone the person is holding.
+        #
+        # A fresh `server_seq`, because this reaches the other phones the same
+        # way every other change does — through their cursor.
+        await session.execute(
+            update(Profile)
+            .where(Profile.owner_device_id == device.id)
+            .values(
+                owner_device_id=None,
+                previous_owner_device_id=None,
+                pending_owner_device_id=None,
+                authority_leased=False,
+                server_seq=text("nextval('server_seq')"),
+            )
+        )
+        # A claim in flight from this device dies with it too.
+        await session.execute(
+            update(Profile)
+            .where(Profile.pending_owner_device_id == device.id)
+            .values(pending_owner_device_id=None)
+        )
 
     await session.commit()
     # The access token lives out its remaining minutes. Checking a revocation

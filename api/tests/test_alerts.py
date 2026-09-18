@@ -35,9 +35,10 @@ from tests.test_sync import (
     dose,
     medication,
     ms,
-    schedule,
     preview,
+    pull,
     push,
+    schedule,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -897,6 +898,77 @@ async def test_a_claimant_that_missed_a_late_child_row_cannot_complete(
     pusher = RecordingPush()
     await scan_once(async_sessionmaker(db_engine, expire_on_commit=False), pusher)
     assert pusher.sent == [], "and nobody was told to stop ringing"
+
+
+async def test_what_an_old_phone_sees_while_a_claim_is_waiting(api, session, db_engine):
+    """The guarantee for a published 1.4.4 in the losing role, and its edge.
+
+    That client stands down the moment an ordinary pull shows a foreign
+    `owner_device_id` — it reads nothing else and will never report readiness.
+    So the guarantee has to be about what the feed says, not about when a nudge
+    is sent: while the claim waits, A's own pull must go on naming A.
+
+    It holds up to the instant the handover completes, and that instant is when
+    B has proved it covers the profile's current high-water. After it, A stands
+    down by design, and anything A writes from then on reaches B on B's next
+    pull. That last window is a boundary of the mixed fleet, not a defect this
+    side can close: nothing published to A can both tell it the truth and keep
+    it ringing.
+    """
+    owner, pid, losing, winning = await _handover(api, session, db_engine)
+    profile = await session.get(Profile, uuid.UUID(pid))
+    await session.execute(
+        sa_update(Profile).where(Profile.id == profile.id).values(
+            owner_device_id=losing.id, pending_owner_device_id=None, authority_leased=False
+        )
+    )
+    await session.commit()
+    await session.refresh(profile)
+
+    losing_tokens = {"access_token": mint_access_token(
+        api.app.state.settings.jwt_secret, losing.account_id, losing.id
+    )[0]}
+
+    assert (await _claim(api, winning, pid, reports_ready=True)).status_code == 200
+    await session.refresh(profile)
+    at_claim = profile.server_seq
+
+    seen = await pull(api, losing_tokens)
+    assert seen["authority"][pid]["owner_device_id"] == str(losing.id), "still A's"
+    assert seen["authority"][pid]["pending_device_id"] == str(winning.id)
+
+    # A goes on using its phone: a new medication and a dose after the claim.
+    mid = str(uuid.uuid4())
+    await push(api, owner, medications=[medication(mid, pid, "While waiting")])
+    await push(api, owner, dose_events=[dose(str(uuid.uuid4()), mid, pid)])
+
+    # B reports for the state it saw at the claim, which no longer covers the
+    # profile — refused, and A is still the owner in A's own feed.
+    assert (await _ready(api, winning, pid, at_claim, at_claim)).status_code == 409
+    seen = await pull(api, losing_tokens)
+    assert seen["authority"][pid]["owner_device_id"] == str(losing.id)
+    assert seen["changes"]["profiles"] == [] or all(
+        p["owner_device_id"] == str(losing.id) for p in seen["changes"]["profiles"]
+    )
+
+    # B catches up and reports again. Now the handover publishes — and only now.
+    access, _ttl = mint_access_token(
+        api.app.state.settings.jwt_secret, winning.account_id, winning.id
+    )
+    page = await api.get(
+        "/v1/sync/pull?ready=1", headers={"Authorization": f"Bearer {access}"}
+    )
+    reached = decode_cursor(page.json()["cursor"])
+    await session.refresh(profile)
+    assert (
+        await _ready(api, winning, pid, profile.server_seq, reached)
+    ).status_code == 204
+
+    seen = await pull(api, losing_tokens)
+    assert seen["authority"][pid]["owner_device_id"] == str(winning.id), (
+        "and here a published 1.4.4 stands down — which is correct, because B "
+        "has proved it holds everything the profile had"
+    )
 
 
 async def test_a_pending_claim_does_not_mark_the_lease(api, session, db_engine):
