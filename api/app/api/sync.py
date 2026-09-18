@@ -190,6 +190,39 @@ async def _upsert(
     await session.execute(stmt)
 
 
+async def _key_holders(
+    session: AsyncSession, doses
+) -> dict[str, tuple[uuid.UUID, bool]]:
+    """Which stored row already holds each key this batch is about to claim.
+
+    Read once for the batch and before anything is written, so that two twins
+    arriving in the same push are judged against the stored world rather than
+    against each other in arrival order — otherwise the answer would depend on
+    where in the list a row happened to sit.
+
+    Soft-deleted rows do not hold a key. A schedule edit puts out the old event
+    and creates a new one (app track), and if the time did not move both land on
+    the same key; refusing the replacement because of the row it replaces would
+    turn an ordinary edit into an error.
+
+    The flag is whether the holder's own device can be told to give way. Earliest
+    first so that repeated evaluation gives the same holder.
+    """
+    keys = {k for d in doses if (k := _dose_key(d.schedule_id, d.planned_at))}
+    if not keys:
+        return {}
+    rows = (await session.execute(
+        select(DoseEvent.dose_key, DoseEvent.id, Device.adopts_doses_at)
+        .join(Device, Device.id == DoseEvent.origin_device_id, isouter=True)
+        .where(DoseEvent.dose_key.in_(keys), DoseEvent.deleted_at_ms.is_(None))
+        .order_by(DoseEvent.created_at_ms, DoseEvent.id)
+    )).all()
+    held: dict[str, tuple[uuid.UUID, bool]] = {}
+    for key, row_id, adopts_at in rows:
+        held.setdefault(key, (row_id, adopts_at is not None))
+    return held
+
+
 def _dose_key(schedule_id: uuid.UUID | None, planned_at: int) -> str | None:
     """The schedule and the instant, or nothing at all.
 
@@ -226,7 +259,10 @@ def _sync_values(row, device_id: uuid.UUID) -> dict[str, Any]:
     }
 
 
-@router.post("/sync/push", response_model=PushOut)
+# `exclude_none` so that `canonical_id` appears on the one outcome that has one
+# and nowhere else. A null on every refusal would be a field that means "not
+# applicable" almost always, which is how a field stops being read at all.
+@router.post("/sync/push", response_model=PushOut, response_model_exclude_none=True)
 async def push(
     body: PushIn,
     caller: Caller = Depends(sync_caller),
@@ -443,6 +479,13 @@ async def push(
         (DoseEvent.profile_id, DoseEvent.medication_id),
         [d.id for d in changes.dose_events],
     )
+    # Who already holds each key this batch is about to claim. Read once for the
+    # whole batch, before anything is written, so that a dose and its twin
+    # arriving in the same push are judged against the stored world rather than
+    # against each other in arrival order.
+    holders = await _key_holders(session, changes.dose_events)
+    adopts = "duplicate_dose" in body.understands
+    gives_way: dict[uuid.UUID, uuid.UUID] = {}
 
     for d in changes.dose_events:
         if d.profile_id not in mine:
@@ -461,6 +504,27 @@ async def push(
             continue
         if medication_profile not in mine:
             refuse("dose_events", d.id, "forbidden_role")
+            continue
+        held = holders.get(_dose_key(d.schedule_id, d.planned_at))
+        if adopts and held is not None and held[0] != d.id:
+            # The same dose is already here under another id, and this client
+            # has said it can be told so. Refused rather than stored: two live
+            # rows for one dose is what the refusal exists to prevent, and the
+            # client that can move its own action, alarm and stock entry is the
+            # only party that knows what moving them involves — whether stock is
+            # tracked at all, how much was left in the packet, whether the
+            # history has been folded into a baseline. None of that is on the
+            # server (app track, 18.09.2026).
+            #
+            # Final, not retry: sending this row again under this id will never
+            # work. What the client sends next is the same action under the id
+            # in the answer.
+            rejected.append(Outcome(
+                id=d.id,
+                entity="dose_events",
+                code="duplicate_dose",
+                canonical_id=held[0],
+            ))
             continue
         if _moved(stored_dose_parents, d.id, d.profile_id, d.medication_id):
             # Both parents, and the second one was the gap this closes. Moving
@@ -492,6 +556,14 @@ async def push(
             # ever done with that is open (contract §3).
             "dose_key": _dose_key(d.schedule_id, d.planned_at),
         }, set_once=("dose_key",))
+        if held is not None and held[0] != d.id and held[1]:
+            # This push cannot be refused — it does not understand the refusal —
+            # and the row already holding the key belongs to a device that can
+            # be told to give way. So it is, by name on its own row. The order
+            # this covers is the one a refusal cannot: the claimant pushed its
+            # dose while this phone was offline, so the key was free when it
+            # arrived (app track, 18.09.2026).
+            gives_way[held[0]] = d.id
 
     stored_stock_parent = await _stored_parents(
         session, StockEvent, (StockEvent.medication_id,), [e.id for e in changes.stock_events]
@@ -517,6 +589,42 @@ async def push(
             "reason": e.reason,
             "dose_event_id": e.dose_event_id,
         })
+
+    for loser, winner in gives_way.items():
+        # `superseded_by IS NULL` because the column is set once: a row that has
+        # already given way stays given away, and the database refuses to move
+        # it (models.py). A second arrival must not turn into an error here.
+        #
+        # A fresh `server_seq` so the phone that has to act on this learns the
+        # ordinary way, through its cursor, rather than by being told separately.
+        await session.execute(
+            sa_update(DoseEvent)
+            .where(
+                DoseEvent.id == loser,
+                DoseEvent.superseded_by.is_(None),
+                DoseEvent.deleted_at_ms.is_(None),
+            )
+            .values(superseded_by=winner, server_seq=NEXT_SEQ)
+        )
+    if gives_way:
+        # Counts and ids only; what the doses are about is article 9 material.
+        log.info(
+            "sync.dose_superseded",
+            device_id=str(caller.device_id),
+            rows=len(gives_way),
+        )
+
+    if adopts:
+        # Learned from the push that says it, not from the pull that follows.
+        # The client's cycle pushes first (app track, `sync_service.dart:280`),
+        # so a device whose capability was read from the pull would have its
+        # first push judged as an old one — and the first push after an update
+        # is where the rows that need this are.
+        await session.execute(
+            sa_update(Device)
+            .where(Device.id == caller.device_id, Device.adopts_doses_at.is_(None))
+            .values(adopts_doses_at=utcnow())
+        )
 
     await session.commit()
 
@@ -789,6 +897,12 @@ def _row_to_wire(entity: str, row, role: Role | None = None) -> dict[str, Any]:
             "snooze_count": row.snooze_count,
             "snoozed_until": row.snoozed_until_ms,
             "dose_amount": row.dose_amount,
+            # Null on all but the rare row that lost a key it held first. The
+            # client that can act on it moves its action, its alarm and its
+            # stock entry onto the id named here and puts this row out; a client
+            # that has never heard of the field ignores it (§0), which is the
+            # right behaviour for a device that could not act on it anyway.
+            "superseded_by": str(row.superseded_by) if row.superseded_by else None,
         }
     return {
         **common,

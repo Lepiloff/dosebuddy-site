@@ -1782,3 +1782,170 @@ async def test_an_empty_key_can_still_be_filled(api, session):
         select(DoseEvent).where(DoseEvent.id == uuid.UUID(did))
     )).scalars().one()
     assert stored.dose_key == "filled-later"
+
+
+# --- one dose, one row: refused at the door, or told to give way -----------
+
+
+async def _new_client_push(api, tokens, **entities):
+    """A push that says the sender can be told its dose is already here."""
+    r = await api.post("/v1/sync/push", headers=auth_header(tokens),
+                       json={"changes": entities, "understands": ["duplicate_dose"]})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+async def test_a_new_client_is_told_which_dose_its_dose_already_is(api):
+    """The order a refusal covers: the key is taken when the claimant arrives.
+
+    Refused rather than stored, and told where to put its action instead. The
+    client moves it, because the client is the only side that knows whether
+    stock is tracked, how much was left, and whether the history was folded.
+    """
+    owner, pid, mid, sid, _ = await _owner_with_data(api)
+    first, second = str(uuid.uuid4()), str(uuid.uuid4())
+    planned = ms() + 3_600_000
+
+    await push(api, owner, dose_events=[dose(first, mid, pid, sid, planned=planned)])
+    out = await _new_client_push(
+        api, owner, dose_events=[dose(second, mid, pid, sid, planned=planned)]
+    )
+
+    assert out["retry"] == []
+    assert out["rejected"] == [{
+        "id": second, "entity": "dose_events",
+        "code": "duplicate_dose", "canonical_id": first,
+    }]
+    ids = {e["id"] for e in (await pull(api, owner))["changes"]["dose_events"]}
+    assert second not in ids, "refused, not stored"
+
+
+async def test_the_old_phone_coming_back_is_not_refused_and_the_claimant_gives_way(api):
+    """The order a refusal cannot cover, and the one the app track named.
+
+    The claimant materialises while the previous phone is offline and pushes
+    first, so the key is free and its row is stored. The old phone comes back
+    and pushes the same dose. Refusing it would leave a client that cannot read
+    a canonical id holding a quarantined row instead of a dose, so it is not
+    refused — and the row that *can* act is told to give way, by name.
+    """
+    owner, pid, mid, sid, _ = await _owner_with_data(api)
+    claimant, previous = str(uuid.uuid4()), str(uuid.uuid4())
+    planned = ms() + 3_600_000
+
+    await _new_client_push(
+        api, owner, dose_events=[dose(claimant, mid, pid, sid, planned=planned)]
+    )
+    out = await push(api, owner, dose_events=[dose(previous, mid, pid, sid, planned=planned)])
+
+    assert out["rejected"] == [] and out["retry"] == []
+    doses = {e["id"]: e for e in (await pull(api, owner))["changes"]["dose_events"]}
+    assert doses[previous]["superseded_by"] is None, "the one that cannot act keeps its row"
+    assert doses[claimant]["superseded_by"] == previous, "the one that can is told where to go"
+
+
+async def test_two_old_phones_are_left_alone(api):
+    """Neither can be told anything, so nothing is said.
+
+    Marking one of them would be a statement no device will ever read, and the
+    server would have chosen which of two identical claims to demote on no
+    grounds at all.
+    """
+    owner, pid, mid, sid, _ = await _owner_with_data(api)
+    one, two = str(uuid.uuid4()), str(uuid.uuid4())
+    planned = ms() + 3_600_000
+
+    await push(api, owner, dose_events=[dose(one, mid, pid, sid, planned=planned)])
+    await push(api, owner, dose_events=[dose(two, mid, pid, sid, planned=planned)])
+
+    doses = {e["id"]: e for e in (await pull(api, owner))["changes"]["dose_events"]}
+    assert doses[one]["superseded_by"] is None
+    assert doses[two]["superseded_by"] is None
+
+
+async def test_the_capability_is_read_from_the_push_and_not_from_the_pull(api, session):
+    """The client pushes before it pulls, so a capability read from the pull
+    would misclassify the first push after an update — which is the push most
+    likely to carry the rows that need this."""
+    owner, pid, mid, sid, _ = await _owner_with_data(api)
+    device_id = uuid.UUID((await session.execute(
+        select(Device.id).where(Device.account_id == uuid.UUID(owner["account_id"]))
+    )).scalars().first().hex)
+
+    await _new_client_push(api, owner, dose_events=[
+        dose(str(uuid.uuid4()), mid, pid, sid, planned=ms() + 3_600_000),
+    ])
+
+    device = await session.get(Device, device_id)
+    await session.refresh(device)
+    assert device.adopts_doses_at is not None
+
+
+async def test_a_resent_dose_is_not_a_duplicate_of_itself(api):
+    """The commonest push there is. Same id, same key — one row, no refusal."""
+    owner, pid, mid, sid, _ = await _owner_with_data(api)
+    did = str(uuid.uuid4())
+    planned = ms() + 3_600_000
+
+    await _new_client_push(api, owner, dose_events=[dose(did, mid, pid, sid, planned=planned)])
+    out = await _new_client_push(api, owner, dose_events=[
+        dose(did, mid, pid, sid, "taken", at=ms() + 5000, planned=planned),
+    ])
+
+    assert out["rejected"] == [] and out["retry"] == []
+    doses = [e for e in (await pull(api, owner))["changes"]["dose_events"] if e["id"] == did]
+    assert len(doses) == 1 and doses[0]["status"] == "taken"
+
+
+async def test_a_replaced_dose_does_not_block_its_replacement(api):
+    """Changing a schedule puts out the old event and creates a new one. If the
+    time did not move, both land on the same key — and refusing the replacement
+    because of the row it replaces would turn an ordinary edit into an error."""
+    owner, pid, mid, sid, _ = await _owner_with_data(api)
+    old_id, new_id = str(uuid.uuid4()), str(uuid.uuid4())
+    planned = ms() + 3_600_000
+
+    await _new_client_push(api, owner, dose_events=[dose(old_id, mid, pid, sid, planned=planned)])
+    gone = dose(old_id, mid, pid, sid, at=ms() + 5000, planned=planned)
+    gone["deleted_at"] = ms() + 5000
+    await _new_client_push(api, owner, dose_events=[gone])
+
+    out = await _new_client_push(api, owner, dose_events=[
+        dose(new_id, mid, pid, sid, planned=planned),
+    ])
+
+    assert out["rejected"] == [], "a soft-deleted row holds no key"
+
+
+async def test_an_ad_hoc_dose_never_collides(api):
+    """No key, no claim on one. Two unscheduled doses in the same minute are two
+    different events, and the server must not decide otherwise."""
+    owner, pid, mid, _, _ = await _owner_with_data(api)
+    one, two = str(uuid.uuid4()), str(uuid.uuid4())
+    t = ms() + 3_600_000
+
+    await _new_client_push(api, owner, dose_events=[dose(one, mid, pid, None, planned=t)])
+    out = await _new_client_push(api, owner, dose_events=[dose(two, mid, pid, None, planned=t)])
+
+    assert out["rejected"] == []
+    ids = {e["id"] for e in (await pull(api, owner))["changes"]["dose_events"]}
+    assert {one, two} <= ids
+
+
+async def test_the_supersede_is_written_once_and_stays(api, session):
+    """A second old-phone arrival must not move it, and must not error either:
+    the database refuses the move, so the write is guarded rather than retried.
+    """
+    owner, pid, mid, sid, _ = await _owner_with_data(api)
+    claimant, previous, later_one = (str(uuid.uuid4()) for _ in range(3))
+    planned = ms() + 3_600_000
+
+    await _new_client_push(
+        api, owner, dose_events=[dose(claimant, mid, pid, sid, planned=planned)]
+    )
+    await push(api, owner, dose_events=[dose(previous, mid, pid, sid, planned=planned)])
+    out = await push(api, owner, dose_events=[dose(later_one, mid, pid, sid, planned=planned)])
+
+    assert out["rejected"] == [] and out["retry"] == []
+    doses = {e["id"]: e for e in (await pull(api, owner))["changes"]["dose_events"]}
+    assert doses[claimant]["superseded_by"] == previous, "still the first one it was told"

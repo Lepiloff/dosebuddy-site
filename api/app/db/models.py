@@ -152,6 +152,24 @@ class Device(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    # And this one says the device can be told that a dose it sent is already
+    # here under another id. Separate from `ready_protocol_at` rather than
+    # folded into it, because the two are learned at opposite ends of the sync
+    # cycle: readiness is written on pull, and the client pushes before it pulls
+    # (app track, `sync_service.dart:280`). Inferring "understands duplicates"
+    # from a field written on pull would misread the first push of every freshly
+    # updated phone as coming from an old one — and the first push is where the
+    # rows that need the new answer are.
+    #
+    # Written from the push that declares it (`PushIn.understands`), so the
+    # statement and the rows it applies to arrive together.
+    #
+    # Read afterwards, for the case the refusal cannot cover: a row that is
+    # already stored, from a device that turns out to be able to give way.
+    adopts_doses_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -555,6 +573,24 @@ class DoseEvent(Base, SyncMixin):
     # one that happens to share its minute.
     dose_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
+    # Set when this row lost a key it was holding first — the one case a refusal
+    # at push time cannot reach. The claimant pushes its dose while the previous
+    # phone is offline, so the key is free and the row is stored; the old phone
+    # comes back and pushes the same dose, and it is never refused, because a
+    # client that cannot be told about a foreign id would be left with a
+    # quarantined row instead of a dose (app track, 18.09.2026).
+    #
+    # So the row that *can* give way is told to. Named on the row rather than
+    # inferred from the key, because "my dose vanished, I will look for a live
+    # twin at the same planned time" is a deduction a client can get wrong in
+    # silence. The server does no more than name it: moving the action, the
+    # alarm and the stock entry is the client's, which is the only side that
+    # knows whether stock is tracked at all, how much was left, and whether the
+    # history has been folded.
+    superseded_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("dose_events.id", ondelete="SET NULL"), nullable=True
+    )
+
     # Not monotonic: missed can return to pending when the intake window is
     # widened, and taken can return to pending from the calendar. Nothing here
     # may assume it only moves forward (05d §1.1а).
@@ -824,6 +860,7 @@ EXECUTE FUNCTION parent_is_immutable('{column}')
 # is the half that does not depend on which code path did the writing.
 SET_ONCE_TRIGGERS = [
     ("dose_events", "dose_events_key_is_set_once", "dose_key"),
+    ("dose_events", "dose_events_supersede_is_set_once", "superseded_by"),
 ]
 
 

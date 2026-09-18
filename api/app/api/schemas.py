@@ -96,13 +96,40 @@ class Changes(BaseModel):
 
 
 class PushIn(BaseModel):
+    """What is being sent, and what the sender is able to be told about it.
+
+    `understands` is the client declaring a capability per request, and it is
+    written that way rather than read from the device row on purpose. The
+    obvious alternative — infer it from `devices.ready_protocol_at` — cannot
+    work for the answer it would be needed for first: the client's sync cycle
+    pushes before it pulls (app track, `sync_service.dart:280`), and
+    `ready_protocol_at` is written on pull. The very first push of a freshly
+    updated phone would be classified as old, which is exactly the push most
+    likely to be carrying the rows that need the new answer.
+
+    Unknown names are ignored rather than refused: this list is a statement
+    about the sender, and a sender that knows a code this server has never
+    heard of is not making an error.
+    """
+
     changes: Changes = Changes()
+    understands: list[str] = []
 
 
 class Outcome(BaseModel):
+    """One record's fate, and — for the codes that have one — where to look next.
+
+    `canonical_id` is set only on `duplicate_dose`, and it is the whole point of
+    that refusal: "this dose is already here under another id, move your action
+    onto it". A refusal that only said no would leave the client to find the
+    other row by guessing at a key, which is a deduction it can get wrong
+    silently.
+    """
+
     id: uuid.UUID
     entity: str
     code: str
+    canonical_id: uuid.UUID | None = None
 
 
 class PushOut(BaseModel):
