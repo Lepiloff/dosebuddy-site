@@ -1662,3 +1662,123 @@ async def test_each_device_is_recorded_separately(api, session):
     pulled = [d for d in devices.values() if d.cursor_seq is not None]
     assert len(pulled) == 1, "only the device that pulled has a record"
     del second
+
+
+# --- which dose this is, as opposed to which row ---------------------------
+#
+# A handover hands both phones the same job for a while, deliberately: without
+# the overlap the incoming phone would report a readiness it does not have. The
+# price is that both materialise the same scheduled dose and each invents an id
+# for it, and the server sees two rows.
+#
+# Whether they are ever merged is open and is not a server decision (contract
+# §3). What is not open is whether the answer stays available: the key is the
+# schedule and the planned instant, and `schedule_id` is set null on every dose
+# a schedule ever produced the day that schedule is deleted. Computed later, it
+# is computed from nothing.
+
+
+async def test_two_phones_materialising_one_dose_agree_on_which_dose_it_was(api, session):
+    """Two ids, one key. That is the whole of what the server records.
+
+    Not "medication plus time", which two schedules of one medication can share
+    (app track, 2026-09-18) — the schedule is what makes them the same event.
+    """
+    owner, pid, mid, sid, _ = await _owner_with_data(api)
+    first, second = str(uuid.uuid4()), str(uuid.uuid4())
+    planned = ms() + 3_600_000
+
+    await push(api, owner, dose_events=[dose(first, mid, pid, sid, planned=planned)])
+    await push(api, owner, dose_events=[dose(second, mid, pid, sid, planned=planned)])
+
+    keys = {
+        str(row_id): key
+        for row_id, key in (await session.execute(
+            select(DoseEvent.id, DoseEvent.dose_key)
+            .where(DoseEvent.id.in_([uuid.UUID(first), uuid.UUID(second)]))
+        )).all()
+    }
+    assert keys[first] == keys[second] is not None
+    assert keys[first] == f"{sid}:{planned}"
+
+
+async def test_a_dose_that_loses_its_schedule_keeps_its_key(api, session):
+    """The case the column exists for.
+
+    Deleting a schedule sets `schedule_id` null on every dose it produced, and
+    the next ordinary edit to such a dose arrives with no schedule on it. If the
+    key were recomputed from what arrived it would come back empty, and the
+    history that most needs it is exactly the history that has been edited since.
+    """
+    owner, pid, mid, sid, _ = await _owner_with_data(api)
+    did = str(uuid.uuid4())
+    planned = ms() + 3_600_000
+    await push(api, owner, dose_events=[dose(did, mid, pid, sid, planned=planned)])
+
+    await push(api, owner, dose_events=[
+        dose(did, mid, pid, None, "taken", at=ms() + 5000, planned=planned),
+    ])
+
+    stored = (await session.execute(
+        select(DoseEvent).where(DoseEvent.id == uuid.UUID(did))
+    )).scalars().one()
+    await session.refresh(stored)
+    assert stored.status == "taken", "the edit itself landed"
+    assert stored.schedule_id is None
+    assert stored.dose_key == f"{sid}:{planned}"
+
+
+async def test_an_ad_hoc_dose_has_no_key_and_is_not_given_one(api, session):
+    """Null is the answer, not a gap.
+
+    A dose nobody scheduled is not the same event as a scheduled one that
+    happens to fall in its minute, and inventing a key from medication and time
+    would say it was.
+    """
+    owner, pid, mid, _, _ = await _owner_with_data(api)
+    did = str(uuid.uuid4())
+
+    await push(api, owner, dose_events=[dose(did, mid, pid, None)])
+    await push(api, owner, dose_events=[dose(did, mid, pid, None, "taken", at=ms() + 5000)])
+
+    stored = (await session.execute(
+        select(DoseEvent).where(DoseEvent.id == uuid.UUID(did))
+    )).scalars().one()
+    await session.refresh(stored)
+    assert stored.dose_key is None
+
+
+async def test_the_database_refuses_to_move_a_key_that_is_already_set(api, session):
+    """The push path preserves it; this is the half that does not depend on the
+    path. A key is lost by being recomputed in good faith, and good faith is
+    what the next piece of code that writes to this table will be acting in."""
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+
+    with pytest.raises(DBAPIError) as caught:
+        await session.execute(
+            update(DoseEvent)
+            .where(DoseEvent.id == uuid.UUID(did))
+            .values(dose_key="something-else")
+        )
+    assert caught.value.orig.sqlstate == IMMUTABLE_PARENT_SQLSTATE
+    await session.rollback()
+
+
+async def test_an_empty_key_can_still_be_filled(api, session):
+    """Set once, not set never. Rows that predate the column have no key, and
+    the backfill — and any later one — has to be able to write it."""
+    owner, pid, mid, _, _ = await _owner_with_data(api)
+    did = str(uuid.uuid4())
+    await push(api, owner, dose_events=[dose(did, mid, pid, None)])
+
+    await session.execute(
+        update(DoseEvent)
+        .where(DoseEvent.id == uuid.UUID(did))
+        .values(dose_key="filled-later")
+    )
+    await session.commit()
+
+    stored = (await session.execute(
+        select(DoseEvent).where(DoseEvent.id == uuid.UUID(did))
+    )).scalars().one()
+    assert stored.dose_key == "filled-later"

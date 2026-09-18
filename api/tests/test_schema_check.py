@@ -12,7 +12,7 @@ schema per test, and rebuilding re-runs the DDL the models attach.
 import pytest
 from sqlalchemy import text
 
-from app.db.models import PARENT_IS_IMMUTABLE_TRIGGERS
+from app.db.models import PARENT_IS_IMMUTABLE_TRIGGERS, SET_ONCE_TRIGGERS
 from app.db.schema_check import _function_problems, _trigger_problems
 
 pytestmark = pytest.mark.asyncio
@@ -69,7 +69,7 @@ async def test_a_function_that_keeps_the_name_and_drops_the_refusal_is_caught(se
 
 async def test_a_missing_function_is_named(session):
     conn = await session.connection()
-    for table, name, _column in PARENT_IS_IMMUTABLE_TRIGGERS:
+    for table, name, _column in PARENT_IS_IMMUTABLE_TRIGGERS + SET_ONCE_TRIGGERS:
         await conn.execute(text(f"DROP TRIGGER {name} ON {table}"))
     await conn.execute(text("DROP FUNCTION parent_is_immutable()"))
 

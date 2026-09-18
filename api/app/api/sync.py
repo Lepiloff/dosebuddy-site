@@ -138,7 +138,12 @@ def owned_ids(profiles: dict[uuid.UUID, Role]) -> set[uuid.UUID]:
 NEXT_SEQ = sql_text(f"nextval('{SERVER_SEQ}')")
 
 
-async def _upsert(session: AsyncSession, model, values: dict[str, Any]) -> None:
+async def _upsert(
+    session: AsyncSession,
+    model,
+    values: dict[str, Any],
+    set_once: tuple[str, ...] = (),
+) -> None:
     """Insert, or update only when the incoming write is genuinely newer.
 
     Last-write-wins on the whole record. Merging field by field would produce
@@ -158,6 +163,13 @@ async def _upsert(session: AsyncSession, model, values: dict[str, Any]) -> None:
 
     It also makes a tie between two devices deterministic rather than a race
     settled by whichever request arrived last.
+
+    `set_once` names the columns that last-write-wins must not reach. They are
+    not the device's to change — the server derives them — and the derivation
+    can stop being possible while the row lives on: `dose_key` is computed from
+    a `schedule_id` that deleting the schedule sets null. Recomputed on a later
+    write it would come back empty and take the answer with it, so what is there
+    stays, and only an empty one is filled.
     """
     stmt = insert(model).values(**values, server_seq=NEXT_SEQ)
     excluded = stmt.excluded
@@ -165,6 +177,10 @@ async def _upsert(session: AsyncSession, model, values: dict[str, Any]) -> None:
         index_elements=[model.id],
         set_={
             **{k: getattr(excluded, k) for k in values if k != "id"},
+            **{
+                k: func.coalesce(getattr(model, k), getattr(excluded, k))
+                for k in set_once
+            },
             "server_seq": NEXT_SEQ,
         },
         where=sa_tuple(
@@ -172,6 +188,18 @@ async def _upsert(session: AsyncSession, model, values: dict[str, Any]) -> None:
         ) > sa_tuple(model.updated_at_ms, model.origin_device_id, model.op_seq),
     )
     await session.execute(stmt)
+
+
+def _dose_key(schedule_id: uuid.UUID | None, planned_at: int) -> str | None:
+    """The schedule and the instant, or nothing at all.
+
+    Nothing at all for an ad-hoc dose, and that is the answer rather than a gap
+    to fill later: it was never produced by a schedule, so two of them sharing a
+    minute with a scheduled dose are still two different events. The client's
+    own uniqueness is `schedule_id + planned_at` (app track, 2026-09-18) and
+    this is the same sentence, kept where deleting the schedule cannot reach it.
+    """
+    return None if schedule_id is None else f"{schedule_id}:{planned_at}"
 
 
 def _sqlstate(exc: DBAPIError) -> str | None:
@@ -230,7 +258,13 @@ async def push(
         """Not the client's fault. The same record will land once its parent has."""
         retry.append(Outcome(id=row_id, entity=entity, code=code))
 
-    async def apply(entity: str, model, row_id: uuid.UUID, values: dict[str, Any]) -> None:
+    async def apply(
+        entity: str,
+        model,
+        row_id: uuid.UUID,
+        values: dict[str, Any],
+        set_once: tuple[str, ...] = (),
+    ) -> None:
         # A savepoint per record, so one failure does not poison the batch. A
         # foreign key that is not there yet is the common case — the parent is
         # simply on a later page or a later push — and it is recoverable, so it
@@ -238,7 +272,7 @@ async def push(
         # wrong.
         try:
             async with session.begin_nested():
-                await _upsert(session, model, values)
+                await _upsert(session, model, values, set_once)
         except DBAPIError as exc:
             if _sqlstate(exc) == IMMUTABLE_PARENT_SQLSTATE:
                 # The row asked to change its parent and the database refused
@@ -451,7 +485,13 @@ async def push(
             "snooze_count": d.snooze_count,
             "snoozed_until_ms": d.snoozed_until,
             "dose_amount": d.dose_amount,
-        })
+            # Written here because here is where the schedule is still known
+            # (models.py). Two phones materialising the same scheduled dose
+            # during a handover each send their own id and the same key, which
+            # is the only record that they meant one event; whether anything is
+            # ever done with that is open (contract §3).
+            "dose_key": _dose_key(d.schedule_id, d.planned_at),
+        }, set_once=("dose_key",))
 
     stored_stock_parent = await _stored_parents(
         session, StockEvent, (StockEvent.medication_id,), [e.id for e in changes.stock_events]

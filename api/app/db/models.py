@@ -536,6 +536,25 @@ class DoseEvent(Base, SyncMixin):
 
     planned_at_ms: Mapped[int] = mapped_column(BigInteger, index=True)
 
+    # Which dose in the world this is, as opposed to which row. Two phones that
+    # both materialise the same scheduled dose during a handover each invent an
+    # id for it, and the server has no way to see afterwards that they meant one
+    # thing — `planned_at_ms` plus the medication is not enough, because two
+    # schedules of the same medication may fall at the same minute (app track,
+    # 2026-09-18).
+    #
+    # So it is recorded at the moment it is still knowable: `schedule_id` with
+    # the planned instant, written on first sight and never again. Never again
+    # is the point — deleting a schedule sets `schedule_id` null on every dose
+    # it ever produced, so a key computed later is a key already lost.
+    #
+    # Nothing merges on it yet. Whether doses are ever canonicalised is open
+    # (contract §3) and is not a server decision; this only keeps the answer
+    # available to whoever makes it. A dose with no schedule has no key and
+    # cannot be given one: an ad-hoc dose is not the same event as a scheduled
+    # one that happens to share its minute.
+    dose_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
     # Not monotonic: missed can return to pending when the intake window is
     # widened, and taken can return to pending from the calendar. Nothing here
     # may assume it only moves forward (05d §1.1а).
@@ -797,6 +816,28 @@ EXECUTE FUNCTION parent_is_immutable('{column}')
 """
 
 
+# Same refusal, one letter of difference in when it fires: a column that may be
+# filled once and then never altered. `dose_key` is written by the server the
+# first time a scheduled dose is seen, and a later write must not be able to
+# move it — least of all to null, which is what recomputing it after the
+# schedule was deleted would produce. The push path already preserves it; this
+# is the half that does not depend on which code path did the writing.
+SET_ONCE_TRIGGERS = [
+    ("dose_events", "dose_events_key_is_set_once", "dose_key"),
+]
+
+
+def _set_once_trigger(table: str, name: str, column: str) -> str:
+    return f"""
+CREATE TRIGGER {name}
+BEFORE UPDATE ON {table}
+FOR EACH ROW WHEN (
+    OLD.{column} IS NOT NULL AND NEW.{column} IS DISTINCT FROM OLD.{column}
+)
+EXECUTE FUNCTION parent_is_immutable('{column}')
+"""
+
+
 # On the metadata rather than on each table, so the function is created once and
 # before every trigger that calls it. Attached at all so that a database built
 # from the models carries the guard: the test suite builds its schema that way,
@@ -807,4 +848,8 @@ for _table, _name, _column in PARENT_IS_IMMUTABLE_TRIGGERS:
         Base.metadata,
         "after_create",
         DDL(_parent_is_immutable_trigger(_table, _name, _column)),
+    )
+for _table, _name, _column in SET_ONCE_TRIGGERS:
+    event.listen(
+        Base.metadata, "after_create", DDL(_set_once_trigger(_table, _name, _column))
     )
