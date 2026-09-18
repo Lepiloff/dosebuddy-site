@@ -583,12 +583,15 @@ async def test_the_retry_is_rate_limited(api):
     assert codes[10:] == [429, 429]
 
 
-async def test_signing_out_gives_up_the_reminders(api, session):
-    """A signed-out phone arms nothing, so it must not go on owning the alarms.
+async def test_signing_out_gives_up_the_reminders_when_the_phone_says_it_went_quiet(
+    api, session
+):
+    """The device says whether it stopped ringing; the server does not guess.
 
-    Left as the named owner it produces the state this whole design exists to
-    prevent and the one nothing reports: it cannot ring, and every other phone
-    of the account reads a foreign id and stands down. Nobody rings.
+    A phone that reports quiet must not stay the named owner, or it produces
+    the state this design exists to prevent and the one nothing reports: it
+    cannot ring, and every other phone of the account reads a foreign id and
+    stands down. Nobody rings.
 
     Cleared rather than handed to a particular device — an empty owner is read
     by every device of the account as its own, so they all arm until one claims
@@ -613,8 +616,44 @@ async def test_signing_out_gives_up_the_reminders(api, session):
     assert profile.owner_device_id == device_id
     before = profile.server_seq
 
-    assert (await api.post("/v1/auth/logout", headers=auth_header(pair))).status_code == 204
+    out = await api.post(
+        "/v1/auth/logout", headers=auth_header(pair), json={"reminders_stopped": True}
+    )
+    assert out.status_code == 204, out.text
 
     await session.refresh(profile)
     assert profile.owner_device_id is None, "it cannot ring, so it does not own"
     assert profile.server_seq > before, "and the other phones learn by their cursor"
+
+
+async def test_a_phone_that_keeps_its_alarms_keeps_the_reminders(api, session):
+    """An ordinary sign-out leaves the app's medications and alarms in place.
+
+    The phone goes on ringing from what it already has; it simply stops being
+    correctable. Taking ownership away from it would arm every other phone of
+    the account — an empty owner reads as "ours" everywhere — and the person
+    would get a duplicate out of a sign-out that changed nothing about who is
+    ringing.
+
+    So a client that says nothing keeps what it has. Only the client that
+    reports quiet gives it up, and no old build can report that.
+    """
+    pair = await sign_in(api, "sub-signing-out-loudly")
+    profile_id = await make_profile(session, pair["account_id"])
+    device_id = uuid.UUID(
+        (await session.execute(
+            select(Device.id).where(Device.account_id == uuid.UUID(pair["account_id"]))
+        )).scalars().one().hex
+    )
+    claimed = await api.post(
+        f"/v1/profiles/{profile_id}/reminder-authority",
+        headers=auth_header(pair),
+        json={"device_id": str(device_id)},
+    )
+    assert claimed.status_code == 200, claimed.text
+
+    assert (await api.post("/v1/auth/logout", headers=auth_header(pair))).status_code == 204
+
+    profile = await session.get(Profile, profile_id)
+    await session.refresh(profile)
+    assert profile.owner_device_id == device_id, "it still rings, so it still owns"

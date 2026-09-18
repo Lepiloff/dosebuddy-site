@@ -199,9 +199,34 @@ async def refresh(
     return pair
 
 
+class LogoutIn(BaseModel):
+    """What the server cannot find out for itself: whether the phone went quiet.
+
+    Signing out revokes credentials, and for a while the code here assumed that
+    a phone without credentials also stops ringing. It does not. The app keeps
+    its medications and its alarms through an ordinary sign-out (app track,
+    2026-09-18), so a signed-out phone is still a working ringer — just one that
+    can no longer be corrected by anything the server says.
+
+    Which makes the ownership question unanswerable from the server side. If the
+    device still rings, clearing its id hands every other phone of the account
+    an empty owner, they all read it as "ours", and the person gets a duplicate
+    for nothing. If the device has genuinely gone quiet, leaving its id there is
+    the silence this whole design exists to prevent.
+
+    So the device says which of the two it is, and the default is the side that
+    cannot produce silence: a client that sends nothing keeps its ownership,
+    because a client that sends nothing is old, and an old client rings.
+    """
+
+    reminders_stopped: bool = False
+
+
 @router.post("/auth/logout", status_code=status.HTTP_204_NO_CONTENT)
 async def logout(
-    caller: Caller = Depends(current_caller), session: AsyncSession = Depends(get_session)
+    body: LogoutIn | None = None,
+    caller: Caller = Depends(current_caller),
+    session: AsyncSession = Depends(get_session),
 ) -> None:
     """Signing out has to reach every credential the device holds.
 
@@ -238,36 +263,37 @@ async def logout(
         device.push_token = None
         device.revoked_at = utcnow()
 
-        # And it stops owning reminders. A signed-out phone arms nothing, so
-        # leaving its id on the profile leaves a profile whose named owner
-        # cannot ring and whose other devices will not, because they read a
-        # foreign id and stand down. Nobody rings, and nothing says so.
-        #
-        # Cleared rather than handed to a particular device: an empty owner is
-        # read by every device of the account as "ours" (spec §1.4), so they all
-        # arm until one claims it. That is a duplicate, which is the side of
-        # invariant 1 we are allowed to be on, and it needs no guess about which
-        # phone the person is holding.
-        #
-        # A fresh `server_seq`, because this reaches the other phones the same
-        # way every other change does — through their cursor.
-        await session.execute(
-            update(Profile)
-            .where(Profile.owner_device_id == device.id)
-            .values(
-                owner_device_id=None,
-                previous_owner_device_id=None,
-                pending_owner_device_id=None,
-                authority_leased=False,
-                server_seq=text("nextval('server_seq')"),
-            )
-        )
-        # A claim in flight from this device dies with it too.
+        # A claim in flight from this device dies with it, whatever it says
+        # about its alarms. A phone on its way out cannot be about to become the
+        # owner: nothing will arrive to confirm the claim, and the profile would
+        # sit waiting for a device that has stopped asking.
         await session.execute(
             update(Profile)
             .where(Profile.pending_owner_device_id == device.id)
             .values(pending_owner_device_id=None)
         )
+
+        # Ownership only on the device's word (see `LogoutIn`). Cleared rather
+        # than handed to a particular device: an empty owner is read by every
+        # device of the account as "ours" (spec §1.4), so they all arm until one
+        # claims it. That is a duplicate, which is the side of invariant 1 we
+        # are allowed to be on, and it needs no guess about which phone the
+        # person is holding.
+        #
+        # A fresh `server_seq`, because this reaches the other phones the same
+        # way every other change does — through their cursor.
+        if body is not None and body.reminders_stopped:
+            await session.execute(
+                update(Profile)
+                .where(Profile.owner_device_id == device.id)
+                .values(
+                    owner_device_id=None,
+                    previous_owner_device_id=None,
+                    pending_owner_device_id=None,
+                    authority_leased=False,
+                    server_seq=text("nextval('server_seq')"),
+                )
+            )
 
     await session.commit()
     # The access token lives out its remaining minutes. Checking a revocation
