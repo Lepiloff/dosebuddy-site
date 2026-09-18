@@ -18,6 +18,12 @@ What it checks is what cannot be seen from outside and is load-bearing:
   table, guarding the right column, and calls the shared function;
 * that function still has the body the models declare.
 
+It also prints the authority lease as **this box** has it, which is a different
+statement from the default in the source. A setting that decides whether the
+server may take reminders off a phone should be read from the environment that
+will act on it, and read out loud, in the log of the deploy that installs it.
+Asked for by the app track on 2026-09-17.
+
 The last one was missing until the app track's review asked for it, and what it
 left out is the shape of a proof that stops one step early: a trigger proves the
 *name* it calls, and a name can be pointed at anything. One `CREATE OR REPLACE`
@@ -131,10 +137,12 @@ def main() -> int:
     if found:
         print(f"schema check FAILED with {len(found)} problem(s)", file=sys.stderr)
         return 1
+    minutes = get_settings().authority_lease_minutes
+    lease = f"{minutes} min" if minutes else "off"
     print(
         "schema check: at head, "
         f"{len(PARENT_IS_IMMUTABLE_TRIGGERS)} parent-immutability triggers in place, "
-        "function body as declared"
+        f"function body as declared, authority lease {lease}"
     )
     return 0
 

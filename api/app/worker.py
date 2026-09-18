@@ -187,12 +187,29 @@ async def main() -> None:
     sessionmaker = create_sessionmaker(engine)
     push = build_push(settings)
 
-    log.info("worker.start", push=type(push).__name__, interval=SCAN_INTERVAL_SECONDS)
+    # The lease is named at startup because this process is the one that acts
+    # on it: it is the only thing here that can take reminders off a phone, and
+    # a setting with that power should say so where somebody reading the log to
+    # find out why a profile moved will see it.
+    log.info(
+        "worker.start",
+        push=type(push).__name__,
+        interval=SCAN_INTERVAL_SECONDS,
+        authority_lease_minutes=settings.authority_lease_minutes,
+    )
     last_sweep: datetime | None = None
     try:
         while True:
             try:
-                sent = await scan_once(sessionmaker, push)
+                # The lease travels from the settings this process was built
+                # with. Left off the call it defaulted to None, which reads as
+                # "no lease" — the mechanism would have been inert no matter
+                # what the environment said, and the deploy log would still have
+                # printed the number. Wiring nobody calls is the shape of defect
+                # this codebase has found twice already.
+                sent = await scan_once(
+                    sessionmaker, push, lease=settings.authority_lease
+                )
                 if sent:
                     log.info("worker.sent", count=sent)
             except Exception:  # noqa: BLE001
