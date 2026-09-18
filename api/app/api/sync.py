@@ -205,6 +205,13 @@ async def _key_holders(
     the same key; refusing the replacement because of the row it replaces would
     turn an ordinary edit into an error.
 
+    Neither does a row that has already given way, and that one was found by the
+    app track after the first version shipped here (18.09.2026). A superseded row
+    is still live and, being the earliest, was still being handed out: a third
+    phone was told to move its dose onto a row that had itself been told to move.
+    The answer has to be the end of the chain, so the rows that have left it are
+    not in the running.
+
     The flag is whether the holder's own device can be told to give way. Earliest
     first so that repeated evaluation gives the same holder.
     """
@@ -214,7 +221,11 @@ async def _key_holders(
     rows = (await session.execute(
         select(DoseEvent.dose_key, DoseEvent.id, Device.adopts_doses_at)
         .join(Device, Device.id == DoseEvent.origin_device_id, isouter=True)
-        .where(DoseEvent.dose_key.in_(keys), DoseEvent.deleted_at_ms.is_(None))
+        .where(
+            DoseEvent.dose_key.in_(keys),
+            DoseEvent.deleted_at_ms.is_(None),
+            DoseEvent.superseded_by.is_(None),
+        )
         .order_by(DoseEvent.created_at_ms, DoseEvent.id)
     )).all()
     held: dict[str, tuple[uuid.UUID, bool]] = {}
@@ -483,6 +494,24 @@ async def push(
     # whole batch, before anything is written, so that a dose and its twin
     # arriving in the same push are judged against the stored world rather than
     # against each other in arrival order.
+    # Check and insert have to be one indivisible step, or two pushes both find
+    # the key free and both store a row — the state this whole section exists to
+    # prevent, arrived at by two clients that each did everything right (app
+    # track, 18.09.2026). A unique index cannot express it: two rows from two old
+    # clients are *allowed*, because neither of them can be told to give way.
+    #
+    # So the serialisation is a lock, and it is per profile rather than per key:
+    # keys live inside schedules, schedules inside a profile, so two pushes that
+    # can collide always share one. Per key it would be thousands of locks for a
+    # large batch; per account it would serialise a family's phones for doses
+    # that could never meet.
+    #
+    # Sorted, so that two batches touching the same pair of profiles take them in
+    # the same order and cannot deadlock against each other. Held to commit,
+    # which is what makes the supersede below indivisible too.
+    for pid in sorted({d.profile_id for d in changes.dose_events} & mine):
+        await session.execute(select(func.pg_advisory_xact_lock(func.hashtext(str(pid)))))
+
     holders = await _key_holders(session, changes.dose_events)
     adopts = "duplicate_dose" in body.understands
     gives_way: dict[uuid.UUID, uuid.UUID] = {}

@@ -1949,3 +1949,97 @@ async def test_the_supersede_is_written_once_and_stays(api, session):
     assert out["rejected"] == [] and out["retry"] == []
     doses = {e["id"]: e for e in (await pull(api, owner))["changes"]["dose_events"]}
     assert doses[claimant]["superseded_by"] == previous, "still the first one it was told"
+
+
+async def _devices(api, subject, count):
+    """One account, several handsets. Capability is per device, so the two
+    sides of a handover have to be two of them."""
+    return [await sign_in(api, subject) for _ in range(count)]
+
+
+async def test_the_third_phone_is_sent_to_the_end_of_the_chain(api):
+    """A row that has given way does not hold the key it gave away.
+
+    Left in the running it was still the earliest, so it was still the answer:
+    a third phone would be told to move its dose onto a row that had itself been
+    told to move, and the chain would go on lengthening with nobody at the end.
+    """
+    subject = f"owner-{uuid.uuid4()}"
+    claimant, previous, third = await _devices(api, subject, 3)
+    pid, mid, sid = (str(uuid.uuid4()) for _ in range(3))
+    await push(api, claimant, profiles=[profile(pid)])
+    await push(api, claimant, medications=[medication(mid, pid)], schedules=[schedule(sid, mid)])
+
+    b, a, c = (str(uuid.uuid4()) for _ in range(3))
+    planned = ms() + 3_600_000
+    await _new_client_push(api, claimant, dose_events=[dose(b, mid, pid, sid, planned=planned)])
+    await push(api, previous, dose_events=[dose(a, mid, pid, sid, planned=planned)])
+
+    out = await _new_client_push(api, third, dose_events=[
+        dose(c, mid, pid, sid, planned=planned),
+    ])
+
+    assert out["rejected"] == [{
+        "id": c, "entity": "dose_events", "code": "duplicate_dose", "canonical_id": a,
+    }], "the survivor, not the row that already gave way"
+
+
+async def test_two_pushes_at_once_do_not_both_find_the_key_free(api, monkeypatch):
+    """Check and insert are one step, or two clients each doing everything right
+    arrive at the state the whole section exists to prevent.
+
+    A unique index cannot stand in for it: two rows from two old clients are
+    allowed, because neither of them can be told to give way.
+
+    The interleaving is forced rather than hoped for. Two requests fired at once
+    do not reliably meet inside the critical section — the first version of this
+    test passed with the lock taken out, which makes it a test of nothing — so
+    each push is held at the point where it has looked and not yet written,
+    until the other has looked too. With the serialisation in place the second
+    push cannot reach that point, waits out the timeout, and then sees a row
+    that is really there; without it, both see a free key and both write.
+    """
+    import app.api.sync as sync_module
+
+    real_holders = sync_module._key_holders
+    looked = asyncio.Event()
+    seen = 0
+
+    async def look_then_wait_for_the_other(session, doses):
+        nonlocal seen
+        held = await real_holders(session, doses)
+        if not doses:
+            return held  # the pushes that set the fixture up are not the race
+        seen += 1
+        if seen >= 2:
+            looked.set()
+        try:
+            await asyncio.wait_for(looked.wait(), 0.5)
+        except asyncio.TimeoutError:
+            pass  # the other one never got here, which is the point
+        return held
+
+    monkeypatch.setattr(sync_module, "_key_holders", look_then_wait_for_the_other)
+
+    subject = f"owner-{uuid.uuid4()}"
+    one, two = await _devices(api, subject, 2)
+    pid, mid, sid = (str(uuid.uuid4()) for _ in range(3))
+    await push(api, one, profiles=[profile(pid)])
+    await push(api, one, medications=[medication(mid, pid)], schedules=[schedule(sid, mid)])
+
+    first, second = str(uuid.uuid4()), str(uuid.uuid4())
+    planned = ms() + 3_600_000
+    outs = await asyncio.gather(
+        _new_client_push(api, one, dose_events=[dose(first, mid, pid, sid, planned=planned)]),
+        _new_client_push(api, two, dose_events=[dose(second, mid, pid, sid, planned=planned)]),
+    )
+
+    stored = [e for e in (await pull(api, one))["changes"]["dose_events"]
+              if e["id"] in {first, second}]
+    assert len(stored) == 1, f"one dose, one row: {stored}"
+    refused = [o for o in outs if o["rejected"]]
+    assert len(refused) == 1, f"exactly one of the two is turned away: {outs}"
+    told = refused[0]["rejected"][0]
+    assert told["code"] == "duplicate_dose"
+    assert told["canonical_id"] == stored[0]["id"]
+    assert stored[0]["superseded_by"] is None
