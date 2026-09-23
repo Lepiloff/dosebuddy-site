@@ -2171,3 +2171,99 @@ async def test_an_old_build_is_never_refused_whatever_it_once_said(api):
     doses = {e["id"]: e for e in (await pull(api, previous))["changes"]["dose_events"]}
     assert {a, b} <= set(doses), "both rows live, as for any two old clients"
     assert doses[a]["superseded_by"] is None and doses[b]["superseded_by"] is None
+
+
+async def _barrier(monkeypatch, names, timeout=0.5):
+    """Hold each patched call where it has read and not yet written, until the
+    other one has read too.
+
+    Two requests fired at once do not reliably meet inside a critical section,
+    so meeting is arranged. With the serialisation in place the second cannot
+    reach its read at all: it waits on the lock, the first times out the
+    barrier, commits, and the second then reads a world that is really there.
+    """
+    import app.api.sync as sync_module
+
+    state = {"seen": 0, "event": asyncio.Event()}
+
+    def wrap(name):
+        real = getattr(sync_module, name)
+
+        async def held(*args, **kwargs):
+            out = await real(*args, **kwargs)
+            if name == "_key_holders" and not args[1]:
+                # Every push looks for holders, including the bare declaration
+                # that carries no doses. Counting that one releases the barrier
+                # before either side has done anything worth racing over — which
+                # is how the first version of this test passed with the fence
+                # taken out.
+                return out
+            state["seen"] += 1
+            if state["seen"] >= len(names):
+                state["event"].set()
+            try:
+                await asyncio.wait_for(state["event"].wait(), timeout)
+            except asyncio.TimeoutError:
+                pass
+            return out
+
+        return held
+
+    for name in names:
+        monkeypatch.setattr(sync_module, name, wrap(name))
+
+
+async def test_declaring_and_a_twin_arriving_cannot_miss_each_other(api, monkeypatch):
+    """The declaration has to be inside the same fence as the dose push.
+
+    It was not, and that is a hole rather than a stale view: the declaring phone
+    could read the world before the twin was committed while the pushing phone
+    read a device that could not yet be told, and both would commit with nothing
+    marked. Declaring happens once, so nothing would ever revisit it.
+    """
+    subject = f"owner-{uuid.uuid4()}"
+    claimant, previous = await _devices(api, subject, 2)
+    pid, mid, sid = (str(uuid.uuid4()) for _ in range(3))
+    await push(api, claimant, profiles=[profile(pid)])
+    await push(api, claimant, medications=[medication(mid, pid)], schedules=[schedule(sid, mid)])
+
+    b, a = str(uuid.uuid4()), str(uuid.uuid4())
+    planned = ms() + 3_600_000
+    await push(api, claimant, dose_events=[dose(b, mid, pid, sid, planned=planned)])
+
+    await _barrier(monkeypatch, ["_key_holders", "_rivals_for"], timeout=3.0)
+    await asyncio.gather(
+        push(api, previous, dose_events=[dose(a, mid, pid, sid, planned=planned)]),
+        _new_client_push(api, claimant, dose_events=[]),
+    )
+
+    doses = {e["id"]: e for e in (await pull(api, claimant))["changes"]["dose_events"]}
+    assert doses[b]["superseded_by"] == a, "whichever went first, the pair is resolved"
+    assert doses[a]["superseded_by"] is None
+
+
+async def test_two_declarations_at_once_do_not_point_at_each_other(api, monkeypatch):
+    """Both rows given away leaves every phone moving its alarm onto a row that
+    has itself given way — and the key held by nobody."""
+    subject = f"owner-{uuid.uuid4()}"
+    first, second = await _devices(api, subject, 2)
+    pid, mid, sid = (str(uuid.uuid4()) for _ in range(3))
+    await push(api, first, profiles=[profile(pid)])
+    await push(api, first, medications=[medication(mid, pid)], schedules=[schedule(sid, mid)])
+
+    one, two = str(uuid.uuid4()), str(uuid.uuid4())
+    planned = ms() + 3_600_000
+    await push(api, first, dose_events=[dose(one, mid, pid, sid, planned=planned)])
+    await push(api, second, dose_events=[dose(two, mid, pid, sid, planned=planned)])
+
+    await _barrier(monkeypatch, ["_rivals_for", "_rivals_for"])
+    await asyncio.gather(
+        _new_client_push(api, first, dose_events=[]),
+        _new_client_push(api, second, dose_events=[]),
+    )
+
+    doses = {e["id"]: e for e in (await pull(api, first))["changes"]["dose_events"]}
+    given = [d for d in (one, two) if doses[d]["superseded_by"] is not None]
+    assert len(given) == 1, f"exactly one gives way: {[doses[d] for d in (one, two)]}"
+    survivor = (set((one, two)) - set(given)).pop()
+    assert doses[given[0]]["superseded_by"] == survivor, "and it points at the one that stands"

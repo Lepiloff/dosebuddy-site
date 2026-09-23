@@ -234,6 +234,44 @@ async def _key_holders(
     return held
 
 
+async def _already_declared(session: AsyncSession, device_id: uuid.UUID) -> bool:
+    """Whether this device has said it before, asked only to size the lock set."""
+    return (await session.execute(
+        select(Device.adopts_doses_at).where(Device.id == device_id)
+    )).scalar_one_or_none() is not None
+
+
+async def _profiles_holding(session: AsyncSession, device_id: uuid.UUID) -> set[uuid.UUID]:
+    """Where this device still holds doses that a declaration would revisit."""
+    return set((await session.execute(
+        select(DoseEvent.profile_id).where(
+            DoseEvent.origin_device_id == device_id,
+            DoseEvent.dose_key.is_not(None),
+            DoseEvent.deleted_at_ms.is_(None),
+            DoseEvent.superseded_by.is_(None),
+        ).distinct()
+    )).scalars().all())
+
+
+async def _rivals_for(session: AsyncSession, keys: set[str], device_id: uuid.UUID):
+    """Everything else still holding these keys, and whether it can be told.
+
+    Its own function because it is the read the catch-up decides on, and a read
+    a test has to be able to hold open: the defect it guards against is one
+    where two transactions each read before either wrote.
+    """
+    return (await session.execute(
+        select(DoseEvent.dose_key, DoseEvent.id, DoseEvent.created_at_ms, Device.adopts_doses_at)
+        .join(Device, Device.id == DoseEvent.origin_device_id, isouter=True)
+        .where(
+            DoseEvent.dose_key.in_(keys),
+            DoseEvent.deleted_at_ms.is_(None),
+            DoseEvent.superseded_by.is_(None),
+            DoseEvent.origin_device_id != device_id,
+        )
+    )).all()
+
+
 async def _catch_up_on_declaring(session: AsyncSession, device_id: uuid.UUID) -> None:
     """The rows this device stored before it could be told anything.
 
@@ -253,9 +291,9 @@ async def _catch_up_on_declaring(session: AsyncSession, device_id: uuid.UUID) ->
     first and declared later must still give way to the phone that came back,
     because that phone has no way of being told anything.
 
-    No lock here. A twin created concurrently is handled by the push creating
-    it, which does its own check under one; the worst this can do is act on a
-    view a moment old, and it acts only on rows of the device that is asking.
+    Runs under the profile locks its caller took, which it did not at first: a
+    view one moment old is harmless where there is a second pass, and here there
+    is none — declaring happens once, and whatever it misses stays missed.
     """
     holding = (await session.execute(
         select(DoseEvent.id, DoseEvent.dose_key).where(
@@ -268,16 +306,7 @@ async def _catch_up_on_declaring(session: AsyncSession, device_id: uuid.UUID) ->
     if not holding:
         return
 
-    rivals = (await session.execute(
-        select(DoseEvent.dose_key, DoseEvent.id, DoseEvent.created_at_ms, Device.adopts_doses_at)
-        .join(Device, Device.id == DoseEvent.origin_device_id, isouter=True)
-        .where(
-            DoseEvent.dose_key.in_({key for _, key in holding}),
-            DoseEvent.deleted_at_ms.is_(None),
-            DoseEvent.superseded_by.is_(None),
-            DoseEvent.origin_device_id != device_id,
-        )
-    )).all()
+    rivals = await _rivals_for(session, {key for _, key in holding}, device_id)
     winner: dict[str, tuple[tuple, uuid.UUID]] = {}
     for key, row_id, created, adopts_at in rivals:
         rank = (adopts_at is not None, created, str(row_id))
@@ -554,6 +583,8 @@ async def push(
     # whole batch, before anything is written, so that a dose and its twin
     # arriving in the same push are judged against the stored world rather than
     # against each other in arrival order.
+    adopts = "duplicate_dose" in body.understands
+
     # Check and insert have to be one indivisible step, or two pushes both find
     # the key free and both store a row — the state this whole section exists to
     # prevent, arrived at by two clients that each did everything right (app
@@ -569,11 +600,29 @@ async def push(
     # Sorted, so that two batches touching the same pair of profiles take them in
     # the same order and cannot deadlock against each other. Held to commit,
     # which is what makes the supersede below indivisible too.
-    for pid in sorted({d.profile_id for d in changes.dose_events} & mine):
+    #
+    # **And the declaration is inside the same fence.** It was not, and that was
+    # a hole rather than a slack view (app track, 23.09.2026): a bare
+    # capability push read the world while another device's dose push held the
+    # lock, so each could miss the other — the declaring phone seeing no twin
+    # yet, the pushing phone seeing a device that could not yet be told — and
+    # both would commit rows with nothing marked. There is no second pass to
+    # repair it, because declaring happens once. Two declarations at the same
+    # moment were worse still: each could point its row at the other's, leaving
+    # every phone moving its alarm onto a row that had itself given way.
+    #
+    # Which profiles the catch-up will touch is read before the lock is taken,
+    # and that is safe for the one thing it decides: only this device's own
+    # pushes can add rows belonging to this device, so no other transaction can
+    # widen the set. Everything the catch-up *decides* is read again underneath.
+    declaring = adopts and not await _already_declared(session, caller.device_id)
+    locked = {d.profile_id for d in changes.dose_events} & mine
+    if declaring:
+        locked |= await _profiles_holding(session, caller.device_id) & mine
+    for pid in sorted(locked):
         await session.execute(select(func.pg_advisory_xact_lock(func.hashtext(str(pid)))))
 
     holders = await _key_holders(session, changes.dose_events)
-    adopts = "duplicate_dose" in body.understands
     gives_way: dict[uuid.UUID, uuid.UUID] = {}
 
     for d in changes.dose_events:
@@ -724,6 +773,11 @@ async def push(
             .returning(Device.id)
         )).first()
         if newly is not None:
+            # `declaring` decided which locks to take and is read before them;
+            # this decides whether the transition actually happened and is read
+            # under them. They agree except when another transaction declared
+            # the same device in between, and then the locks were a superset,
+            # which costs nothing.
             await _catch_up_on_declaring(session, caller.device_id)
     else:
         await session.execute(
