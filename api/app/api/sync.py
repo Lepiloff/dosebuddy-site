@@ -234,6 +234,66 @@ async def _key_holders(
     return held
 
 
+async def _catch_up_on_declaring(session: AsyncSession, device_id: uuid.UUID) -> None:
+    """The rows this device stored before it could be told anything.
+
+    A phone can hold a dose from before it declared itself — it pushed on an
+    older build, or the row went up before the capability did. The previous
+    phone then stores its twin, and the push that stores it finds a holder whose
+    device cannot be told to give way, so it says nothing, correctly. Nothing
+    ever revisits that decision, and the pair stays unresolved for good even
+    after the phone gains the ability to resolve it (app track, 23.09.2026).
+
+    So declaring is the moment it is revisited, once: everything this device is
+    still holding is compared against whatever else holds the same key.
+
+    **Which row wins is the same rule as everywhere else, in the same order.**
+    The one that cannot be told wins over the one that can; among equals, the
+    earlier. That is why it is not simply "the earliest": a claimant that pushed
+    first and declared later must still give way to the phone that came back,
+    because that phone has no way of being told anything.
+
+    No lock here. A twin created concurrently is handled by the push creating
+    it, which does its own check under one; the worst this can do is act on a
+    view a moment old, and it acts only on rows of the device that is asking.
+    """
+    holding = (await session.execute(
+        select(DoseEvent.id, DoseEvent.dose_key).where(
+            DoseEvent.origin_device_id == device_id,
+            DoseEvent.dose_key.is_not(None),
+            DoseEvent.deleted_at_ms.is_(None),
+            DoseEvent.superseded_by.is_(None),
+        )
+    )).all()
+    if not holding:
+        return
+
+    rivals = (await session.execute(
+        select(DoseEvent.dose_key, DoseEvent.id, DoseEvent.created_at_ms, Device.adopts_doses_at)
+        .join(Device, Device.id == DoseEvent.origin_device_id, isouter=True)
+        .where(
+            DoseEvent.dose_key.in_({key for _, key in holding}),
+            DoseEvent.deleted_at_ms.is_(None),
+            DoseEvent.superseded_by.is_(None),
+            DoseEvent.origin_device_id != device_id,
+        )
+    )).all()
+    winner: dict[str, tuple[tuple, uuid.UUID]] = {}
+    for key, row_id, created, adopts_at in rivals:
+        rank = (adopts_at is not None, created, str(row_id))
+        if key not in winner or rank < winner[key][0]:
+            winner[key] = (rank, row_id)
+
+    for row_id, key in holding:
+        if key not in winner:
+            continue
+        await session.execute(
+            sa_update(DoseEvent)
+            .where(DoseEvent.id == row_id, DoseEvent.superseded_by.is_(None))
+            .values(superseded_by=winner[key][1], server_seq=NEXT_SEQ)
+        )
+
+
 def _dose_key(schedule_id: uuid.UUID | None, planned_at: int) -> str | None:
     """The schedule and the instant, or nothing at all.
 
@@ -643,16 +703,33 @@ async def push(
             rows=len(gives_way),
         )
 
+    # Learned from the push that says it, not from the pull that follows: the
+    # client's cycle pushes first (app track, `sync_service.dart:280`), so a
+    # capability read from the pull would judge the first push after an update
+    # as an old one — and that push is where the rows needing the new answer are.
+    #
+    # **And forgotten the same way.** The flag is what the device said on its
+    # last push, not what it ever said once: an APK can be rolled back, and a
+    # `devices` row that remembers a capability the installed build no longer
+    # has would let the server mark that device's rows as given away to a client
+    # that will never read the field and never give anything away (app track,
+    # 23.09.2026). Nothing refuses a push on the strength of this column —
+    # refusals read the request — so the only cost of being wrong here is a
+    # statement about a row, and the statement must not outlive its evidence.
     if adopts:
-        # Learned from the push that says it, not from the pull that follows.
-        # The client's cycle pushes first (app track, `sync_service.dart:280`),
-        # so a device whose capability was read from the pull would have its
-        # first push judged as an old one — and the first push after an update
-        # is where the rows that need this are.
-        await session.execute(
+        newly = (await session.execute(
             sa_update(Device)
             .where(Device.id == caller.device_id, Device.adopts_doses_at.is_(None))
             .values(adopts_doses_at=utcnow())
+            .returning(Device.id)
+        )).first()
+        if newly is not None:
+            await _catch_up_on_declaring(session, caller.device_id)
+    else:
+        await session.execute(
+            sa_update(Device)
+            .where(Device.id == caller.device_id, Device.adopts_doses_at.is_not(None))
+            .values(adopts_doses_at=None)
         )
 
     await session.commit()

@@ -2043,3 +2043,131 @@ async def test_two_pushes_at_once_do_not_both_find_the_key_free(api, monkeypatch
     assert told["code"] == "duplicate_dose"
     assert told["canonical_id"] == stored[0]["id"]
     assert stored[0]["superseded_by"] is None
+
+
+async def test_declaring_late_resolves_the_pair_it_could_not_be_told_about(api):
+    """The first blocker the app track found before release.
+
+    B stores a dose before it can be told anything — an older build, or the row
+    went up ahead of the capability. A then stores the twin, and the push that
+    stores it finds a holder that cannot be told, so it says nothing. Nothing
+    revisited that, so the pair stayed unresolved for good, even once B could
+    have resolved it in a moment.
+
+    Declaring is that moment, and it happens once.
+    """
+    subject = f"owner-{uuid.uuid4()}"
+    claimant, previous = await _devices(api, subject, 2)
+    pid, mid, sid = (str(uuid.uuid4()) for _ in range(3))
+    await push(api, claimant, profiles=[profile(pid)])
+    await push(api, claimant, medications=[medication(mid, pid)], schedules=[schedule(sid, mid)])
+
+    b, a = str(uuid.uuid4()), str(uuid.uuid4())
+    planned = ms() + 3_600_000
+    await push(api, claimant, dose_events=[dose(b, mid, pid, sid, planned=planned)])
+    await push(api, previous, dose_events=[dose(a, mid, pid, sid, planned=planned)])
+
+    doses = {e["id"]: e for e in (await pull(api, claimant))["changes"]["dose_events"]}
+    assert doses[b]["superseded_by"] is None, "nothing could be said yet"
+
+    await _new_client_push(api, claimant, dose_events=[])
+
+    doses = {e["id"]: e for e in (await pull(api, claimant))["changes"]["dose_events"]}
+    assert doses[b]["superseded_by"] == a, "and now it is"
+    assert doses[a]["superseded_by"] is None, "the one that cannot be told keeps its row"
+
+
+async def test_declaring_late_still_yields_to_the_phone_that_cannot_be_told(api):
+    """Not "the earliest wins" — the one that cannot be told wins.
+
+    Here the claimant's row is older than the returning phone's. It still gives
+    way, because the other phone has no way of being told to.
+    """
+    subject = f"owner-{uuid.uuid4()}"
+    claimant, previous = await _devices(api, subject, 2)
+    pid, mid, sid = (str(uuid.uuid4()) for _ in range(3))
+    await push(api, claimant, profiles=[profile(pid)])
+    await push(api, claimant, medications=[medication(mid, pid)], schedules=[schedule(sid, mid)])
+
+    b, a = str(uuid.uuid4()), str(uuid.uuid4())
+    planned = ms() + 3_600_000
+    early = ms()
+    await push(api, claimant, dose_events=[dose(b, mid, pid, sid, at=early, planned=planned)])
+    await push(api, previous, dose_events=[
+        dose(a, mid, pid, sid, at=early + 10_000, planned=planned),
+    ])
+
+    await _new_client_push(api, claimant, dose_events=[])
+
+    doses = {e["id"]: e for e in (await pull(api, claimant))["changes"]["dose_events"]}
+    assert doses[b]["superseded_by"] == a
+    assert doses[a]["superseded_by"] is None
+
+
+async def test_a_phone_that_stops_declaring_stops_being_told(api, session):
+    """The second blocker: an APK can be rolled back.
+
+    A row remembering a capability the installed build no longer has would let
+    the server mark that device's doses as given away to a client that will
+    never read the field. The capability is therefore what the device said on
+    its last push, not what it ever said once.
+    """
+    subject = f"owner-{uuid.uuid4()}"
+    rolled_back, previous = await _devices(api, subject, 2)
+    device_id = uuid.UUID((await session.execute(
+        select(Device.id).where(Device.account_id == uuid.UUID(rolled_back["account_id"]))
+    )).scalars().first().hex)
+    pid, mid, sid = (str(uuid.uuid4()) for _ in range(3))
+    await _new_client_push(api, rolled_back, profiles=[profile(pid)])
+    await _new_client_push(
+        api, rolled_back, medications=[medication(mid, pid)], schedules=[schedule(sid, mid)]
+    )
+
+    device = await session.get(Device, device_id)
+    await session.refresh(device)
+    assert device.adopts_doses_at is not None, "it did say it, once"
+
+    b, a = str(uuid.uuid4()), str(uuid.uuid4())
+    planned = ms() + 3_600_000
+    await push(api, rolled_back, dose_events=[dose(b, mid, pid, sid, planned=planned)])
+
+    await session.refresh(device)
+    assert device.adopts_doses_at is None, "a push without the word takes it back"
+
+    await push(api, previous, dose_events=[dose(a, mid, pid, sid, planned=planned)])
+
+    doses = {e["id"]: e for e in (await pull(api, previous))["changes"]["dose_events"]}
+    assert doses[b]["superseded_by"] is None, (
+        "the old build would never have read it, so it is not told"
+    )
+    assert doses[a]["superseded_by"] is None
+
+
+async def test_an_old_build_is_never_refused_whatever_it_once_said(api):
+    """Refusals read the request, never the stored capability.
+
+    The phone comes back on the old build and sends what it has. It once
+    declared itself and the column may still say so at the moment its push
+    arrives — and it must make no difference, because a build that cannot read
+    `canonical_id` drops the refusal and the dose with it. Two live rows, as for
+    any two clients that cannot be told anything.
+
+    (This one passes with the forgetting removed as well, and is kept for what
+    it does prove: that nothing on the refusal path consults the column.)"""
+    subject = f"owner-{uuid.uuid4()}"
+    rolled_back, previous = await _devices(api, subject, 2)
+    pid, mid, sid = (str(uuid.uuid4()) for _ in range(3))
+    await _new_client_push(api, rolled_back, profiles=[profile(pid)])
+    await _new_client_push(
+        api, rolled_back, medications=[medication(mid, pid)], schedules=[schedule(sid, mid)]
+    )
+
+    a, b = str(uuid.uuid4()), str(uuid.uuid4())
+    planned = ms() + 3_600_000
+    await push(api, previous, dose_events=[dose(a, mid, pid, sid, planned=planned)])
+    out = await push(api, rolled_back, dose_events=[dose(b, mid, pid, sid, planned=planned)])
+
+    assert out["rejected"] == [], "an old build is never refused, whatever it once said"
+    doses = {e["id"]: e for e in (await pull(api, previous))["changes"]["dose_events"]}
+    assert {a, b} <= set(doses), "both rows live, as for any two old clients"
+    assert doses[a]["superseded_by"] is None and doses[b]["superseded_by"] is None
