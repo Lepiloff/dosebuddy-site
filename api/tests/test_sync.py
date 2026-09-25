@@ -13,7 +13,7 @@ import time
 import uuid
 
 import pytest
-from sqlalchemy import select, text as sql_text, update
+from sqlalchemy import func, select, text as sql_text, update
 from sqlalchemy.exc import DBAPIError
 
 from app.api.sync import PAGE_SIZE
@@ -21,6 +21,7 @@ from app.db.models import (
     IMMUTABLE_PARENT_SQLSTATE,
     Account,
     Device,
+    DeviceReadiness,
     DoseEvent,
     Medication,
     Profile,
@@ -2267,3 +2268,218 @@ async def test_two_declarations_at_once_do_not_point_at_each_other(api, monkeypa
     assert len(given) == 1, f"exactly one gives way: {[doses[d] for d in (one, two)]}"
     survivor = (set((one, two)) - set(given)).pop()
     assert doses[given[0]]["superseded_by"] == survivor, "and it points at the one that stands"
+
+
+# ---------------------------------------------------------------------------
+# GET /sync/records/{entity}/{id} — the row the feed will not offer again
+# ---------------------------------------------------------------------------
+
+
+async def fetch(api, tokens, entity, row_id):
+    return await api.get(
+        f"/v1/sync/records/{entity}/{row_id}", headers=auth_header(tokens)
+    )
+
+
+async def test_the_row_a_refusal_argued_about_can_be_fetched_by_id(api):
+    """The case the app track reproduced on a host run (25.09.2026).
+
+    A legacy writer moves a medication between profiles, the push is refused
+    `immutable_parent`, and the client is left holding a local row it knows the
+    server disagreed with and no way to learn how. The server's version sits
+    below the cursor, so no pull will ever bring it back.
+    """
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+    other = str(uuid.uuid4())
+    await push(api, owner, profiles=[profile(other, "Second")])
+
+    moved = medication(mid, other, at=ms() + 1000)
+    refused = await push(api, owner, medications=[moved])
+    assert [o["code"] for o in refused["rejected"]] == ["immutable_parent"]
+
+    r = await fetch(api, owner, "medications", mid)
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["entity"] == "medications"
+    assert body["id"] == mid
+    assert body["role"] == "owner"
+    # The disputed field, which is the entire reason the endpoint exists.
+    assert body["record"]["profile_id"] == pid
+    assert body["server_seq"] > 0
+
+
+async def test_the_fetched_row_is_the_same_shape_the_feed_would_have_sent(api):
+    """One projection, not two. If these ever diverge the client is reconciling
+    against a body it will never see again through the ordinary path."""
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+
+    from_feed = {m["id"]: m for m in (await pull(api, owner))["changes"]["medications"]}
+    by_id = (await fetch(api, owner, "medications", mid)).json()
+
+    assert by_id["record"] == from_feed[mid]
+
+
+async def test_a_watcher_gets_the_cut_down_row_and_is_told_it_is_cut_down(api):
+    """`role` in the envelope is what separates "thin because I am a watcher"
+    from "thin because the server lost the rest"."""
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+    caregiver = await _pair(api, owner, pid)
+
+    body = (await fetch(api, caregiver, "medications", mid)).json()
+
+    assert body["role"] == "with_alerts"
+    assert body["record"]["name"] == "Aspirin"
+    assert "notes" not in body["record"]
+    assert "dose_amount" not in body["record"]
+    # And the field the dispute is actually about survives the cut, so the
+    # parent argument is answerable in either role.
+    assert body["record"]["profile_id"] == pid
+
+
+async def test_a_schedule_under_a_watched_profile_is_not_found(api):
+    """`_project` returns None for schedules, and in `_page` that means "skip".
+    Here the same value has to become a refusal: an envelope with an empty
+    record would confirm the id names a row, which is the leak the uniform 404
+    exists to stop."""
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+    caregiver = await _pair(api, owner, pid)
+
+    r = await fetch(api, caregiver, "schedules", sid)
+
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "not_found"
+
+
+async def test_a_stock_event_under_a_watched_profile_is_not_found(api):
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+    eid = str(uuid.uuid4())
+    await push(api, owner, stock_events=[stock(eid, mid)])
+    caregiver = await _pair(api, owner, pid)
+
+    assert (await fetch(api, caregiver, "stock_events", eid)).status_code == 404
+
+
+async def test_a_deleted_row_answers_with_its_tombstone_not_a_refusal(api):
+    """Against the usual REST instinct, deliberately. "The server deleted it"
+    must not arrive looking like "you may not see it", or the client holds a
+    conflict that was settled long ago."""
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+    gone = dose(did, mid, pid, sid, at=ms() + 1000)
+    gone["deleted_at"] = ms() + 1000
+    await push(api, owner, dose_events=[gone])
+
+    body = (await fetch(api, owner, "dose_events", did)).json()
+
+    assert body["record"]["deleted_at"] is not None
+    assert body["role"] == "owner"
+
+
+async def test_another_accounts_row_is_not_found_rather_than_forbidden(api):
+    """403 would confirm that the id names a real row, and that is enough to
+    enumerate other people's."""
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+    stranger = await sign_in(api, f"stranger-{uuid.uuid4()}")
+
+    for entity, row_id in (
+        ("profiles", pid),
+        ("medications", mid),
+        ("schedules", sid),
+        ("dose_events", did),
+    ):
+        r = await fetch(api, stranger, entity, row_id)
+        assert r.status_code == 404, (entity, r.text)
+        assert r.json()["error"]["code"] == "not_found"
+
+
+async def test_a_row_that_does_not_exist_answers_exactly_as_one_that_is_hidden(api):
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+    stranger = await sign_in(api, f"stranger-{uuid.uuid4()}")
+
+    absent = await fetch(api, owner, "medications", str(uuid.uuid4()))
+    hidden = await fetch(api, stranger, "medications", mid)
+
+    assert absent.status_code == hidden.status_code == 404
+    assert absent.json() == hidden.json()
+
+
+async def test_an_entity_outside_the_whitelist_is_told_so(api):
+    """Not folded into `not_found`: the set of names is published in the
+    contract, so saying it leaks nothing, while hiding it would make a typo look
+    like a missing row."""
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+
+    r = await fetch(api, owner, "devices", str(uuid.uuid4()))
+
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "unknown_entity"
+
+
+async def test_reading_a_record_costs_the_device_nothing(api, session):
+    """The whole of "no side effects", in one before-and-after.
+
+    `cursor_seq` is the evidence the authority gate waits for before telling the
+    previous phone to stop ringing. A read that spent it would silence a phone
+    on the strength of a row somebody merely looked at.
+    """
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+    device = (
+        await session.execute(
+            select(Device).where(Device.account_id == uuid.UUID(owner["account_id"]))
+        )
+    ).scalars().one()
+    before = (device.cursor_seq, device.ready_protocol_at, device.adopts_doses_at)
+    readiness_before = (
+        await session.execute(select(func.count()).select_from(DeviceReadiness))
+    ).scalar_one()
+
+    for entity, row_id in (("profiles", pid), ("medications", mid),
+                           ("schedules", sid), ("dose_events", did)):
+        assert (await fetch(api, owner, entity, row_id)).status_code == 200
+
+    after = (
+        await session.execute(
+            select(Device.cursor_seq, Device.ready_protocol_at, Device.adopts_doses_at)
+            .where(Device.id == device.id)
+            .execution_options(populate_existing=True)
+        )
+    ).one()
+
+    assert tuple(after) == before
+    assert (
+        await session.execute(select(func.count()).select_from(DeviceReadiness))
+    ).scalar_one() == readiness_before
+
+
+async def test_the_fetched_revision_is_the_one_the_profile_row_already_carries(api):
+    """Two names for one number, and a client should parse one of them."""
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+
+    body = (await fetch(api, owner, "profiles", pid)).json()
+
+    assert str(body["server_seq"]) == body["record"]["revision"]
+    assert body["record"]["role"] == body["role"] == "owner"
+
+
+async def test_a_sync_scoped_token_is_enough_to_ask(api, session):
+    """Same authorisation as push and pull. A background client holding only the
+    sync token is exactly the one that meets a refusal it cannot interpret."""
+    owner, pid, mid, sid, did = await _owner_with_data(api)
+    device = (
+        await session.execute(
+            select(Device).where(Device.account_id == uuid.UUID(owner["account_id"]))
+        )
+    ).scalars().one()
+    issued = await api.post(
+        f"/v1/devices/{device.id}/sync-token", headers=auth_header(owner), json={},
+    )
+    assert issued.status_code == 200, issued.text
+    sync_token = issued.json()["sync_token"]
+
+    r = await api.get(
+        f"/v1/sync/records/medications/{mid}",
+        headers={"Authorization": f"Bearer {sync_token}"},
+    )
+
+    assert r.status_code == 200, r.text
+    assert r.json()["record"]["profile_id"] == pid

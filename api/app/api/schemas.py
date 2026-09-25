@@ -181,3 +181,34 @@ class PullOut(BaseModel):
     # Owned profiles only: which of somebody's phones rings is not a caregiver's
     # business, and the watcher projection already removes `owner_device_id`.
     authority: dict[str, dict] = {}
+
+
+class RecordOut(BaseModel):
+    """One stored row, fetched by id rather than by cursor.
+
+    The answer to a question the feed cannot answer twice. A record refused at
+    push — `immutable_parent`, `forbidden_role` — is final, and the server's own
+    version of it sits below the client's cursor, so an ordinary pull will never
+    hand it over again. Without a way to ask for it by id the client is left
+    holding a local row it knows the server disagreed with and no way to say how,
+    which is the silent divergence invariant 1 exists to forbid.
+
+    `role` is in the envelope and not only inside `record`, and it is not a
+    convenience. Everything but `profiles` comes back with its fields cut to what
+    the role allows, and a watcher handed a four-field medication cannot
+    otherwise tell "thin because I am a watcher" from "thin because the server
+    lost the rest". One field turns an ambiguous body into a stated one.
+
+    `server_seq` is the row's revision, drawn from the same sequence as the pull
+    cursor — and it is **not** a cursor. Writing it into one would skip every row
+    between. For `profiles` the same number is already inside `record` as
+    `revision` (a string, because the authority nudge travels through FCM, whose
+    `data` is map<string,string>); they are the same value and a client should
+    parse one of them.
+    """
+
+    entity: str
+    id: uuid.UUID
+    server_seq: int
+    role: str
+    record: dict

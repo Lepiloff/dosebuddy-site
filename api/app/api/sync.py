@@ -43,7 +43,7 @@ from sqlalchemy.orm import aliased
 
 from app.api.deps import Caller, get_session, sync_caller
 from app.services.alerts import profile_high_water
-from app.api.schemas import Changes, Outcome, PullOut, PushIn, PushOut
+from app.api.schemas import Changes, Outcome, PullOut, PushIn, PushOut, RecordOut
 from app.db.models import (
     IMMUTABLE_PARENT_SQLSTATE,
     SERVER_SEQ,
@@ -1340,3 +1340,119 @@ async def preview(
         session, caller, cursor, request.app.state.settings.authority_lease
     )
     return page
+
+
+# ---------------------------------------------------------------------------
+# One record, by id
+# ---------------------------------------------------------------------------
+
+# The names are the plural ones `Outcome.entity` already uses, so a refusal is
+# directly actionable: the client puts the `entity` it was handed straight into
+# the path rather than keeping a table of translations that can drift.
+RECORD_ENTITIES: dict[str, Any] = {
+    "profiles": Profile,
+    "medications": Medication,
+    "schedules": Schedule,
+    "dose_events": DoseEvent,
+    "stock_events": StockEvent,
+}
+
+
+@router.get("/sync/records/{entity}/{record_id}", response_model=RecordOut)
+async def record(
+    entity: str,
+    record_id: uuid.UUID,
+    caller: Caller = Depends(sync_caller),
+    session: AsyncSession = Depends(get_session),
+) -> RecordOut:
+    """The server's version of one row, for a client that was told no.
+
+    `/sync/preview` read the feed without admitting to having read it; this
+    reads one row the feed will not offer again. A record refused with
+    `immutable_parent` or `forbidden_role` is final, and the row the server
+    actually holds sits below the client's cursor — an ordinary pull walks
+    straight past it. The app track reproduced the cost on a host run
+    (25.09.2026): a legacy writer moved `medications.profile_id` p1→p2, the push
+    was refused, and the local row stayed at p2 with an empty outbox and a quiet
+    UI. Nothing was wrong on the server and nothing was right on the phone, and
+    no one was told. That is invariant 1 — silence is worse than a duplicate.
+
+    So the client can ask, show a person both versions, and let them choose.
+
+    **404 is the only refusal, and it means four things on purpose.** The row is
+    absent, or it was hard-deleted, or it is not visible, or it is visible in a
+    role that does not reach this entity. A 403 would confirm that an id names a
+    real row, which is enough to enumerate other people's — the same reason
+    `_owned_profile` answers 404 (`pairing.py`).
+
+    **A soft-deleted row is 200, not 404**, and against the usual instinct
+    deliberately: "the server deleted it" must not arrive looking like "you may
+    not see it", or the client holds a conflict that was settled long ago. It is
+    also why a hard delete is the worse tool — the row that was erased outright
+    answers here with the one code that cannot be told apart from a refusal.
+
+    **Nothing is written.** Not `cursor_seq`, not `ready_protocol_at`, not
+    `device_readiness`, not `adopts_doses_at` — and by construction rather than
+    by discipline, since all four are written in the bodies of `pull` and `push`
+    and this handler has no body of theirs. There is no commit.
+
+    The row and its `server_seq` come from one SELECT, so they cannot disagree.
+    Visibility is a second statement, so a membership revoked in the moment
+    between the two is resolved arbitrarily — exactly as in `_page`, and not
+    worth a lock on a request that writes nothing.
+    """
+    model = RECORD_ENTITIES.get(entity)
+    if model is None:
+        # Not 404. The set of entity names is published in the contract, so
+        # telling a developer their name is not in it leaks nothing, while
+        # folding it into `not_found` would make a typo look like a missing row.
+        raise HTTPException(422, "unknown_entity")
+
+    row = await session.get(model, record_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "not_found")
+
+    profiles = await visible_profiles(session, caller)
+
+    if entity == "profiles":
+        profile_id = row.id
+    elif entity in ("medications", "dose_events"):
+        profile_id = row.profile_id
+    else:
+        # Schedules and stock events hang off a medication, never off a profile
+        # directly, and `_page` gathers them only for owned medications. The
+        # rule here is therefore **owned**, not merely visible: a caregiver sees
+        # the profile and must still not see the schedule under it, which is the
+        # whole of the one-reminder-owner design.
+        parent = await session.get(Medication, row.medication_id)
+        if parent is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "not_found")
+        profile_id = parent.profile_id
+
+    role = profiles.get(profile_id)
+    if role is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "not_found")
+
+    wire = _row_to_wire(entity, row, role)
+    if role is not Role.owner:
+        projected = _project(entity, wire)
+        if projected is None:
+            # `_page` treats this as "skip the row"; here the same value has to
+            # become a refusal. Returning the envelope with an empty record
+            # would confirm that the id names a row the caller may not read —
+            # the leak the uniform 404 exists to prevent.
+            #
+            # This is also the whole of the owner-only rule for schedules and
+            # stock events, rather than a second list of entity names beside it:
+            # `WATCHER_FIELDS` is what decides who sees what, and a rule restated
+            # in two places is a rule that will be changed in one.
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "not_found")
+        wire = projected
+
+    return RecordOut(
+        entity=entity,
+        id=row.id,
+        server_seq=row.server_seq,
+        role=role.value,
+        record=wire,
+    )
