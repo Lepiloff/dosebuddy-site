@@ -291,6 +291,98 @@ async def test_claiming_authority_for_the_first_time_queues_nothing(api, session
     assert (await session.execute(select(AlertDelivery))).scalars().all() == []
 
 
+async def test_a_two_phase_handover_nudges_only_the_previous_owner(api, session):
+    """Readiness completes the claim and queues the old phone, even when the
+    ORM synchronizes the loaded profile to its new owner during UPDATE.
+    """
+    from app.api.sync import decode_cursor
+    from app.core.security import mint_access_token
+    from app.db.models import DeviceReadiness
+    from app.services import alerts
+
+    owner, profile_id, losing, winning = await _two_devices(api, session)
+    winning.push_token = "token-winning-device"
+    await session.commit()
+    winning_headers = auth_header({"access_token": mint_access_token(
+        api.app.state.settings.jwt_secret, winning.account_id, winning.id
+    )[0]})
+
+    first = await api.post(
+        f"/v1/profiles/{profile_id}/reminder-authority",
+        headers=auth_header(owner),
+        json={"device_id": str(losing.id), "reports_ready": True},
+    )
+    assert first.status_code == 200, first.text
+    claimed = await api.post(
+        f"/v1/profiles/{profile_id}/reminder-authority",
+        headers=winning_headers,
+        json={"device_id": str(winning.id), "reports_ready": True},
+    )
+    assert claimed.status_code == 200, claimed.text
+    assert claimed.json()["owner_device_id"] == str(losing.id)
+    assert claimed.json()["pending_device_id"] == str(winning.id)
+    assert claimed.json()["revision"] == first.json()["revision"]
+    assert (await session.execute(select(AlertDelivery))).scalars().all() == []
+
+    page = await api.get("/v1/sync/pull?ready=1", headers=winning_headers)
+    assert page.status_code == 200, page.text
+    applied_cursor = page.json()["cursor"]
+    ready = await api.post(
+        f"/v1/devices/{winning.id}/ready",
+        headers=winning_headers,
+        json={
+            "profile_id": str(profile_id),
+            "revision": str(claimed.json()["revision"]),
+            "applied_cursor": applied_cursor,
+        },
+    )
+    assert ready.status_code == 204, ready.text
+
+    profile = await session.get(Profile, profile_id)
+    await session.refresh(profile)
+    await session.refresh(winning)
+    assert profile.owner_device_id == winning.id
+    assert profile.previous_owner_device_id == losing.id
+    assert profile.pending_owner_device_id is None
+    assert profile.authority_leased is True
+    assert profile.server_seq > claimed.json()["revision"]
+    readiness = await session.get(DeviceReadiness, (winning.id, profile_id))
+    assert readiness.revision == profile.server_seq
+    assert readiness.applied_cursor == decode_cursor(applied_cursor)
+    assert readiness.applied_cursor < profile.server_seq
+
+    row = (await session.execute(
+        select(AlertDelivery).where(AlertDelivery.kind == AlertKind.reminder_authority_lost)
+    )).scalars().one()
+    assert row.device_id == losing.id
+    assert row.profile_id == profile_id
+    assert row.subject_id == str(profile.server_seq)
+    assert row.state == AlertState.pending.value
+    assert row.attempts == 0
+    assert await alerts.resolve_nudge(session, row, utcnow()) == alerts.NoNudge.awaiting_winner
+
+    # The winner still has to apply the published handover. The first report
+    # must not invent a cursor that would release the nudge too early.
+    page = await api.get("/v1/sync/pull?ready=1", headers=winning_headers)
+    assert page.status_code == 200, page.text
+    ready = await api.post(
+        f"/v1/devices/{winning.id}/ready",
+        headers=winning_headers,
+        json={
+            "profile_id": str(profile_id),
+            "revision": str(profile.server_seq),
+            "applied_cursor": page.json()["cursor"],
+        },
+    )
+    assert ready.status_code == 204, ready.text
+    await session.refresh(readiness)
+    nudge = await alerts.resolve_nudge(session, row, utcnow())
+    assert isinstance(nudge, alerts.Nudge)
+    assert nudge.token == losing.push_token
+    assert nudge.payload["owner_device_id"] == str(winning.id)
+    assert nudge.payload["revision"] == str(profile.server_seq)
+
+
 async def test_the_claim_answers_with_the_number_it_wrote(api, session):
     """204 threw away the one thing the caller most needed.
 

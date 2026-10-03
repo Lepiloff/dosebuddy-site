@@ -690,6 +690,9 @@ async def report_ready(
         raise HTTPException(status.HTTP_409_CONFLICT, "cursor_behind_revision")
 
     if claiming:
+        # ORM UPDATE synchronizes the loaded profile; keep the old owner before
+        # it changes, because that is the phone the nudge must reach.
+        losing = profile.owner_device_id
         # The report is what completes the handover. Until this line the alarms
         # were the previous phone's, which is the point of waiting: the claimant
         # has now armed and checked, so moving authority costs no silence.
@@ -702,7 +705,7 @@ async def report_ready(
                 .where(Profile.id == profile.id)
                 .values(
                     owner_device_id=device_id,
-                    previous_owner_device_id=profile.owner_device_id,
+                    previous_owner_device_id=losing,
                     pending_owner_device_id=None,
                     # Now, not at the claim: this device has just proved it
                     # renews readiness by sending one, so the lease has
@@ -731,7 +734,6 @@ async def report_ready(
         # allowed to be on.
         revision = moved
 
-        losing = profile.owner_device_id
         if losing is not None:
             old_device = await session.get(Device, losing)
             if old_device is not None and old_device.revoked_at is None:
