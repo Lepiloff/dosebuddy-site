@@ -9,7 +9,7 @@ Russian. Follow each repository's own convention.)
 
 ## Three things in one repository
 
-`index.html`, `es/`, `css/`, `js/`, `img/`, `fonts/` — the landing.
+`index.html`, `404.html`, `es/`, `css/`, `js/`, `img/`, `fonts/` — the landing.
 `api/` — the FastAPI backend the Android app syncs against.
 `deploy/` — nginx, certbot, compose, and the script that ships all of it.
 
@@ -44,9 +44,10 @@ the PNGs — a successful render is not a good one.
 ## What breaks quietly
 
 ⚠️ **A push to `main` deploys to production.** `.github/workflows/deploy.yml`
-fires on any change under `index.html`, `es/`, `css/`, `js/`, `img/`, `fonts/`,
-`robots.txt`, `sitemap.xml`, `api/` or `deploy/`. There is no staging step
-between the commit and sonadose.com. `deploy/verify.sh` is the acceptance test.
+fires on any change under `index.html`, `404.html`, `es/`, `css/`, `js/`,
+`img/`, `fonts/`, `robots.txt`, `sitemap.xml`, `api/`, `deploy/` or the
+workflow itself. There is no staging step between the commit and sonadose.com.
+`deploy/verify.sh` is the acceptance test.
 
 ⚠️ **The production CSP forbids inline styles, and the local preview does not.**
 `style-src 'self'` in `deploy/nginx/snippets/landing.conf` drops every `<style>`
