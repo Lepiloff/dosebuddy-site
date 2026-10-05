@@ -32,7 +32,7 @@ works. The task is not finished until the render has been opened and criticised.
 5. **Shoot again and look.** Clipping, cramped rhythm, broken hierarchy,
    unreadable contrast, a CTA below the fold, the consent banner covering
    something that matters.
-6. **Fix and repeat.** One critique pass is not a loop.
+6. **Fix and repeat** until the minimum checks below hold.
 7. **Both languages, every time.** Spanish strings are longer; `/es/` breaks
    first, and it is a separate file that does not inherit English edits.
 8. **Report evidence**: commands run, what the renders show, what is still
@@ -121,4 +121,4 @@ Read `docs/landing.md` for the reasoning; this is the short form.
 - **Do not add `tool/` or `build/` to `deploy/site-include.txt`.**
 
 ⚠️ **A push to `main` ships to production.** There is no staging. Land the work
-locally, look at it, then push.
+locally and look at it before anything is pushed.
