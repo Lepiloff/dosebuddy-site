@@ -28,6 +28,10 @@ class Base(DeclarativeBase):
 def create_engine(settings: Settings) -> AsyncEngine:
     return create_async_engine(
         str(settings.database_url),
+        # _page takes its publication fence in one statement and reads the
+        # committed frontier in later statements. A transaction-wide snapshot
+        # acquired before waiting on that fence would violate that guarantee.
+        isolation_level="READ COMMITTED",
         pool_size=settings.db_pool_size,
         max_overflow=settings.db_max_overflow,
         # Connections idle in the pool are dropped by anything in the middle

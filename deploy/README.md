@@ -273,6 +273,15 @@ docker compose logs -f api
 docker compose run --rm -T api alembic upgrade head
 ```
 
+**Первое применение 0021/0022 требует окна обслуживания.** Обычный
+`remote-deploy.sh` мигрирует до остановки/пересоздания старых API/worker.
+Перед первым 0021 и отдельно перед первым 0022 остановить все старые API/issuers/worker, выполнить
+миграцию и `schema_check`, затем запустить проверенный код. Порядок и влияние
+на recovery/readiness описаны в
+[протоколе публикации](../docs/sync-publication.md#first-rollout-requires-a-maintenance-window).
+Это требование будущего rollout; оно не доказывает текущий порядок в production.
+
+
 `healthy` here means `/health/ready` answered 200, which means Postgres and Redis
 both replied. `running` on its own means only that the process started.
 

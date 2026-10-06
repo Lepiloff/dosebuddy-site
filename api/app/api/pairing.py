@@ -22,7 +22,9 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import Caller, current_caller, get_session, sync_caller
+from app.api.deps import (
+    Caller, current_caller, get_session, lock_caller, recheck_caller, sync_caller,
+)
 from app.api.sync import decode_cursor, encode_cursor
 from app.services import alerts
 from app.core.security import (
@@ -31,6 +33,7 @@ from app.core.security import (
     mint_sync_token,
     new_pairing_code,
 )
+from app.db.publication import NEXT_SERVER_SEQ, lock_publication
 from app.db.models import (
     Device,
     DeviceReadiness,
@@ -83,7 +86,7 @@ async def _owned_profile(session: AsyncSession, caller: Caller, profile_id: uuid
                 Profile.id == profile_id,
                 Profile.owner_account_id == caller.account.id,
                 Profile.deleted_at_ms.is_(None),
-            )
+            ).execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
     if profile is None:
@@ -126,7 +129,7 @@ async def _resend_profile(session: AsyncSession, profile_id: uuid.UUID) -> None:
         await session.execute(
             sa_update(model)
             .where(key == profile_id)
-            .values(server_seq=text("nextval('server_seq')"))
+            .values(server_seq=text(NEXT_SERVER_SEQ))
         )
 
 
@@ -142,6 +145,7 @@ async def issue_code(
         # reminder authority is a separate, deliberate transfer (spec §1.4).
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "role_not_grantable")
 
+    await lock_caller(session, caller)
     profile = await _owned_profile(session, caller, body.profile_id)
 
     code = new_pairing_code()
@@ -180,6 +184,7 @@ async def redeem(
     if attempts > MAX_REDEEM_ATTEMPTS_PER_HOUR:
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "too_many_attempts")
 
+    await lock_caller(session, caller)
     settings = request.app.state.settings
     code_hash = hash_pairing_code(settings.jwt_secret, body.code)
 
@@ -244,6 +249,7 @@ async def list_members(
     caller: Caller = Depends(current_caller),
     session: AsyncSession = Depends(get_session),
 ) -> list[MemberOut]:
+    await lock_caller(session, caller)
     profile = await _owned_profile(session, caller, profile_id)
     rows = (
         await session.execute(
@@ -253,9 +259,11 @@ async def list_members(
             )
         )
     ).scalars()
-    return [
+    result = [
         MemberOut(account_id=m.account_id, role=m.role, created_at=m.created_at) for m in rows
     ]
+    await session.commit()
+    return result
 
 
 @router.delete(
@@ -267,6 +275,7 @@ async def revoke_member(
     caller: Caller = Depends(current_caller),
     session: AsyncSession = Depends(get_session),
 ) -> None:
+    await lock_caller(session, caller)
     profile = await _owned_profile(session, caller, profile_id)
     await session.execute(
         update(ProfileMembership)
@@ -293,7 +302,8 @@ async def set_push_token(
     caller: Caller = Depends(current_caller),
     session: AsyncSession = Depends(get_session),
 ) -> None:
-    device = await session.get(Device, device_id)
+    await lock_caller(session, caller)
+    device = await session.get(Device, device_id, populate_existing=True)
     if device is None or device.account_id != caller.account.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "device_not_found")
     device.push_token = body.fcm_token
@@ -327,13 +337,19 @@ async def issue_sync_token(
     exists for, so a token that could be invalidated by asking for another would
     reintroduce the gap it closes.
     """
-    device = await session.get(Device, device_id)
+    await lock_caller(session, caller)
+    device = await session.get(Device, device_id, populate_existing=True)
     if device is None or device.account_id != caller.account.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "device_not_found")
 
+    if device.revoked_at is not None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "device_revoked")
+
     token, expires_in = mint_sync_token(
-        request.app.state.settings.jwt_secret, caller.account.id, device.id
+        request.app.state.settings.jwt_secret, caller.account.id, device.id,
+        device.credential_generation,
     )
+    await session.commit()
     return SyncToken(sync_token=token, expires_in=expires_in)
 
 
@@ -348,7 +364,8 @@ async def heartbeat(
     Without a heartbeat, silence from a device is indistinguishable from having
     nothing to report — and those mean opposite things to whoever is watching.
     """
-    device = await session.get(Device, device_id)
+    await lock_caller(session, caller)
+    device = await session.get(Device, device_id, populate_existing=True)
     if device is None or device.account_id != caller.account.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "device_not_found")
     device.last_seen_at = utcnow()
@@ -430,6 +447,15 @@ class ReminderAuthorityOut(BaseModel):
     pending_device_id: uuid.UUID | None = None
 
 
+async def _authority_caller(session: AsyncSession, caller: Caller) -> None:
+    """Recheck eligibility after publication, even if authentication ran earlier.
+
+    The dependency may have loaded these objects before waiting for the fence.
+    READ COMMITTED refreshes SQL snapshots, not SQLAlchemy's identity map.
+    """
+    await recheck_caller(session, caller)
+
+
 @router.post(
     "/profiles/{profile_id}/reminder-authority", response_model=ReminderAuthorityOut
 )
@@ -458,9 +484,13 @@ async def set_reminder_authority(
     since it can be lost, anything that depended on it would eventually leave two
     phones ringing for one dose.
     """
+    # Serialize the read/check and transition, not just the eventual UPDATE.
+    # This also fences child writes until the readiness/authority commit.
+    await lock_publication(session)
+    await _authority_caller(session, caller)
     profile = await _owned_profile(session, caller, profile_id)
 
-    device = await session.get(Device, body.device_id)
+    device = await session.get(Device, body.device_id, populate_existing=True)
     if device is None or device.account_id != caller.account.id or device.revoked_at:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "device_not_found")
 
@@ -503,9 +533,9 @@ async def set_reminder_authority(
         # already believes it holds, which is what a device that missed a
         # handover looks like. Answering it with the current `server_seq` is
         # what closes the gap — the device that knew least now knows the number.
-        return ReminderAuthorityOut(
-            owner_device_id=device.id, revision=profile.server_seq
-        )
+        receipt = ReminderAuthorityOut(owner_device_id=device.id, revision=profile.server_seq)
+        await session.commit()
+        return receipt
 
     # A new server_seq, so the change reaches every device through the ordinary
     # cursor rather than needing a delivery mechanism of its own.
@@ -529,15 +559,13 @@ async def set_reminder_authority(
                 # profile that changes hands between protocols cannot keep a
                 # lease the new claimant never asked for.
                 authority_leased=False,
-                server_seq=text("nextval('server_seq')"),
+                server_seq=text(NEXT_SERVER_SEQ),
             )
             .returning(Profile.server_seq)
         )
     ).scalar_one()
-    await session.commit()
-
     if previous is not None:
-        old = await session.get(Device, previous)
+        old = await session.get(Device, previous, populate_existing=True)
         if old is not None and old.revoked_at is None:
             # Queued for the worker, not sent from here, and that is the whole
             # of the fix. This process has no FCM credentials — the compose file
@@ -564,7 +592,9 @@ async def set_reminder_authority(
                 ),
                 utcnow(),
             )
-            await session.commit()
+    # Authority and its durable nudge are one transaction. A failed queue write
+    # must not publish a handover whose success receipt was never returned.
+    await session.commit()
 
     return ReminderAuthorityOut(owner_device_id=device.id, revision=revision)
 
@@ -643,8 +673,14 @@ async def report_ready(
         # would let a phone open the gate that silences its own sibling.
         raise HTTPException(status.HTTP_403_FORBIDDEN, "not_your_device")
 
-    profile = await session.get(Profile, body.profile_id)
-    if profile is None or profile.deleted_at_ms is not None:
+    await lock_publication(session)
+    await _authority_caller(session, caller)
+    profile = await session.get(Profile, body.profile_id, populate_existing=True)
+    if (
+        profile is None
+        or profile.owner_account_id != caller.account.id
+        or profile.deleted_at_ms is not None
+    ):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "no_such_profile")
 
     try:
@@ -711,7 +747,7 @@ async def report_ready(
                     # renews readiness by sending one, so the lease has
                     # something to measure.
                     authority_leased=True,
-                    server_seq=text("nextval('server_seq')"),
+                    server_seq=text(NEXT_SERVER_SEQ),
                 )
                 .returning(Profile.server_seq)
             )
@@ -735,7 +771,7 @@ async def report_ready(
         revision = moved
 
         if losing is not None:
-            old_device = await session.get(Device, losing)
+            old_device = await session.get(Device, losing, populate_existing=True)
             if old_device is not None and old_device.revoked_at is None:
                 await alerts.claim(
                     session,

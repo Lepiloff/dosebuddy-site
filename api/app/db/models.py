@@ -18,6 +18,7 @@ from sqlalchemy import (
     DDL,
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     Enum,
     Float,
@@ -34,6 +35,14 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.crypto import EncryptedString
 from app.db.session import Base
+from app.db.publication import (
+    NEXT_SERVER_SEQ,
+    NEXT_SERVER_SEQ_FUNCTION,
+    PUBLICATION_FENCE_FUNCTION,
+    PUBLICATION_LOCK_FUNCTION,
+    PUBLICATION_TABLES,
+    publication_trigger,
+)
 
 SERVER_SEQ = "server_seq"
 
@@ -84,6 +93,9 @@ class Account(Base):
 
 class Device(Base):
     __tablename__ = "devices"
+    __table_args__ = (
+        CheckConstraint("credential_generation >= 0", name="ck_devices_credential_generation"),
+    )
 
     # Client-generated, and stable across app *updates* — the id lives in the
     # device's DataStore, which an update leaves alone. Deleting the app or
@@ -170,6 +182,11 @@ class Device(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    # Logout advances this durable fence; signing in never resets it. Legacy
+    # credentials without the JWT claim are valid only while this remains zero.
+    credential_generation: Mapped[int] = mapped_column(
+        BigInteger, default=0, server_default=text("0"), nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -179,18 +196,24 @@ class Device(Base):
 class RefreshToken(Base):
     """Opaque and stored hashed, so revocation is real.
 
-    A self-contained JWT cannot be withdrawn, and "remove this caregiver" or
-    "unlink this device" have to take effect immediately rather than whenever
-    the token happens to expire.
+    Rotation is stored per token; the device generation also binds the chain
+    to its login lifetime. Replaying an old generation must not revoke a new
+    sign-in's refresh tokens.
     """
 
     __tablename__ = "refresh_tokens"
+    __table_args__ = (
+        CheckConstraint("credential_generation >= 0", name="ck_refresh_tokens_credential_generation"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
     device_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("devices.id", ondelete="CASCADE"), index=True
     )
 
+    credential_generation: Mapped[int] = mapped_column(
+        BigInteger, default=0, server_default=text("0"), nullable=False
+    )
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -281,7 +304,7 @@ class Profile(Base):
     # run backwards, and equal milliseconds at a page boundary lose rows
     # silently and forever.
     server_seq: Mapped[int] = mapped_column(
-        BigInteger, server_default=text(f"nextval('{SERVER_SEQ}')"), index=True
+        BigInteger, server_default=text(NEXT_SERVER_SEQ), index=True
     )
 
     memberships: Mapped[list[ProfileMembership]] = relationship(
@@ -505,7 +528,7 @@ class Medication(Base, SyncMixin):
     # sum, and a derived value on the wire is a second source of truth.
 
     server_seq: Mapped[int] = mapped_column(
-        BigInteger, server_default=text(f"nextval('{SERVER_SEQ}')"), index=True
+        BigInteger, server_default=text(NEXT_SERVER_SEQ), index=True
     )
 
 
@@ -531,7 +554,7 @@ class Schedule(Base, SyncMixin):
     end_date: Mapped[str | None] = mapped_column(String(10), nullable=True)
 
     server_seq: Mapped[int] = mapped_column(
-        BigInteger, server_default=text(f"nextval('{SERVER_SEQ}')"), index=True
+        BigInteger, server_default=text(NEXT_SERVER_SEQ), index=True
     )
 
 
@@ -602,7 +625,7 @@ class DoseEvent(Base, SyncMixin):
     dose_amount: Mapped[float] = mapped_column(Float)
 
     server_seq: Mapped[int] = mapped_column(
-        BigInteger, server_default=text(f"nextval('{SERVER_SEQ}')"), index=True
+        BigInteger, server_default=text(NEXT_SERVER_SEQ), index=True
     )
 
 
@@ -623,7 +646,7 @@ class StockEvent(Base, SyncMixin):
     )
 
     server_seq: Mapped[int] = mapped_column(
-        BigInteger, server_default=text(f"nextval('{SERVER_SEQ}')"), index=True
+        BigInteger, server_default=text(NEXT_SERVER_SEQ), index=True
     )
 
 
@@ -890,3 +913,12 @@ for _table, _name, _column in SET_ONCE_TRIGGERS:
     event.listen(
         Base.metadata, "after_create", DDL(_set_once_trigger(_table, _name, _column))
     )
+
+
+# Defaults need the allocator before CREATE TABLE; statement fences need the
+# tables afterward. Alembic 0021 carries the same frozen definitions.
+for function in (PUBLICATION_LOCK_FUNCTION, NEXT_SERVER_SEQ_FUNCTION, PUBLICATION_FENCE_FUNCTION):
+    event.listen(Base.metadata, "before_create", DDL(function).execute_if(dialect="postgresql"))
+for table in PUBLICATION_TABLES:
+    event.listen(Base.metadata, "after_create",
+                 DDL(publication_trigger(table)).execute_if(dialect="postgresql"))

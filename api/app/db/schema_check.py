@@ -19,7 +19,10 @@ What it checks is what cannot be seen from outside and is load-bearing:
   the parent-immutability ones and the set-once ones, which differ only in
   that WHEN clause and so are the pair a check comparing names alone would
   read as interchangeable;
-* that function still has the body the models declare.
+* those functions still have the bodies the models declare;
+* sync publication statement fences run before defaults and row locks, every
+  mirror default uses the fenced allocator, and the shared sequence uses
+  INCREMENT 1 CACHE 1 NO CYCLE (cached ranges could reverse publication order).
 
 It also prints the authority lease as **this box** has it, which is a different
 statement from the default in the source. A setting that decides whether the
@@ -57,6 +60,14 @@ from app.db.models import (
     PARENT_IS_IMMUTABLE_FUNCTION,
     PARENT_IS_IMMUTABLE_TRIGGERS,
     SET_ONCE_TRIGGERS,
+)
+
+from app.db.publication import (
+    MIRROR_TABLES,
+    NEXT_SERVER_SEQ_FUNCTION,
+    PUBLICATION_FENCE_FUNCTION,
+    PUBLICATION_LOCK_FUNCTION,
+    PUBLICATION_TABLES,
 )
 
 TRIGGER_QUERY = text(
@@ -150,6 +161,88 @@ async def _function_problems(conn) -> list[str]:
     ]
 
 
+async def _publication_problems(conn) -> list[str]:
+    """The fence must run before row locks/defaults, with an uncached sequence."""
+    found: list[str] = []
+    triggers = {
+        table: (kind, enabled, function, arguments, condition)
+        for table, kind, enabled, function, arguments, condition in (
+            await conn.execute(text(
+                "SELECT c.relname, t.tgtype, t.tgenabled::text, p.proname, "
+                "t.tgnargs, t.tgqual IS NOT NULL "
+                "FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid "
+                "JOIN pg_proc p ON p.oid = t.tgfoid "
+                "WHERE c.relnamespace = 'public'::regnamespace "
+                "AND t.tgname = c.relname || '_sync_publication' "
+                "AND t.tgfoid = to_regprocedure('sync_publication_fence()') "
+                "AND t.tgattr::text = ''"
+            ))
+        ).all()
+    }
+    # pg_trigger's bitmask: BEFORE (2), INSERT (4), DELETE (8), UPDATE (16),
+    # without ROW (1), so precisely 30. A row trigger locks too late.
+    for table in PUBLICATION_TABLES:
+        if triggers.get(table) != (30, "O", "sync_publication_fence", 0, False):
+            found.append(f"{table}: sync publication statement fence is missing or changed")
+
+    for signature, definition, returns in (
+        ("sync_publication_lock()", PUBLICATION_LOCK_FUNCTION, "void"),
+        ("next_server_seq()", NEXT_SERVER_SEQ_FUNCTION, "bigint"),
+        ("sync_publication_fence()", PUBLICATION_FENCE_FUNCTION, "trigger"),
+    ):
+        row = (await conn.execute(text(
+            "SELECT pg_get_functiondef(p.oid), p.prorettype::regtype::text, p.provolatile::text "
+            "FROM pg_proc p WHERE p.oid = to_regprocedure(:signature)"
+        ), {"signature": signature})).one_or_none()
+        if (row is None or row[1:] != (returns, "v")
+                or _flat(definition.split("$$")[1]) not in _flat(row[0])):
+            found.append(f"function {signature} is missing or changed")
+
+    sequence = (await conn.execute(text(
+        "SELECT increment_by, cache_size, cycle FROM pg_sequences "
+        "WHERE schemaname = 'public' AND sequencename = 'server_seq'"
+    ))).one_or_none()
+    if sequence != (1, 1, False):
+        found.append("server_seq must use INCREMENT 1 CACHE 1 NO CYCLE")
+
+    defaults = dict((await conn.execute(text(
+        "SELECT table_name, column_default FROM information_schema.columns "
+        "WHERE table_schema = 'public' AND column_name = 'server_seq'"
+    ))).all())
+    for table in MIRROR_TABLES:
+        if defaults.get(table) != "next_server_seq()":
+            found.append(f"{table}.server_seq must default to next_server_seq()")
+    return found
+
+
+async def _credential_problems(conn) -> list[str]:
+    """Revocation depends on a durable non-null, non-negative generation."""
+    found = []
+    columns = dict((table, (kind, nullable, default)) for table, kind, nullable, default in (
+        await conn.execute(text(
+            "SELECT table_name, data_type, is_nullable, column_default "
+            "FROM information_schema.columns WHERE table_schema='public' "
+            "AND column_name='credential_generation'"
+        ))
+    ).all())
+    constraints = dict((table, (definition, validated)) for table, definition, validated in (
+        await conn.execute(text(
+            "SELECT c.relname, pg_get_constraintdef(k.oid), k.convalidated "
+            "FROM pg_constraint k JOIN pg_class c ON c.oid=k.conrelid "
+            "WHERE c.relnamespace='public'::regnamespace "
+            "AND k.conname='ck_' || c.relname || '_credential_generation' AND k.contype='c'"
+        ))
+    ).all())
+    for table in ("devices", "refresh_tokens"):
+        if columns.get(table) != ("bigint", "NO", "0"):
+            found.append(f"{table}.credential_generation must be BIGINT NOT NULL DEFAULT 0")
+        constraint = constraints.get(table)
+        if (constraint is None or not constraint[1]
+                or _plainly(constraint[0]) != "CHECK credential_generation >= 0"):
+            found.append(f"{table}: credential generation CHECK is missing or changed")
+    return found
+
+
 async def problems() -> list[str]:
     engine = create_async_engine(str(get_settings().database_url))
     try:
@@ -158,6 +251,8 @@ async def problems() -> list[str]:
                 await _revision_problems(conn)
                 + await _trigger_problems(conn)
                 + await _function_problems(conn)
+                + await _publication_problems(conn)
+                + await _credential_problems(conn)
             )
     finally:
         await engine.dispose()
@@ -176,7 +271,9 @@ def main() -> int:
         "schema check: at head, "
         f"{len(PARENT_IS_IMMUTABLE_TRIGGERS)} parent-immutability "
         f"and {len(SET_ONCE_TRIGGERS)} set-once triggers in place, "
-        f"function body as declared, authority lease {lease}"
+        f"function bodies and sync publication fences as declared, "
+        f"server_seq INCREMENT 1 CACHE 1 NO CYCLE, durable credential generations, "
+        f"authority lease {lease}"
     )
     return 0
 

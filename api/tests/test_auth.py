@@ -101,13 +101,14 @@ async def test_replaying_a_rotated_token_kills_the_whole_device_session(api, ses
     assert after.status_code == 401
 
 
-async def test_logout_revokes_refresh_but_leaves_the_access_token_alone(api):
+async def test_logout_revokes_refresh_and_access(api):
     pair = await sign_in(api, "sub-logout")
 
     assert (await api.post("/v1/auth/logout", headers=auth_header(pair))).status_code == 204
 
     r = await api.post("/v1/auth/refresh", json={"refresh_token": pair["refresh_token"]})
     assert r.status_code == 401
+    assert (await api.get("/v1/sync/pull", headers=auth_header(pair))).status_code == 401
 
 
 async def test_a_revoked_device_is_refused_on_every_request(api, session):

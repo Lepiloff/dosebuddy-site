@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.push import Delivery
 
+from app.db.publication import NEXT_SERVER_SEQ, lock_publication
 from app.db.models import (
     AlertDelivery,
     AlertKind,
@@ -444,6 +445,9 @@ async def hand_back_unconfirmed(
     if lease is None:
         return 0
 
+    # The selection itself is an authority precondition. Taking the fence only
+    # in the UPDATE trigger lets a completed renewal/claim be overwritten.
+    await lock_publication(session)
     stale = (
         await session.execute(
             select(Profile, DeviceReadiness.updated_at)
@@ -461,7 +465,7 @@ async def hand_back_unconfirmed(
                 # Taking the profile back mid-claim would also drop a claim the
                 # claimant is still working through.
                 Profile.pending_owner_device_id.is_(None),
-            )
+            ).execution_options(populate_existing=True)
         )
     ).all()
 
@@ -469,7 +473,7 @@ async def hand_back_unconfirmed(
     for profile, reported_at in stale:
         if reported_at is not None and now - reported_at <= lease:
             continue
-        previous = await session.get(Device, profile.previous_owner_device_id)
+        previous = await session.get(Device, profile.previous_owner_device_id, populate_existing=True)
         if previous is None or previous.revoked_at is not None:
             # Nowhere to hand back to. Leaving authority where it is keeps a
             # phone that may yet report, which is better than a profile no
@@ -486,7 +490,7 @@ async def hand_back_unconfirmed(
                 # be a published client that will never report, and a lease it
                 # cannot renew would take the profile away again.
                 authority_leased=False,
-                server_seq=text("nextval('server_seq')"),
+                server_seq=text(NEXT_SERVER_SEQ),
             )
         )
         handed += 1
@@ -498,8 +502,9 @@ async def hand_back_unconfirmed(
             silent_for_s=int((now - reported_at).total_seconds()) if reported_at else None,
         )
 
-    if handed:
-        await session.commit()
+    # End even an empty authority pass before alert-row locks and FCM. The
+    # standalone worker calls this before detection/delivery, never after take.
+    await session.commit()
     return handed
 
 

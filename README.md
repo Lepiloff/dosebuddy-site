@@ -67,6 +67,7 @@ cd api && pytest                     # needs TEST_DATABASE_URL pointing at Postg
 | | |
 |---|---|
 | [`docs/v1.1-api-contract.md`](docs/v1.1-api-contract.md) | The wire. What the endpoints take and return, agreed with the app track. Read this to write a client. |
+| [`docs/sync-publication.md`](docs/sync-publication.md) | Публикация cursor в порядке commit, writers/locks, восстановление миграцией 0021 и обязательное окно обслуживания при первом rollout. |
 | [`docs/sync-architecture.md`](docs/sync-architecture.md) | Why the server is built this way, and what breaks if a given line changes. Read before editing `api/app`. |
 | [`docs/v1.1-contract-decisions.md`](docs/v1.1-contract-decisions.md) | Decisions taken while agreeing the contract, with their reasoning. |
 | [`docs/debts.md`](docs/debts.md) | Deferred work and acceptance findings. A debt leaves only with the commit that closes it. |

@@ -41,12 +41,12 @@ from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from app.api.deps import Caller, get_session, sync_caller
+from app.api.deps import Caller, get_session, lock_caller, recheck_caller, sync_caller
+from app.db.publication import NEXT_SERVER_SEQ, lock_publication
 from app.services.alerts import profile_high_water
 from app.api.schemas import Changes, Outcome, PullOut, PushIn, PushOut, RecordOut
 from app.db.models import (
     IMMUTABLE_PARENT_SQLSTATE,
-    SERVER_SEQ,
     Device,
     DeviceReadiness,
     DoseEvent,
@@ -135,7 +135,7 @@ def owned_ids(profiles: dict[uuid.UUID, Role]) -> set[uuid.UUID]:
 # Push
 # ---------------------------------------------------------------------------
 
-NEXT_SEQ = sql_text(f"nextval('{SERVER_SEQ}')")
+NEXT_SEQ = sql_text(NEXT_SERVER_SEQ)
 
 
 async def _upsert(
@@ -380,6 +380,10 @@ async def push(
         # noticed as data that quietly never arrived.
         raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "batch_too_large")
 
+    # Before savepoints and canonical profile advisory locks. A statement
+    # trigger alone cannot order a lock the caller has already acquired.
+    await lock_publication(session)
+    await recheck_caller(session, caller)
     profiles = await visible_profiles(session, caller)
     mine = owned_ids(profiles)
     rejected: list[Outcome] = []
@@ -611,6 +615,10 @@ async def push(
     # moment were worse still: each could point its row at the other's, leaving
     # every phone moving its alarm onto a row that had itself given way.
     #
+    # The publication fence is already held, so today all seq writers are
+    # serialised more broadly. Keep the canonical locks and their sorted order
+    # explicit: they protect this rule independently of a future feed design.
+    #
     # Which profiles the catch-up will touch is read before the lock is taken,
     # and that is safe for the one thing it decides: only this device's own
     # pushes can add rows belonging to this device, so no other transaction can
@@ -786,6 +794,9 @@ async def push(
             .values(adopts_doses_at=None)
         )
 
+    # Capture the issued frontier before releasing publication. Reading it
+    # after commit could report the next writer's still-uncommitted allocation.
+    high = (await session.execute(sql_text("SELECT last_value FROM server_seq"))).scalar_one()
     await session.commit()
 
     if total and len(retry) == total:
@@ -813,7 +824,6 @@ async def push(
             held=dict(Counter(f"{o.entity}:{o.code}" for o in retry)),
         )
 
-    high = (await session.execute(sql_text("SELECT last_value FROM server_seq"))).scalar_one()
     return PushOut(cursor=encode_cursor(int(high)), rejected=rejected, retry=retry)
 
 
@@ -1148,6 +1158,11 @@ async def _page(
     Kept as one function so the difference stays one line rather than two
     implementations that agree today.
     """
+    # Freeze visibility, parent ids, feed keys, hydration and authority through
+    # the caller's cursor commit. These are separate READ COMMITTED queries;
+    # each must observe the same committed publication frontier.
+    await lock_publication(session)
+    await recheck_caller(session, caller)
     since = decode_cursor(cursor)
     profiles = await visible_profiles(session, caller)
     # Sent on every response, including this one. A caller who can see nothing
@@ -1339,6 +1354,10 @@ async def preview(
     page, _reached = await _page(
         session, caller, cursor, request.app.state.settings.authority_lease
     )
+    # Release publication before response delivery, rather than depending on
+    # the request-scoped yield dependency to close after a slow HTTP send.
+    # Preview records no cursor/readiness/capability acknowledgement.
+    await session.rollback()
     return page
 
 
@@ -1394,12 +1413,9 @@ async def record(
     **Nothing is written.** Not `cursor_seq`, not `ready_protocol_at`, not
     `device_readiness`, not `adopts_doses_at` — and by construction rather than
     by discipline, since all four are written in the bodies of `pull` and `push`
-    and this handler has no body of theirs. There is no commit.
-
-    The row and its `server_seq` come from one SELECT, so they cannot disagree.
-    Visibility is a second statement, so a membership revoked in the moment
-    between the two is resolved arbitrarily — exactly as in `_page`, and not
-    worth a lock on a request that writes nothing.
+    and this handler has no body of theirs. Its commit only releases the
+    publication fence, which keeps credential and visibility checks current
+    through the read and is released before HTTP delivery.
     """
     model = RECORD_ENTITIES.get(entity)
     if model is None:
@@ -1408,7 +1424,8 @@ async def record(
         # folding it into `not_found` would make a typo look like a missing row.
         raise HTTPException(422, "unknown_entity")
 
-    row = await session.get(model, record_id)
+    await lock_caller(session, caller)
+    row = await session.get(model, record_id, populate_existing=True)
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "not_found")
 
@@ -1449,10 +1466,12 @@ async def record(
             raise HTTPException(status.HTTP_404_NOT_FOUND, "not_found")
         wire = projected
 
-    return RecordOut(
+    result = RecordOut(
         entity=entity,
         id=row.id,
         server_seq=row.server_seq,
         role=role.value,
         record=wire,
     )
+    await session.commit()
+    return result

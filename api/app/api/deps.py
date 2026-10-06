@@ -9,10 +9,10 @@ from datetime import datetime, timedelta, timezone
 import jwt
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.security import SCOPE_SYNC, read_access_token
+from app.core.security import CREDENTIAL_GENERATION_CLAIM, SCOPE_SYNC, read_access_token
+from app.db.publication import lock_publication
 from app.db.models import Account, Device
 
 bearer = HTTPBearer(auto_error=False)
@@ -31,12 +31,38 @@ async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
 class Caller:
     """Who is asking, from which device, and how far their token reaches."""
 
-    def __init__(self, account: Account, device_id: uuid.UUID, scope: str | None = None):
+    def __init__(
+        self, account: Account, device_id: uuid.UUID, scope: str | None = None,
+        credential_generation: int = 0,
+    ):
         self.account = account
         self.device_id = device_id
+        self.credential_generation = credential_generation
         # None for an ordinary access token: everything. A string restricts the
         # caller to exactly that and nothing else.
         self.scope = scope
+
+
+async def recheck_caller(session: AsyncSession, caller: Caller) -> Device:
+    """Check the original bearer again while publication is already held.
+
+    A handler can have authenticated before waiting for logout -> sign-in. SQL
+    snapshots and ORM objects must both be refreshed, and the claim must still
+    match; an unrevoked device alone no longer proves this session is valid.
+    """
+    account = await session.get(Account, caller.account.id, populate_existing=True)
+    if account is None or account.deleted_at is not None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid_token")
+    device = await session.get(Device, caller.device_id, populate_existing=True)
+    if (device is None or device.account_id != account.id or device.revoked_at is not None
+            or device.credential_generation != caller.credential_generation):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "device_revoked")
+    return device
+
+
+async def lock_caller(session: AsyncSession, caller: Caller) -> Device:
+    await lock_publication(session)
+    return await recheck_caller(session, caller)
 
 
 async def _authenticated(
@@ -55,31 +81,19 @@ async def _authenticated(
         # them tells an attacker which part of the guess was right.
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid_token") from None
 
-    account = await session.get(Account, uuid.UUID(claims["sub"]))
-    if account is None or account.deleted_at is not None:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid_token")
-
-    # The device is re-checked on every request rather than trusted from the
-    # token. Unlinking a device has to take effect immediately, and a 15-minute
-    # window in which a revoked device still works is 15 minutes too long for
-    # access to someone else's health data.
-    device_id = uuid.UUID(claims["did"])
-    device = (
-        await session.execute(
-            select(Device).where(Device.id == device_id, Device.revoked_at.is_(None))
-        )
-    ).scalar_one_or_none()
-    if device is None:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "device_revoked")
-
-    # The whole security of the long-lived sync token is this line. It reaches
-    # exactly the endpoints that name it and nothing else, so a copy of it
-    # cannot move reminder authority, pair a caregiver, or delete the account —
-    # the three things that would turn a leaked token into someone else's phone
-    # ringing, or into no phone ringing at all.
     scope = claims.get("scope")
     if scope not in allowed_scopes:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "token_scope_insufficient")
+
+    # Check and last-seen mutation share the revocation fence. Release it before
+    # the handler: some handlers do Google/Redis work before their DB operation.
+    await lock_publication(session)
+    account = await session.get(Account, uuid.UUID(claims["sub"]), populate_existing=True)
+    if account is None or account.deleted_at is not None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid_token")
+    caller = Caller(account, uuid.UUID(claims["did"]), scope,
+                    claims.get(CREDENTIAL_GENERATION_CLAIM, 0))
+    device = await recheck_caller(session, caller)
 
     # `profile_stale` reads this column to decide whether a phone has gone quiet,
     # so it has to mean "last talked to us" — not "last refreshed a token", which
@@ -92,9 +106,8 @@ async def _authenticated(
     now = datetime.now(timezone.utc)
     if device.last_seen_at is None or now - device.last_seen_at > SEEN_RESOLUTION:
         device.last_seen_at = now
-        await session.commit()
-
-    return Caller(account=account, device_id=device_id, scope=scope)
+    await session.commit()
+    return caller
 
 
 async def current_caller(

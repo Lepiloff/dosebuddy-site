@@ -1,8 +1,8 @@
 """Tokens: minting, hashing, verifying.
 
 Two kinds, on purpose. The access token is a short-lived JWT the server can
-check without touching the database. The refresh token is opaque and stored
-hashed, so it can actually be revoked — "remove this caregiver" and "unlink this
+verify cryptographically; request authentication also checks its device
+generation. The refresh token is opaque and stored hashed, so it can be revoked — "remove this caregiver" and "unlink this
 device" have to take effect now, not whenever a JWT happens to expire.
 """
 
@@ -34,9 +34,8 @@ PAIRING_CODE_TTL = timedelta(minutes=10)
 #   - it grants **only** sync, so a copy cannot move reminder authority, pair a
 #     new caregiver, or delete the account;
 #   - it dies with the device, because deps.current_caller re-reads the device
-#     row on every request and refuses a revoked one. That check already existed
-#     for "unlink this device now", and it is what makes a long-lived signed
-#     token revocable without storing anything.
+#     row on every request and refuses revoked devices and old credential
+#     generations. Signing in again cannot revive a revoked generation.
 #
 # What it gives up: rotation, and with it the ability to notice a stolen copy in
 # use. Accepted knowingly. The device already holds a refresh token that lives
@@ -47,6 +46,9 @@ SYNC_TOKEN_TTL = timedelta(days=90)
 # everything. Present means restricted to exactly that, and nothing else.
 SCOPE_SYNC = "sync"
 
+# Internal to the server: clients store JWTs as opaque credentials.
+CREDENTIAL_GENERATION_CLAIM = "dg"
+
 # Crockford-ish: no I, L, O, U. Someone reads this aloud off one phone and types
 # it into another, so the characters that get misheard or misread are removed
 # rather than validated after the fact.
@@ -54,23 +56,29 @@ CODE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 CODE_LENGTH = 6
 
 
-def mint_access_token(secret: str, account_id: uuid.UUID, device_id: uuid.UUID) -> tuple[str, int]:
+def mint_access_token(
+    secret: str, account_id: uuid.UUID, device_id: uuid.UUID, credential_generation: int = 0
+) -> tuple[str, int]:
     now = datetime.now(timezone.utc)
     payload = {
         "sub": str(account_id),
         "did": str(device_id),
+        CREDENTIAL_GENERATION_CLAIM: credential_generation,
         "iat": int(now.timestamp()),
         "exp": int((now + ACCESS_TOKEN_TTL).timestamp()),
     }
     return jwt.encode(payload, secret, algorithm="HS256"), int(ACCESS_TOKEN_TTL.total_seconds())
 
 
-def mint_sync_token(secret: str, account_id: uuid.UUID, device_id: uuid.UUID) -> tuple[str, int]:
+def mint_sync_token(
+    secret: str, account_id: uuid.UUID, device_id: uuid.UUID, credential_generation: int = 0
+) -> tuple[str, int]:
     """Long-lived, and good for sync alone. See SYNC_TOKEN_TTL."""
     now = datetime.now(timezone.utc)
     payload = {
         "sub": str(account_id),
         "did": str(device_id),
+        CREDENTIAL_GENERATION_CLAIM: credential_generation,
         "scope": SCOPE_SYNC,
         "iat": int(now.timestamp()),
         "exp": int((now + SYNC_TOKEN_TTL).timestamp()),
@@ -80,7 +88,18 @@ def mint_sync_token(secret: str, account_id: uuid.UUID, device_id: uuid.UUID) ->
 
 def read_access_token(secret: str, token: str) -> dict:
     """Raises jwt.PyJWTError on anything wrong — expiry, signature, shape."""
-    return jwt.decode(token, secret, algorithms=["HS256"])
+    claims = jwt.decode(token, secret, algorithms=["HS256"])
+    # Missing is the pre-generation format. Never infer its generation from the
+    # current device row: that would revive it after logout and a new sign-in.
+    generation = claims.get(CREDENTIAL_GENERATION_CLAIM, 0)
+    if type(generation) is not int or not 0 <= generation <= 2**63 - 1:
+        raise jwt.InvalidTokenError("invalid credential generation")
+    try:
+        uuid.UUID(claims["sub"])
+        uuid.UUID(claims["did"])
+    except (KeyError, TypeError, ValueError, AttributeError):
+        raise jwt.InvalidTokenError("invalid credential identity") from None
+    return claims
 
 
 def new_refresh_token() -> str:
