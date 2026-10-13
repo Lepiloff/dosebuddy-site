@@ -69,6 +69,9 @@ from app.db.publication import (
     PUBLICATION_LOCK_FUNCTION,
     PUBLICATION_TABLES,
 )
+from app.db.alert_eligibility import (
+    RETIRE_CAREGIVER_FUNCTION, RETIRE_CAREGIVER_TRIGGERS,
+)
 
 TRIGGER_QUERY = text(
     "SELECT c.relname, t.tgname, pg_get_triggerdef(t.oid) "
@@ -243,6 +246,39 @@ async def _credential_problems(conn) -> list[str]:
     return found
 
 
+async def _alert_eligibility_problems(conn) -> list[str]:
+    """Successful consent changes must durably retire pending caregiver debt."""
+    found = []
+    triggers = {
+        (table, name): (definition, kind, enabled, function, arguments, columns)
+        for table, name, definition, kind, enabled, function, arguments, columns in (
+            await conn.execute(text(
+                "SELECT c.relname, t.tgname, pg_get_triggerdef(t.oid), t.tgtype, "
+                "t.tgenabled::text, p.proname, t.tgnargs, t.tgattr::text "
+                "FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid "
+                "JOIN pg_proc p ON p.oid=t.tgfoid "
+                "WHERE NOT t.tgisinternal AND c.relnamespace='public'::regnamespace"
+            ))
+        ).all()
+    }
+    for table, name, operation, condition in RETIRE_CAREGIVER_TRIGGERS:
+        row = triggers.get((table, name))
+        # AFTER ROW UPDATE=17, DELETE=9. Column-restricted or disabled variants
+        # must not pass: alternative writers need the same lifecycle boundary.
+        if (row is None or row[1:] != (
+            17 if operation == "UPDATE" else 9, "O", "retire_caregiver_deliveries", 0, "",
+        ) or f"when {_plainly(condition).lower()} execute function" not in _plainly(row[0]).lower()):
+            found.append(f"{table}: caregiver retirement trigger {name} is missing or changed")
+    row = (await conn.execute(text(
+        "SELECT pg_get_functiondef(p.oid), p.prorettype::regtype::text, p.provolatile::text "
+        "FROM pg_proc p WHERE p.oid=to_regprocedure('retire_caregiver_deliveries()')"
+    ))).one_or_none()
+    if (row is None or row[1:] != ("trigger", "v")
+            or _flat(RETIRE_CAREGIVER_FUNCTION.split("$$")[1]) not in _flat(row[0])):
+        found.append("function retire_caregiver_deliveries() is missing or changed")
+    return found
+
+
 async def problems() -> list[str]:
     engine = create_async_engine(str(get_settings().database_url))
     try:
@@ -253,6 +289,7 @@ async def problems() -> list[str]:
                 + await _function_problems(conn)
                 + await _publication_problems(conn)
                 + await _credential_problems(conn)
+                + await _alert_eligibility_problems(conn)
             )
     finally:
         await engine.dispose()
@@ -273,6 +310,7 @@ def main() -> int:
         f"and {len(SET_ONCE_TRIGGERS)} set-once triggers in place, "
         f"function bodies and sync publication fences as declared, "
         f"server_seq INCREMENT 1 CACHE 1 NO CYCLE, durable credential generations, "
+        f"caregiver consent retirement, "
         f"authority lease {lease}"
     )
     return 0

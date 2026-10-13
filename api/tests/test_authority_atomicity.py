@@ -20,7 +20,7 @@ from app.db.models import (
 from app.db.publication import NEXT_SERVER_SEQ, lock_publication
 from app.services import alerts
 from tests.conftest import auth_header
-from tests.test_sync import _owner_with_data
+from tests.test_sync import _owner_with_data, _pair
 from tests.test_sync_publication import _pid, _waiting
 
 pytestmark = pytest.mark.asyncio
@@ -67,7 +67,7 @@ async def world(api, db_engine):
     transport.raise_app_exceptions = False
     yield SimpleNamespace(api=api, maker=maker, engine=db_engine, account_id=account_id,
                           pid=uuid.UUID(pid), sid=uuid.UUID(sid), a=device_a, b=device_b,
-                          c=device_c, headers=headers, pids=pids)
+                          c=device_c, headers=headers, pids=pids, owner=owner)
     api.app.dependency_overrides.pop(get_session, None)
     transport.raise_app_exceptions = old_raise
 
@@ -625,9 +625,13 @@ async def test_configured_empty_lease_scan_does_not_hold_publication_across_fcm(
     from app.services.push import Delivery
     from app.worker import scan_once
     w = world
+    caregiver = await _pair(w.api, w.owner, str(w.pid))
+    caregiver_id = uuid.UUID(caregiver["account_id"])
     now = utcnow()
     async with w.maker() as seed:
-        seed.add(AlertDelivery(account_id=w.account_id, profile_id=w.pid,
+        await seed.execute(update(Device).where(Device.account_id == caregiver_id)
+                           .values(push_token="synthetic-caregiver"))
+        seed.add(AlertDelivery(account_id=caregiver_id, profile_id=w.pid,
                                kind=AlertKind.dose_missed, subject_id=str(uuid.uuid4()),
                                state="pending", attempts=0, next_attempt_at=now,
                                expires_at=now + timedelta(hours=1)))

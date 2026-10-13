@@ -35,6 +35,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.crypto import EncryptedString
 from app.db.session import Base
+from app.db.alert_eligibility import (
+    RETIRE_CAREGIVER_FUNCTION, RETIRE_CAREGIVER_TRIGGERS, retirement_trigger,
+)
 from app.db.publication import (
     NEXT_SERVER_SEQ,
     NEXT_SERVER_SEQ_FUNCTION,
@@ -692,6 +695,7 @@ class AlertState(str, enum.Enum):
     # Outlived its usefulness before it could be delivered. Telling a caregiver
     # at noon about a dose missed at breakfast is help; telling them on Thursday
     # about Monday is noise they cannot act on.
+    # Also terminal when caregiver consent ends, even while the TTL is live.
     expired = "expired"
 
 
@@ -922,3 +926,10 @@ for function in (PUBLICATION_LOCK_FUNCTION, NEXT_SERVER_SEQ_FUNCTION, PUBLICATIO
 for table in PUBLICATION_TABLES:
     event.listen(Base.metadata, "after_create",
                  DDL(publication_trigger(table)).execute_if(dialect="postgresql"))
+
+# Alembic 0023 carries the same frozen consent-retirement definitions.
+event.listen(Base.metadata, "after_create",
+             DDL(RETIRE_CAREGIVER_FUNCTION).execute_if(dialect="postgresql"))
+for trigger in RETIRE_CAREGIVER_TRIGGERS:
+    event.listen(Base.metadata, "after_create",
+                 DDL(retirement_trigger(*trigger)).execute_if(dialect="postgresql"))

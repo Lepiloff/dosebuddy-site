@@ -67,7 +67,7 @@ row locks берут **после** publication, если транзакция �
 locks не пересекаются. Нельзя брать publication после `FOR UPDATE` alert delivery.
 
 `alert_deliveries` намеренно исключена: worker `take` удерживает row во время
-FCM, затем только читает profile/device и сохраняет delivery, не пишет защищённые
+FCM, затем только читает eligibility/profile/device и сохраняет delivery, не пишет защищённые
 таблицы. FCM не удерживает publication **непосредственно**. Но account/profile
 cascade может ждать эту строку; конфликт queue тоже может задержать транзакцию.
 `sync_publication_lock` задаёт transaction-local `lock_timeout = 5000ms` до
@@ -139,6 +139,47 @@ Regression fixtures обновляют настоящую схему 0020 с п�
 tombstone, завышают Device/readiness cursors, прерывают переиздание последней
 таблицы, повторяют upgrade и проверяют сохранность данных и восстановление cursor.
 
+<a id="caregiver-consent-retirement"></a>
+## Завершение caregiver consent (AUD-006, 0023)
+
+Общий query-builder задаёт eligibility detection и свежего dispatch: живое
+`with_alerts`, неудалённый профиль, живые recipient и owner accounts.
+Caregiver `claim` берёт publication **до** проверки/insert, чтобы stale detection
+не создала новый intent после revoke. Worker завершает detection transaction
+до delivery lock/FCM. Dispatch под `AlertDelivery FOR UPDATE SKIP LOCKED`
+делает свежий SQL `EXISTS` без lifecycle locks и ORM snapshot; неeligible
+intent становится durable `expired`. Authority nudge сохраняет прежний путь.
+
+`0023` и model metadata содержат одинаковые AFTER ROW guards; миграция хранит
+замороженный SQL. Guard работает на фактическом eligible→ineligible переходе
+membership, живом membership DELETE и profile/account soft delete. Удаление
+старого revoked history не отменяет новое live membership. Hard profile/account
+DELETE ждёт delivery row при каскаде и удаляет её. Отменённый pending unique
+intent остаётся завершённым при regrant. Upgrade также завершает уже сохранённые
+неeligible caregiver debts, сохраняя sent и authority rows. `schema_check`
+проверяет guards, условия, активность и полное тело функции.
+
+Порядок revoke/downgrade/delete: publication → lifecycle rows → pending
+delivery rows → commit/ack. Worker: delivery row → eligibility read → send →
+delivery commit, **без** publication/membership lock после delivery lock.
+Lifecycle writer может ждать уже начатый send; send завершится до successful
+commit/ack. После acknowledgement новый send отменённого intent не начинается.
+FCM, уже принявший сообщение, всё ещё может доставить его позже. DB wait
+ограничен прежними 5 s: timeout откатывает lifecycle transaction и не выдаёт
+success; HTTP revoke rollback/retry проверен на настоящей PostgreSQL.
+
+Host tests используют настоящий HTTP/worker/PostgreSQL, приостановленный fake
+sender, оба порядка queue/revoke, retry/no-token/regrant и настоящую0022
+migration fixture с interrupted cleanup/rollback/retry. FCM и Android local
+role/notification поведение требуют отдельного live gate; deploy не выполнен.
+
+Проверено13.10: на approved`67264b5` все семь финальных red scenarios падают
+по ожидаемой eligibility/retirement причине; scoped gate (worker, pairing,
+auth/account, publication, authority, schema, retention, migration) —
+**209 passed**. Empty upgrade→head/schema_check, точное metadata/migration
+сравнение **38 indexes / 23 triggers / 5 functions**, downgrade→base — PASS.
+Это synthetic host PostgreSQL evidence, без production capacity обещаний.
+
 <a id="first-rollout-requires-a-maintenance-window"></a>
 ## Первый rollout требует окна обслуживания
 
@@ -148,10 +189,12 @@ tombstone, завышают Device/readiness cursors, прерывают пер�
 не подходит для первого 0021: старые readers не берут page fence, а старый порядок
 canonical locks не должен пересекаться с новым кодом/схемой.
 
-До автоматического deploy, впервые содержащего 0021 или 0022, нужны проверенная
+До автоматического deploy, впервые содержащего 0021, 0022 или 0023, нужны проверенная
 revision/image и явное окно обслуживания. Даже если 0021 уже установлен,
 первый 0022 требует остановки старых API/issuers/worker: старый auth-код
-не проверяет поколения и не должен работать с новой схемой. Из `/home/ubuntu/dosebuddy-site/deploy` владелец должен
+не проверяет поколения и не должен работать с новой схемой. Первый0023 также
+требует остановки прежнего worker: он не проверяет consent при dispatch.
+Из `/home/ubuntu/dosebuddy-site/deploy` владелец должен
 остановить **все** экземпляры API/worker и применить проверенный образ:
 
 ```bash

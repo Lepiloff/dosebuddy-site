@@ -20,15 +20,17 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import structlog
-from sqlalchemy import func, select, text, union_all
+from sqlalchemy import Select, func, select, text, union_all
 from sqlalchemy import update as sa_update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.services.push import Delivery
 
 from app.db.publication import NEXT_SERVER_SEQ, lock_publication
 from app.db.models import (
+    Account,
     AlertDelivery,
     AlertKind,
     AlertState,
@@ -75,18 +77,51 @@ class Alert:
     # be missing three of its own in the first place.
 
 
+def _eligible_watchers() -> Select[tuple[ProfileMembership]]:
+    """Consent needs a live profile, recipient and owning account."""
+    owner = aliased(Account)
+    return (
+        select(ProfileMembership)
+        .join(Profile, ProfileMembership.profile_id == Profile.id)
+        .join(Account, ProfileMembership.account_id == Account.id)
+        .join(owner, Profile.owner_account_id == owner.id)
+        .where(
+            ProfileMembership.role == Role.with_alerts,
+            ProfileMembership.revoked_at.is_(None),
+            Profile.deleted_at_ms.is_(None),
+            Account.deleted_at.is_(None),
+            owner.deleted_at.is_(None),
+        )
+    )
+
+
 async def _watchers(session: AsyncSession) -> list[ProfileMembership]:
     """Only `with_alerts`. A viewer asked to see, not to be interrupted."""
     return list(
         (
-            await session.execute(
-                select(ProfileMembership).where(
-                    ProfileMembership.role == Role.with_alerts,
-                    ProfileMembership.revoked_at.is_(None),
-                )
-            )
+            await session.execute(_eligible_watchers())
         ).scalars()
     )
+
+
+async def caregiver_eligible(
+    session: AsyncSession, account_id: uuid.UUID, profile_id: uuid.UUID,
+) -> bool:
+    """Fresh committed consent, without lifecycle locks or cached ORM objects.
+
+    Dispatch calls this only after locking its delivery row. A concurrent
+    revocation must retire that same row before it can commit/ack, so it waits
+    for any send already holding it. Do not take publication here: that would
+    invert the lifecycle writer's publication -> delivery lock order.
+    """
+    eligible = (
+        _eligible_watchers().with_only_columns(ProfileMembership.id)
+        .where(
+            ProfileMembership.account_id == account_id,
+            ProfileMembership.profile_id == profile_id,
+        )
+    )
+    return bool((await session.execute(select(eligible.exists()))).scalar_one())
 
 
 async def tokens_for(session: AsyncSession, account_id: uuid.UUID) -> tuple[str, ...]:
@@ -301,6 +336,13 @@ async def claim(session: AsyncSession, alert: Alert, now: datetime) -> bool:
     count as delivery: the row starts `pending`, and only a send that FCM
     accepted moves it to `sent`.
     """
+    if alert.kind is not AlertKind.reminder_authority_lost:
+        # Detection may have read consent before a revoke. Serialize the final
+        # eligibility read and queue insert with lifecycle writers, then end
+        # this transaction before taking any delivery row or calling FCM.
+        await lock_publication(session)
+        if not await caregiver_eligible(session, alert.account_id, alert.profile_id):
+            return False
     stmt = (
         insert(AlertDelivery)
         .values(

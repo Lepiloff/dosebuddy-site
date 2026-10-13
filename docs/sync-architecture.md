@@ -407,6 +407,34 @@ receiver'а** — `Start proc … for broadcast FlutterFirebaseMessagingReceiver
 списания попытки, и пишется `alert.no_recipient`. Молчание об этом однажды
 спрятало настоящий отказ на два дня.
 
+### Согласие проверяется при отправке (локальный AUD-006, 13.10)
+
+Pending intent больше не считается бессрочным правом на caregiver send.
+Detection и dispatch используют одну eligibility query: живое `with_alerts`,
+неудалённый профиль, живые аккаунты опекуна и владельца. `claim` берёт
+publication до проверки/insert, затем worker завершает detection transaction
+до `take`/FCM. Dispatch под delivery row lock читает свежий SQL `EXISTS`, без
+ORM cache, membership lock или publication; неeligible debt завершает как
+`expired` и коммитит. Authority nudge сохраняет собственный путь.
+
+DB guards схемы`0023` завершают pending в транзакции revoke/downgrade/delete:
+membership revoke/role change/hard delete, profile/account soft delete; hard
+profile/account erasure удаляет очередь каскадом. Guard учитывает фактический
+переход OLD→NEW, поэтому проигравший LWW tombstone ничего не отменяет. Уборка
+старого revoked membership не затрагивает новое live consent. Retired unique
+intent остаётся завершённым при повторной выдаче доступа. Upgrade атомарно
+завершает неeligible старую pending очередь; schema_check проверяет guard SQL.
+
+Successful lifecycle commit/HTTP acknowledgement — граница будущих sends.
+Если worker уже держит delivery row, lifecycle transaction ждёт завершения
+send/commit; его прежний 5 s DB timeout даёт rollback и ошибку вместо success.
+После acknowledgement отменённый intent уже не начинает новую отправку.
+Сообщение, принятое FCM раньше, может прийти позже: его cloud delivery и local
+revoked-set клиента — отдельная граница. Lock order, migration и host evidence —
+[sync publication](sync-publication.md#caregiver-consent-retirement);
+`test_alert_eligibility.py`/`test_alert_eligibility_migration.py` используют
+настоящие HTTP/PostgreSQL/worker, fake sender. Deploy и live FCM не выполнялись.
+
 ---
 
 ## 8. Токены
@@ -562,6 +590,9 @@ Downgrade или возврат старого auth-кода теряет эту
 ## 10. Открытое
 
 Ведётся в [`debts.md`](debts.md). Кратко, на 19.08:
+
+Это датированный snapshot; текущий статус AUD-006 после локального исправления
+13.10 находится в [debts.md](debts.md#отмена-заявленных-алертов-при-отзыве-членства).
 
 - **Отзыв членства не гасит уже заявленные алерты** — окно до 6 часов по TTL.
   `due()` должен джойнить живое членство. До релиза Family.

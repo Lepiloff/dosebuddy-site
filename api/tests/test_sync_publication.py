@@ -312,13 +312,15 @@ async def test_slow_fcm_does_not_directly_hold_publication_and_cascade_wait_is_b
     from app.db.models import AlertDelivery, AlertKind, Device, Profile, utcnow
     from app.services.push import Delivery
     from app.worker import scan_once
+    from tests.test_sync import _pair
 
     owner, pid, mid, sid, did = await _owner_with_data(api)
+    caregiver = await _pair(api, owner, pid)
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
     now, entered, release = utcnow(), asyncio.Event(), asyncio.Event()
     async with maker() as seed:
-        await seed.execute(update(Device).where(Device.id == _device(api, owner)).values(push_token="synthetic-fcm"))
-        seed.add(AlertDelivery(account_id=uuid.UUID(owner["account_id"]), profile_id=uuid.UUID(pid),
+        await seed.execute(update(Device).where(Device.id == _device(api, caregiver)).values(push_token="synthetic-fcm"))
+        seed.add(AlertDelivery(account_id=uuid.UUID(caregiver["account_id"]), profile_id=uuid.UUID(pid),
                                kind=AlertKind.dose_missed, subject_id=did, state="pending", attempts=0,
                                next_attempt_at=now, expires_at=now + timedelta(hours=1)))
         await seed.commit()

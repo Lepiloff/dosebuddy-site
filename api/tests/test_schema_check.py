@@ -14,7 +14,7 @@ from sqlalchemy import text
 
 from app.db.models import PARENT_IS_IMMUTABLE_TRIGGERS, SET_ONCE_TRIGGERS
 from app.db.schema_check import (
-    _credential_problems, _function_problems, _publication_problems, _trigger_problems,
+    _alert_eligibility_problems, _credential_problems, _function_problems, _publication_problems, _trigger_problems,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -27,6 +27,7 @@ async def test_a_schema_built_from_the_models_has_nothing_to_report(session):
     assert await _function_problems(conn) == []
     assert await _publication_problems(conn) == []
     assert await _credential_problems(conn) == []
+    assert await _alert_eligibility_problems(conn) == []
 
 
 async def test_a_missing_trigger_is_named(session):

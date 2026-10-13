@@ -119,6 +119,15 @@ async def scan_once(
                 await session.commit()
                 continue
 
+            if not await alerts.caregiver_eligible(
+                session, delivery.account_id, delivery.profile_id,
+            ):
+                # Consent ended while this durable intent was waiting. Keep
+                # its unique fence so regrant cannot revive the old event.
+                delivery.state = alerts.AlertState.expired.value
+                await session.commit()
+                continue
+
             tokens = by_account.get(delivery.account_id, ())
             if not tokens:
                 # Nobody to tell right now. Not a failure of this attempt — the
