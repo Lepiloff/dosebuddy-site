@@ -41,7 +41,8 @@ async def scan_once(
 
     Now the claim only says the alert exists and is owed. Delivery is a separate
     pass over what is owed, with its own attempts and backoff. Retried pushes
-    may duplicate; pending collapse and client dedup limit different windows.
+    may duplicate; caregiver events rely on client dedup. Authority nudges alone
+    collapse pending copies whose newer state replaces the old one.
 
     Returns the number of alerts delivered in this pass.
 

@@ -662,6 +662,45 @@ replay. У caregiver payload нет client expiry. Это требует отд�
 
 ---
 
+<a id="caregiver-delivery-recovery"></a>
+## Пределы FCM и восстановление caregiver-событий
+
+**AUD-009: конкретный collapse-дефект исправлен локально13.10.2026;
+independent review одобрен, live gate открыт. Остаточный долг открыт.**
+
+Пять независимых caregiver kind/profile/subject раньше давали пять разных
+pending collapse keys на одном token при лимите FCM четыре. Теперь `Push`
+принимает `str | None`, caregiver выбирает `None`, а `FcmPush` полностью
+опускает `android.collapse_key` в data-only HTTP JSON. Payload/endpoints/schema
+и клиентский posting/shown ledger сохраняются; retries дедуплицируются на
+клиенте по `(type, profile_id, subject_id)`. Только authority nudge сохраняет
+прежний заменяемый ключ по профилю; обычный pull остаётся источником authority.
+
+Это снимает конкретную причину вытеснения caregiver при5+ collapse keys, но
+не даёт exactly-once или гарантированной доставки. [Официальный FCM контракт](https://firebase.google.com/docs/cloud-messaging/customize-messages/collapsible-message-types),
+сверенный13.10, отдельно ограничивает Android100 pending non-collapsible
+messages на token: при достижении лимита удаляется весь сохранённый набор,
+после возвращения в сеть устройство получает специальный сигнал о потере.
+Порядок не гарантирован, retries и разные профили/kinds делят вместимость.
+Несколько authority profiles по-прежнему делят четыре collapse keys.
+
+Серверное `sent` означает только принятие FCM. Durable caregiver inbox,
+client receipt/ack на сервер и recovery через deleted-messages сигнал отсутствуют.
+Pull отдаёт данные доз, а не caregiver delivery; `showPending` может поднять
+только уже полученное и заявленное локально событие. Overflow/deletion, долгий
+offline, force-stop и потеря до receipt остаются. Их recovery потребует
+отдельного решения владельца о продукте/контракте; inbox/API/dependencies
+в AUD-009 не добавлены.
+
+Host evidence — `tests/test_fcm_collapse.py`: worker→настоящий `FcmPush`→
+httpx JSON,5/10 разных событий на одном token, оба kinds и два профиля,
+503→200 с прежним event identity/исходным expiry, смешанный authority поток.
+Реальная PostgreSQL; OAuth/HTTP synthetic. Сохранены red на3bad65c и scoped
+green logs/JUnit в private temp fixture. Отдельно остаётся согласованная
+device/FCM offline burst/repeat/deletion/recovery проверка с новым transport,
+без автоматического deploy или запуска телефонов. Детальный механизм —
+[§5 API contract](v1.1-api-contract.md#5-алерты).
+
 ## Nudge о потере авторитета не работал никогда — ЗАКРЫТО 18.08
 
 **Закрыт целиком: шаги 0, 1, 2 и вариант (б). B7 перепрогнан и пройден.**

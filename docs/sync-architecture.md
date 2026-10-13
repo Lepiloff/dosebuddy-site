@@ -407,6 +407,34 @@ receiver'а** — `Start proc … for broadcast FlutterFirebaseMessagingReceiver
 списания попытки, и пишется `alert.no_recipient`. Молчание об этом однажды
 спрятало настоящий отказ на два дня.
 
+### Независимые события и collapse (локальный AUD-009, 13.10)
+
+Caregiver data-only messages — самостоятельные события, а не сигнал прочитать
+durable inbox. `collapse_key` возвращает для них `None`; настоящий `FcmPush`
+**не включает поле** `android.collapse_key` в HTTP JSON. Пять или десять
+различных kind/profile/subject на одном token больше не занимают пять/десять
+pending collapse keys. Сужение keys до общего kind/profile тоже неверно:
+оно заменило бы разные события. Дедуп полученных retries остаётся на клиенте
+по `(type, profile_id, subject_id)`; public `data` и endpoints прежние.
+Authority nudge по-прежнему заменяем и сохраняет ключ
+`reminder_authority_lost:<profile_id>`; authoritative pull восстанавливает
+владение независимо от этого ускоряющего сигнала.
+
+Это устранение конкретного четырёхключевого caregiver-дефекта, не гарантия
+доставки FCM: Android имеет отдельный лимит100 pending non-collapsible
+messages, удаляет сохранённые при его достижении, а порядок не гарантирован.
+`sent` остаётся transport acceptance. Durable caregiver inbox и receipt/ack
+клиента на сервер отсутствуют, как и восстановление через deleted-messages сигнал;
+`showPending` знает только локально полученное. Остаточный долг, включая
+offline/deletion и общий token для разных профилей, —
+[debts](debts.md#caregiver-delivery-recovery); текущая форма transport —
+[§5 contract](v1.1-api-contract.md#5-алерты).
+
+`test_fcm_collapse.py` проверяет production worker→`build_push`→`FcmPush`→
+настоящий httpx JSON с перехваченным transport:5/10 событий, два kinds/профиля,
+повтор503→200 и caregiver+authority на одном token. PostgreSQL настоящий,
+OAuth/FCM synthetic; Firebase pending storage и телефоны не наблюдались.
+
 ### Согласие проверяется при отправке (локальный AUD-006, 13.10)
 
 Pending intent больше не считается бессрочным правом на caregiver send.
@@ -567,8 +595,9 @@ Downgrade или возврат старого auth-кода теряет эту
 6. **Защита `cursor_seq` в `WHERE`** — перенос в значение позволит откатить
    курсор назад повтором запроса.
 7. **Сверка шлюза с текущим `server_seq`**, а не с ревизией постановки в очередь.
-8. **`profile_id` в `uq_alert_once` и в `collapse_key`** — без него опекун с
-   двумя подопечными получает один сигнал на двоих.
+8. **`profile_id` в `uq_alert_once`, caregiver payload и клиентском ledger** —
+   без него опекун с двумя подопечными получает один сигнал на двоих. Caregiver
+   transport не использует collapse; у authority nudge ключ остаётся по профилю.
 9. **У API нет отправителя push.** Появится — вернётся вопрос об учётных данных
    FCM в процессе, смотрящем в интернет.
 10. **Триггеры `parent_is_immutable`** — и проверка родителя по лежащей строке в

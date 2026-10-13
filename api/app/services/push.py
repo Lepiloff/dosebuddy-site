@@ -53,7 +53,7 @@ class Delivery(enum.Enum):
 
 class Push(Protocol):
     async def send(
-        self, token: str, data: dict[str, str], collapse: str, ttl_seconds: int,
+        self, token: str, data: dict[str, str], collapse: str | None, ttl_seconds: int,
         *, expires_at: datetime | None = None, clock: Clock | None = None,
     ) -> Delivery: ...
 
@@ -67,7 +67,7 @@ class LoggingPush:
     """
 
     async def send(
-        self, token: str, data: dict[str, str], collapse: str, ttl_seconds: int,
+        self, token: str, data: dict[str, str], collapse: str | None, ttl_seconds: int,
         *, expires_at: datetime | None = None, clock: Clock | None = None,
     ) -> Delivery:
         if ttl_seconds <= 0 or (
@@ -100,7 +100,7 @@ class FcmPush:
         self._credentials_path = credentials_path
 
     async def send(
-        self, token: str, data: dict[str, str], collapse: str, ttl_seconds: int,
+        self, token: str, data: dict[str, str], collapse: str | None, ttl_seconds: int,
         *, expires_at: datetime | None = None, clock: Clock | None = None,
     ) -> Delivery:
         clock = clock or utcnow
@@ -122,13 +122,14 @@ class FcmPush:
             "token": token,
             "data": data,
             "android": {
-                # Collapse can replace pending copies; it cannot retract a
-                # copy already delivered. Retries still need client dedup.
-                "collapse_key": collapse,
                 "priority": "high",
                 # Filled at the HTTP boundary, after credential/client waits.
             },
         }
+        if collapse is not None:
+            # Only replaceable nudges use collapse. Independent data-only
+            # events omit the field entirely, rather than sending null/empty.
+            message["android"]["collapse_key"] = collapse
 
         try:
             async with httpx.AsyncClient(timeout=10) as client:

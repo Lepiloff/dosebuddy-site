@@ -49,10 +49,10 @@ class RecordingPush:
 
     def __init__(self):
         self.sent: list[tuple[str, dict]] = []
-        self.collapse: list[str] = []
+        self.collapse: list[str | None] = []
         self.ttl: list[int] = []
 
-    async def send(self, token: str, data: dict, collapse: str, ttl_seconds: int, **kwargs) -> Delivery:
+    async def send(self, token: str, data: dict, collapse: str | None, ttl_seconds: int, **kwargs) -> Delivery:
         self.sent.append((token, data))
         self.collapse.append(collapse)
         self.ttl.append(ttl_seconds)
@@ -71,7 +71,7 @@ class FailingPush:
         self.outcome = outcome
         self.attempts = 0
 
-    async def send(self, token: str, data: dict, collapse: str, ttl_seconds: int, **kwargs) -> Delivery:
+    async def send(self, token: str, data: dict, collapse: str | None, ttl_seconds: int, **kwargs) -> Delivery:
         self.attempts += 1
         if self.remaining > 0:
             self.remaining -= 1
@@ -368,12 +368,11 @@ async def test_a_refused_push_is_retried_rather_than_lost(api, session, db_engin
     assert d.sent_at is not None
 
 
-async def test_a_retry_carries_the_same_collapse_key(api, session, db_engine):
-    """What makes retrying safe.
+async def test_a_retry_keeps_the_same_client_dedup_identity(api, session, db_engine):
+    """The client must recognize a retried event without provider collapse.
 
-    Two deliveries of one alert must land as one notification, or at-least-once
-    delivery would occasionally wake a caregiver twice for a single dose — and
-    someone woken twice starts ignoring the third time.
+    Distinct events cannot share the provider's four-key storage budget. A
+    repeat therefore carries the same data for the client's durable ledger.
     """
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -390,8 +389,8 @@ async def test_a_retry_carries_the_same_collapse_key(api, session, db_engine):
 
     await scan_once(maker, pusher, now=t0 + timedelta(minutes=2))
 
-    assert len(pusher.collapse) == 2
-    assert pusher.collapse[0] == pusher.collapse[1]
+    assert pusher.collapse == [None, None]
+    assert pusher.sent[0] == pusher.sent[1]
 
 
 async def test_a_dead_token_is_not_retried(api, session, db_engine):
@@ -564,8 +563,9 @@ async def test_two_watched_profiles_each_get_their_own_stale_alert(api, session,
     told_about = {p["profile_id"] for _, p in pusher.sent if p["type"] == "profile_stale"}
     assert told_about == {pid_a, pid_b}, f"only heard about {told_about}"
 
-    # And the two do not replace each other on the phone.
-    assert len(set(pusher.collapse)) == len(pusher.collapse)
+    # Independent events do not consume provider collapse keys or replace each
+    # other; their profile ids remain distinct in the client's dedup identity.
+    assert pusher.collapse == [None, None]
 
 
 async def test_an_alert_with_nobody_to_tell_waits_instead_of_spinning(api, session, db_engine):

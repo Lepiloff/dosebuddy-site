@@ -717,14 +717,14 @@ async def deliver_nudge(
     )
 
 
-def collapse_key(delivery: AlertDelivery) -> str:
-    """What makes two deliveries of one alert land as one notification.
+def collapse_key(delivery: AlertDelivery) -> str | None:
+    """Collapse only signals whose newer copy can replace an older one.
 
-    The profile is in the key for the same reason it is in the unique index: for
-    `profile_stale` the subject is only a date, so a key without it would have
-    FCM replace one parent's alert with another's on the caregiver's phone. The
-    replacement is silent, and the alert it swallowed is the one about the
-    parent nobody has heard from.
+    Caregiver alerts are independent events, not nudges to fetch an inbox.
+    Giving each subject its own key exceeds FCM's four pending keys per token;
+    sharing keys instead would silently replace different events. Data-only
+    messages without a key avoid that collapse limit. Retries still depend on
+    the client's (type, profile_id, subject_id) ledger, not provider collapse.
     """
     if delivery.kind is AlertKind.reminder_authority_lost:
         # No subject here, and that is the difference: two authority nudges for
@@ -732,7 +732,7 @@ def collapse_key(delivery: AlertDelivery) -> str:
         # is the truth and should replace the earlier one while the phone is
         # offline, which is exactly what a shared collapse key buys.
         return f"{delivery.kind.value}:{delivery.profile_id}"
-    return f"{delivery.kind.value}:{delivery.profile_id}:{delivery.subject_id}"
+    return None
 
 
 def payload_for(delivery: AlertDelivery) -> dict[str, str]:
