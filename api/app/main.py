@@ -45,6 +45,8 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        if app.state.google_verifier is not None:
+            await app.state.google_verifier.aclose()
         await app.state.redis.aclose()
         await engine.dispose()
         log.info("api.shutdown")

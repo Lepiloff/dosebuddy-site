@@ -107,10 +107,13 @@ class FakeGoogle:
     def add(self, token: str, subject: str, email: str | None = None) -> None:
         self.identities[token] = GoogleIdentity(subject=subject, email=email)
 
-    def verify(self, id_token: str) -> GoogleIdentity:
+    async def verify(self, id_token: str) -> GoogleIdentity:
         if id_token not in self.identities:
             raise InvalidGoogleToken("unknown token")
         return self.identities[id_token]
+
+    async def aclose(self) -> None:
+        pass
 
 
 @pytest.fixture

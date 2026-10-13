@@ -95,7 +95,7 @@ async def sign_in_with_google(
         )
 
     try:
-        identity: GoogleIdentity = verifier.verify(body.id_token)
+        identity: GoogleIdentity = await verifier.verify(body.id_token)
     except InvalidGoogleToken as exc:
         # The caller still learns only that the token was rejected: telling them
         # whether it expired or had the wrong audience tells an attacker the
@@ -379,7 +379,7 @@ async def delete_account_retry(
         )
 
     try:
-        identity: GoogleIdentity = verifier.verify(body.id_token)
+        identity: GoogleIdentity = await verifier.verify(body.id_token)
     except InvalidGoogleToken as exc:
         log.warning("account.delete_retry_rejected", reason=redact(str(exc)))
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid_google_token") from None

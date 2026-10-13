@@ -427,6 +427,48 @@ Sync-токен существует потому, что фоновая пол�
 не может передать авторитет, спарить опекуна или удалить аккаунт) и **проверка
 устройства на каждом запросе** (`deps.py`), а не доверие к токену.
 
+### Доступность Google verification (локальный AUD-005, 13.10)
+
+Оба входа, `POST /auth/google` и `POST /account/delete-retry`, ожидают
+`RealGoogleVerifier.verify` до получения publication fence. Блокирующий HTTP
+за сертификатами Google и проверка токена выполняются в одном выделенном
+worker; event loop API продолжает обслуживать health и sync.
+
+На процесс API допускаются максимум восемь проверок, включая работающий
+worker. Ожидание очереди и сама проверка входят в общий пятисекундный срок.
+Переполнение, timeout и shutdown используют прежний `401 invalid_google_token`:
+это означает, что проверку не удалось завершить, а не доказанную невалидность
+токена. Эти исходы не приводят к созданию/изменению account/device или удалению.
+Прежний `503` при отсутствии конфигурации и rate limit подтверждённого
+delete-retry сохраняются.
+
+Отмена или timeout HTTP-caller не освобождают работающий worker до фактического
+завершения его задачи. Ожидающие callers могут истечь/отмениться без отправки
+задачи в executor; повторные timeout не наращивают число threads или его очередь.
+У Requests задан трёхсекундный timeout подключения/бездействия чтения: это не
+абсолютный предел длительности непрерывно поступающего ответа. Если transport
+переживает срок caller, единственный занятый worker ограничивает следующие
+Google verification, а health/sync остаются доступны.
+
+Переиспользуемые requests Session и cert cache принадлежат одному worker.
+Кэшируются только успешные JSON-ответы сертификатов с явным
+`Cache-Control: max-age`; `Age` и время загрузки уменьшают срок свежести,
+верхняя граница — один час. `no-store`, `no-cache`, отсутствующий/невалидный
+срок и истёкшие ответы не переиспользуются; ошибка обновления не разрешает
+stale fallback. Каждый токен по-прежнему проходит проверки signature,
+audience, expiry/issued-at, Google issuer и непустого строкового subject.
+Shutdown отклоняет новые/ожидающие callers и поздние identities, затем
+закрывает Session в её worker после выполняющегося I/O, без join worker
+в event loop.
+
+`api/tests/test_google_verification.py` вызывает оба production handlers
+через настоящий Google requests adapter и локальный HTTP-сервер сертификатов
+с задержкой, синтетические RSA-токены и PostgreSQL. Проверены heartbeat,
+health/ready, sync pull/push, свежесть cache/ротация ключей, неверные
+claims/signature, переполнение, общий срок очереди, отмена и shutdown.
+Это host evidence с синтетическим provider сертификатов; реальный Google
+и staging-приёмка остаются отдельными gates.
+
 ### Необратимый отзыв поколения credentials (локальный AUD-003, 06.10)
 
 `Device.credential_generation` — durable BIGINT, который logout увеличивает

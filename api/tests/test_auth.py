@@ -220,21 +220,29 @@ async def test_sign_in_says_so_when_google_is_not_configured(api):
     assert r.json()["error"]["code"] == "google_sign_in_not_configured"
 
 
-async def test_the_real_verifier_wraps_failures_rather_than_leaking_them(api):
+async def test_the_real_verifier_wraps_failures_rather_than_leaking_them(api, monkeypatch):
     """Constructs the real verifier, not a stand-in.
 
     The stand-in cannot catch a missing dependency, and that is exactly what got
     through once: google.auth.transport.requests needs the `requests` package,
     google-auth does not pull it in, and the import sat inside verify() — so it
     surfaced as a 500 on the first real sign-in rather than at startup. This
-    exercises the import and the exception wrapping without any network: a
-    malformed token fails while being parsed.
+    exercises the import and exception wrapping without contacting Google.
     """
     from app.services.google import InvalidGoogleToken, RealGoogleVerifier
+    from google.auth.transport import requests as google_requests
+
+    def unavailable(*_args, **_kwargs):
+        raise ConnectionError("synthetic transport failure")
+
+    monkeypatch.setattr(google_requests.Request, "__call__", unavailable)
 
     verifier = RealGoogleVerifier("some-client-id.apps.googleusercontent.com")
-    with pytest.raises(InvalidGoogleToken):
-        verifier.verify("this-is-not-a-jwt")
+    try:
+        with pytest.raises(InvalidGoogleToken):
+            await verifier.verify("this-is-not-a-jwt")
+    finally:
+        await verifier.aclose()
 
 
 async def test_a_rejected_token_is_explained_in_the_log_not_the_response(api, caplog):
