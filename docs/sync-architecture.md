@@ -115,7 +115,7 @@ Python потом выбрасывал всё после первых 500. Оп�
 
 ## 4. Запись: last-write-wins по записи целиком
 
-`_upsert` (`sync.py`) вставляет или обновляет, но только если пришедшее
+Общий `_upsert_statement` (`sync.py`) вставляет или обновляет, но только если пришедшее
 действительно новее. Сравнение — по тройке
 **`(updated_at, origin_device_id, op_seq)`**, а не по одному `updated_at`.
 
@@ -136,6 +136,20 @@ Python потом выбрасывал всё после первых 500. Оп�
 Слияние по полям сознательно не делается: получились бы состояния, не
 существовавшие ни на одном устройстве, — лекарство с дозой одного телефона и
 формой другого.
+
+Локальный AUD-007 применяет независимые profiles/medications/schedules/stock
+chunks максимум 100 уникальных ID, одним savepoint и одним multi-row upsert.
+Повтор ID и preflight refusal завершают предыдущий chunk; SQLAlchemy failure
+сначала откатывает chunk целиком, затем выполняет прежний per-row `_upsert`
+с исходными outcome codes. Dose/canonical effects остаются per-row. Parents
+завершаются до child checks, publication/credential fence и ack после общего
+commit сохраняются. Механизм и host limits —
+[publication](sync-publication.md#ограниченные-chunks-для-push-локальный-aud-007-1310).
+
+Необработанный request DBAPI SQLSTATE `55P03` после rollback отвечает прежним
+совместимым `429 rate_limited` с `Retry-After: 5`; другие DBAPI/resource errors
+сохраняют `500 internal_error`. Внутри per-row savepoint прежний retry outcome
+сохраняется. Это локальный overload fix, а не production capacity/SLA.
 
 ### Родитель записи неизменяем
 

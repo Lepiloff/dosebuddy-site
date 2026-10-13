@@ -20,13 +20,19 @@ import structlog
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import DBAPIError
+
+from app.db.errors import sqlstate
 
 log = structlog.get_logger("api.validation")
 
 
-def envelope(code: str, message: str, status_code: int) -> JSONResponse:
+def envelope(
+    code: str, message: str, status_code: int, headers: dict[str, str] | None = None
+) -> JSONResponse:
     return JSONResponse(
-        status_code=status_code, content={"error": {"code": code, "message": message}}
+        status_code=status_code, content={"error": {"code": code, "message": message}},
+        headers=headers,
     )
 
 
@@ -67,7 +73,16 @@ def install(app: FastAPI) -> None:
         # Handlers raise HTTPException with the stable code as the detail, so
         # the code stays where it is thrown rather than being mapped here.
         code = exc.detail if isinstance(exc.detail, str) else "error"
-        return envelope(code, code.replace("_", " "), exc.status_code)
+        return envelope(code, code.replace("_", " "), exc.status_code, exc.headers)
+
+    @app.exception_handler(DBAPIError)
+    async def _database(_request: Request, exc: DBAPIError) -> JSONResponse:
+        # Request-scoped session cleanup finishes before exception handling.
+        # Only PostgreSQL lock timeout uses the existing transient 429 contract;
+        # pool exhaustion, disconnects and other database errors stay private.
+        if sqlstate(exc) == "55P03":
+            return envelope("rate_limited", "rate limited", 429, {"Retry-After": "5"})
+        return await _unhandled(_request, exc)
 
     @app.exception_handler(Exception)
     async def _unhandled(_request: Request, exc: Exception) -> JSONResponse:

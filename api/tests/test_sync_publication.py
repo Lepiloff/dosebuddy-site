@@ -368,14 +368,15 @@ async def test_a_timed_out_push_acknowledges_nothing_and_the_same_batch_can_retr
                                           "times": '["15:00"]'}]}}
     async with async_sessionmaker(db_engine)() as blocker:
         await lock_publication(blocker)
-        # The normal HTTP boundary returns its existing internal_error envelope,
-        # so clients keep the unacknowledged batch. Nothing is partially stored.
+        # The normal HTTP boundary requests retry without acknowledging the
+        # batch. Nothing is partially stored, and publication stays bounded.
         async with AsyncClient(transport=ASGITransport(app=api.app, raise_app_exceptions=False),
                                base_url="http://test") as http:
             failed = await asyncio.wait_for(http.post("/v1/sync/push", headers=auth_header(owner),
                                                      json=payload), 7)
-        assert failed.status_code == 500
-        assert failed.json()["error"]["code"] == "internal_error"
+        assert failed.status_code == 429
+        assert failed.json()["error"]["code"] == "rate_limited"
+        assert failed.headers["Retry-After"] == "5"
         await blocker.rollback()
     async with async_sessionmaker(db_engine)() as check:
         assert (await check.get(Schedule, uuid.UUID(sid))).times != '["15:00"]'

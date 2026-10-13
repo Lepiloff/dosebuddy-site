@@ -61,7 +61,7 @@ async def world(api, db_engine):
             yield session
 
     api.app.dependency_overrides[get_session] = tracked_session
-    # Observe the production 500 envelope instead of re-raising in the test transport.
+    # Observe production error envelopes instead of re-raising in the transport.
     transport = api._transport
     old_raise = transport.raise_app_exceptions
     transport.raise_app_exceptions = False
@@ -430,7 +430,8 @@ async def test_ready_timeout_then_superseding_claim_refuses_retry(world):
         timing_out = asyncio.create_task(_ready(w, w.b, body))
         assert await _wait_request(w, timing_out, f"/v1/devices/{w.b}/ready")
         response = await asyncio.wait_for(timing_out, 7)
-        assert response.status_code == 500 and response.json()["error"]["code"] == "internal_error"
+        assert response.status_code == 429 and response.json()["error"]["code"] == "rate_limited"
+        assert response.headers["Retry-After"] == "5"
         await pairing.set_reminder_authority(
             w.pid, pairing.ReminderAuthorityIn(device_id=w.c, reports_ready=True),
             Request({"type": "http"}), Caller(account, w.c), blocker,

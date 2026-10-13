@@ -10,6 +10,32 @@
 
 ---
 
+## Sync overload и capacity после локального AUD-007
+
+13.10 локальный fix прошёл независимый review и итоговый backend gate;
+bounded multi-row chunks для независимых sync
+сущностей, исходный per-row fallback/canonical path, существующий совместимый
+429 для необработанного PostgreSQL SQLSTATE 55P03. Механизм и fair before/after
+host proof — [publication](sync-publication.md#ограниченные-chunks-для-push-локальный-aud-007-1310).
+Publication commit-order, recheck credentials/authority, row outcomes и ack
+после commit сохраняются. Production rollout этим не выполнен.
+
+Следующий gate — staging на фактическом классе сервера и с текущими runtime
+limits: sustained mixed push/pull/ready/logout, dose-heavy/invalid-heavy batches,
+несколько ready owned profiles, реальные RTT, bounded retry с полной сверкой
+outbox/DB и restart. Измерить queue age, DB lock wait/hold, p95/p99 с достаточной
+выборкой, память и истощение connection pool. Определить рабочие пределы и
+наблюдение перегрузки по результатам, без снятия общего fence или увеличения
+timeout/pool ради скрытия отказов. Короткий ASGI/host burst capacity/SLA не задаёт.
+
+Оставшиеся стоимости: per-row dose/canonical effects, per-row fallback плохого
+chunk, inventory IDs/visibility и high-water query на каждый eligible ready
+profile внутри publication. Pool timeout/disconnect и другие resource errors
+по-прежнему 500, не 429; lock timeout compatibility не обещает управления любым
+отказом. Телефон, FCM и production verification не входят в этот host gate.
+
+---
+
 ## Ред. 19 контракта написана и сознательно не выложена
 
 **Что отложено.** Ветка `a-parent-that-has-not-arrived` (коммит на 2026-09-09):

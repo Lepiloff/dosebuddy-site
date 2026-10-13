@@ -10,6 +10,7 @@ import jwt
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import DBAPIError
 
 from app.core.security import CREDENTIAL_GENERATION_CLAIM, SCOPE_SYNC, read_access_token
 from app.db.publication import lock_publication
@@ -25,7 +26,13 @@ SEEN_RESOLUTION = timedelta(minutes=5)
 async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
     factory = request.app.state.sessionmaker
     async with factory() as session:
-        yield session
+        try:
+            yield session
+        except DBAPIError:
+            # Roll back before a lock-timeout response can tell the caller to
+            # retry. Auth and the handler share this request-scoped dependency.
+            await session.rollback()
+            raise
 
 
 class Caller:

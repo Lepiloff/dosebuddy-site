@@ -43,6 +43,7 @@ from sqlalchemy.orm import aliased
 
 from app.api.deps import Caller, get_session, lock_caller, recheck_caller, sync_caller
 from app.db.publication import NEXT_SERVER_SEQ, lock_publication
+from app.db.errors import sqlstate as _sqlstate
 from app.services.alerts import profile_high_water
 from app.api.schemas import Changes, Outcome, PullOut, PushIn, PushOut, RecordOut
 from app.db.models import (
@@ -69,6 +70,10 @@ PAGE_SIZE = 500
 # record count, which is the limit a client can actually plan against. Both are
 # stated in the contract so a batch is sized rather than discovered.
 MAX_PUSH_RECORDS = 1000
+
+# At most 100 rows / 2500 parameters with the current independent entity shapes,
+# comfortably below asyncpg's 32767-parameter limit. Dose effects stay per-row.
+UPSERT_CHUNK_SIZE = 100
 
 
 # ---------------------------------------------------------------------------
@@ -138,12 +143,11 @@ def owned_ids(profiles: dict[uuid.UUID, Role]) -> set[uuid.UUID]:
 NEXT_SEQ = sql_text(NEXT_SERVER_SEQ)
 
 
-async def _upsert(
-    session: AsyncSession,
+def _upsert_statement(
     model,
-    values: dict[str, Any],
+    rows: list[dict[str, Any]],
     set_once: tuple[str, ...] = (),
-) -> None:
+) -> Any:
     """Insert, or update only when the incoming write is genuinely newer.
 
     Last-write-wins on the whole record. Merging field by field would produce
@@ -171,12 +175,12 @@ async def _upsert(
     write it would come back empty and take the answer with it, so what is there
     stays, and only an empty one is filled.
     """
-    stmt = insert(model).values(**values, server_seq=NEXT_SEQ)
+    stmt = insert(model).values([{**values, "server_seq": NEXT_SEQ} for values in rows])
     excluded = stmt.excluded
     stmt = stmt.on_conflict_do_update(
         index_elements=[model.id],
         set_={
-            **{k: getattr(excluded, k) for k in values if k != "id"},
+            **{k: getattr(excluded, k) for k in rows[0] if k != "id"},
             **{
                 k: func.coalesce(getattr(model, k), getattr(excluded, k))
                 for k in set_once
@@ -187,7 +191,16 @@ async def _upsert(
             excluded.updated_at_ms, excluded.origin_device_id, excluded.op_seq
         ) > sa_tuple(model.updated_at_ms, model.origin_device_id, model.op_seq),
     )
-    await session.execute(stmt)
+    return stmt
+
+
+async def _upsert(
+    session: AsyncSession,
+    model,
+    values: dict[str, Any],
+    set_once: tuple[str, ...] = (),
+) -> None:
+    await session.execute(_upsert_statement(model, [values], set_once))
 
 
 async def _key_holders(
@@ -335,17 +348,6 @@ def _dose_key(schedule_id: uuid.UUID | None, planned_at: int) -> str | None:
     return None if schedule_id is None else f"{schedule_id}:{planned_at}"
 
 
-def _sqlstate(exc: DBAPIError) -> str | None:
-    """The five characters Postgres sent, whatever the driver wrapped them in.
-
-    Read from the code and never from the message: the message is written to be
-    read by a person and is free to change, while the code is the part the
-    schema and this file agreed on.
-    """
-    orig = getattr(exc, "orig", None)
-    return getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
-
-
 def _sync_values(row, device_id: uuid.UUID) -> dict[str, Any]:
     return {
         "id": row.id,
@@ -405,11 +407,10 @@ async def push(
         values: dict[str, Any],
         set_once: tuple[str, ...] = (),
     ) -> None:
-        # A savepoint per record, so one failure does not poison the batch. A
-        # foreign key that is not there yet is the common case — the parent is
-        # simply on a later page or a later push — and it is recoverable, so it
-        # is reported as retry rather than as the client having done something
-        # wrong.
+        # Dose effects and failed-chunk fallback use a savepoint per record, so
+        # one failure does not poison the batch. A missing foreign key commonly
+        # means the parent is on a later page/push; report retry rather than a
+        # final refusal.
         try:
             async with session.begin_nested():
                 await _upsert(session, model, values, set_once)
@@ -439,6 +440,44 @@ async def push(
         except SQLAlchemyError:
             later(entity, row_id, "conflict")
 
+    async def apply_many(entity: str, model, operations: list[dict[str, Any] | Outcome]) -> None:
+        """Batch independent rows; preserve ordered outcomes and row isolation."""
+        pending: list[dict[str, Any]] = []
+        ids: set[uuid.UUID] = set()
+
+        async def flush() -> None:
+            if not pending:
+                return
+            try:
+                async with session.begin_nested():
+                    await session.execute(_upsert_statement(model, pending))
+            except SQLAlchemyError:
+                # The context rolled the entire chunk back first. Reuse the
+                # original per-row path to distinguish immutable parents,
+                # missing FKs and retryable conflicts without losing neighbors.
+                for values in pending:
+                    await apply(entity, model, values["id"], values)
+            pending.clear()
+            ids.clear()
+
+        for operation in operations:
+            if isinstance(operation, Outcome):
+                # A preflight refusal must not overtake a preceding SQL failure.
+                await flush()
+                if operation.code == "missing_parent":
+                    later(entity, operation.id, operation.code)
+                else:
+                    refuse(entity, operation.id, operation.code)
+                continue
+            if operation["id"] in ids or len(pending) == UPSERT_CHUNK_SIZE:
+                # Postgres cannot affect one id twice in a single upsert. Flush
+                # before a duplicate so LWW and trigger decisions remain in
+                # arrival order, including duplicates across chunk boundaries.
+                await flush()
+            pending.append(operation)
+            ids.add(operation["id"])
+        await flush()
+
     batch_profiles = [p.id for p in changes.profiles]
     stored_owner = await _stored_parents(
         session, Profile, (Profile.owner_account_id,), batch_profiles
@@ -447,6 +486,7 @@ async def push(
     # Parents before children: foreign keys need it, and a medication arriving
     # in the same batch as its schedule has to exist before the schedule can be
     # checked against it.
+    profile_operations: list[dict[str, Any] | Outcome] = []
     for p in changes.profiles:
         if _moved(stored_owner, p.id, caller.account.id):
             # The row on disk belongs to another account. The check this
@@ -456,15 +496,16 @@ async def push(
             # longer sees the profile the revocation took away. Pushing the row
             # then rewrote its owner to them, and with it went the schedules a
             # watcher is never sent.
-            refuse("profiles", p.id, "forbidden_role")
+            profile_operations.append(Outcome(entity="profiles", id=p.id, code="forbidden_role"))
             continue
-        await apply("profiles", Profile, p.id, {
+        profile_operations.append({
             **_sync_values(p, dev),
             "owner_account_id": caller.account.id,
             "name": p.name,
             "color": p.color,
             "sort_order": p.sort_order,
         })
+    await apply_many("profiles", Profile, profile_operations)
 
     # What the caller may write under is what the database says it owns, not
     # what `apply` failed to complain about.
@@ -516,9 +557,13 @@ async def push(
         session, Medication, (Medication.profile_id,), [m.id for m in changes.medications]
     )
 
+    medication_operations: list[dict[str, Any] | Outcome] = []
     for m in changes.medications:
         if m.profile_id not in mine:
-            profile_out_of_reach("medications", m.id, m.profile_id)
+            medication_operations.append(Outcome(
+                entity="medications", id=m.id,
+                code="missing_parent" if m.profile_id in unknown else "forbidden_role",
+            ))
             continue
         if _moved(stored_medication_parent, m.id, m.profile_id):
             # A medication does not change profile (contract §4.2). Final: the
@@ -530,9 +575,9 @@ async def push(
             # but only when the update actually runs — a write that loses on
             # last-write-wins never reaches it, and would leave the client
             # believing a row the server ignored had been applied.
-            refuse("medications", m.id, "immutable_parent")
+            medication_operations.append(Outcome(entity="medications", id=m.id, code="immutable_parent"))
             continue
-        await apply("medications", Medication, m.id, {
+        medication_operations.append({
             **_sync_values(m, dev),
             "profile_id": m.profile_id,
             "name": m.name,
@@ -545,6 +590,7 @@ async def push(
             "is_active": m.is_active,
             "photo_key": m.photo_key,
         })
+    await apply_many("medications", Medication, medication_operations)
 
     med_owner = await _medication_profiles(session, changes)
 
@@ -552,21 +598,22 @@ async def push(
         session, Schedule, (Schedule.medication_id,), [sc.id for sc in changes.schedules]
     )
 
+    schedule_operations: list[dict[str, Any] | Outcome] = []
     for sc in changes.schedules:
         owner_profile = med_owner.get(sc.medication_id)
         if owner_profile is None:
-            later("schedules", sc.id, "missing_parent")
+            schedule_operations.append(Outcome(entity="schedules", id=sc.id, code="missing_parent"))
             continue
         if owner_profile not in mine:
-            refuse("schedules", sc.id, "forbidden_role")
+            schedule_operations.append(Outcome(entity="schedules", id=sc.id, code="forbidden_role"))
             continue
         if _moved(stored_schedule_parent, sc.id, sc.medication_id):
             # Re-pointing a schedule strands the doses already built from it:
             # they keep naming the medication, and the profile, they were
             # materialised for.
-            refuse("schedules", sc.id, "immutable_parent")
+            schedule_operations.append(Outcome(entity="schedules", id=sc.id, code="immutable_parent"))
             continue
-        await apply("schedules", Schedule, sc.id, {
+        schedule_operations.append({
             **_sync_values(sc, dev),
             "medication_id": sc.medication_id,
             "type": sc.type,
@@ -576,6 +623,7 @@ async def push(
             "start_date": sc.start_date,
             "end_date": sc.end_date,
         })
+    await apply_many("schedules", Schedule, schedule_operations)
 
     stored_dose_parents = await _stored_parents(
         session,
@@ -715,26 +763,28 @@ async def push(
         session, StockEvent, (StockEvent.medication_id,), [e.id for e in changes.stock_events]
     )
 
+    stock_operations: list[dict[str, Any] | Outcome] = []
     for e in changes.stock_events:
         owner_profile = med_owner.get(e.medication_id)
         if owner_profile is None:
-            later("stock_events", e.id, "missing_parent")
+            stock_operations.append(Outcome(entity="stock_events", id=e.id, code="missing_parent"))
             continue
         if owner_profile not in mine:
-            refuse("stock_events", e.id, "forbidden_role")
+            stock_operations.append(Outcome(entity="stock_events", id=e.id, code="forbidden_role"))
             continue
         if _moved(stored_stock_parent, e.id, e.medication_id):
             # The stock balance is the sum of the journal (contract §4.2), so a
             # moved event silently changes two of them.
-            refuse("stock_events", e.id, "immutable_parent")
+            stock_operations.append(Outcome(entity="stock_events", id=e.id, code="immutable_parent"))
             continue
-        await apply("stock_events", StockEvent, e.id, {
+        stock_operations.append({
             **_sync_values(e, dev),
             "medication_id": e.medication_id,
             "delta": e.delta,
             "reason": e.reason,
             "dose_event_id": e.dose_event_id,
         })
+    await apply_many("stock_events", StockEvent, stock_operations)
 
     for loser, winner in gives_way.items():
         # `superseded_by IS NULL` because the column is set once: a row that has

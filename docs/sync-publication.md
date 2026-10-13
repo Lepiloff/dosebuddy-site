@@ -44,7 +44,7 @@ response cursor под этим lock **до** commit. Ответ отправл�
 | Источник / production path | Таблицы / публикация |
 | --- | --- |
 | ORM/default inserts и обычные SQL INSERT/UPDATE/DELETE | `profiles`, `medications`, `schedules`, `dose_events`, `stock_events`: statement fence и защищённые defaults. UPDATE зеркальных данных по-прежнему обязан запросить свежий `next_server_seq()`. |
-| `sync.push` → `_upsert` | Все пять зеркал, включая schedule/dose tombstones и действия; явный publication до savepoints, defaults и UPDATE expressions используют общий allocator. |
+| `sync.push` → `_upsert_statement` / `_upsert` | Все пять зеркал, включая schedule/dose tombstones и действия; явный publication до chunk/per-row savepoints, defaults и UPDATE expressions используют общий allocator. |
 | Canonical-dose/supersede в `sync.push`, `_catch_up_on_declaring` | `dose_events` и `devices`; publication предшествует отсортированным per-profile canonical advisory locks, затем row/FK locks. |
 | Pairing redeem → membership + `_resend_profile` | `pairing_codes`, `profile_memberships`, затем переиздание profile/medication/dose; каждый statement защищён, каждая переизданная строка получает свой номер. |
 | Claim authority и `/ready` | `profiles`, `device_readiness`, затем возможная очередь alerts; локальный AUD-002 берёт publication до precondition reads и удерживает до общего commit. |
@@ -74,14 +74,143 @@ cascade может ждать эту строку; конфликт queue тож
 захвата lock, ограничивая каждое ожидание DB lock. Это новый предел отдельного
 ожидания, а не SLA всей транзакции или сети. Под нагрузкой возможен timeout.
 
-Timeout прерывает statement. Обычная ошибка запроса приводит к rollback и
-существующему ответу `500 internal_error`; неподтверждённый client batch остаётся
-для retry. Savepoint handling в push сохраняет уже применённые соседние строки
+Timeout прерывает statement. Локальный AUD-007 возвращает для необработанного
+SQLAlchemy `DBAPIError` с PostgreSQL SQLSTATE `55P03` существующий совместимый
+`429 rate_limited` и `Retry-After: 5`. Общий extractor читает код из driver
+exception и явной цепочки causes, никогда из текста. Production request
+dependency явно откатывает DBAPI failure до exception handler/response;
+закрытие request session освобождает locks. Остальные DBAPI/resource errors
+сохраняют sanitised `500 internal_error`. Новый endpoint/payload/error code
+не введён. Неподтверждённый batch остаётся для retry; 429 не является ack.
+Обработанный внутри savepoint timeout по-прежнему возвращает per-record retry.
+Savepoint handling в push сохраняет уже применённые соседние строки
 и возвращает retry для неудачной. Worker сохраняет durable pending deliveries
 и повторяет проход. Удаление аккаунта либо коммитится полностью, либо откатывается
 и допускает повтор. Fixture с приостановленным FCM/cascade проверяет rollback,
 освобождение publication и последующее успешное удаление. Ошибочная запись не
 получает вымышленного success/acknowledgement.
+
+## Ограниченные chunks для push (локальный AUD-007, 13.10)
+
+`profiles`, `medications`, `schedules`, `stock_events` применяются последовательно
+chunks максимум 100 уникальных ID под одним savepoint: SAVEPOINT → один multi-row
+INSERT/ON CONFLICT → RELEASE. Shapes текущих сущностей используют менее 2500
+bind parameters на chunk при лимите asyncpg 32767. Лимит push 1000, pool 5+5,
+lock timeout 5s, общий publication и credential rechecks не менялись.
+
+Один `_upsert_statement` обслуживает chunk и прежний `_upsert`: tuple LWW
+`(updated_at_ms, origin_device_id, op_seq)`, immutable-parent triggers,
+`set_once`, отдельный `next_server_seq()` каждой принятой строки сохраняются.
+Если chunk даёт SQLAlchemy error, nested context сначала откатывает **весь**
+chunk, затем выполняется исходный per-row savepoint/upsert с прежними
+`rejected`/`retry` codes. Неудачная строка не отравляет валидных соседей;
+sequence gaps от отката допустимы. Успешные строки подтверждаются лишь после
+общего commit и cursor capture под fence.
+
+Повтор ID разрывает chunk перед повтором, включая границу 100: PostgreSQL
+не получает один конфликтующий ID дважды в одном statement, а tuple LWW и
+DB trigger видят исходную последовательность записей. Preflight refusal тоже
+сначала завершает предыдущий chunk, сохраняя порядок SQL failures/outcomes.
+Profiles завершаются и ownership перечитывается до medications; medications
+завершаются до child visibility/FK checks. Dose writes, canonical advisory
+locks, key holders, supersede и declaration catch-up остаются per-row.
+Большой dose-heavy или invalid-heavy batch всё ещё может быть дорогим.
+
+Regression gate проверяет ограниченный SQL budget 1/10/200/1000 medications,
+pagination всех accepted rows, частичный rollback/retry плохого stock FK,
+duplicate ID с parent move на границах 0/99/100, parents/ownership/isolation,
+readiness invalidation/full high-water и canonical supersede/set-once key.
+Реальные push/ready lock timeouts проверяют 429/header, отсутствие ack,
+rollback, повтор того же batch и refusal superseded claim.
+
+### Fair before/after на parent 665706b
+
+Один host probe запускает production ASGI app/engine (READ COMMITTED, pool 5+5)
+на выделенной PostgreSQL fixture: 20 synthetic accounts/devices/profiles,
+детерминированные UUID и одни shapes/order пакетов. Перед каждым source run
+таблицы пересозданы из metadata; оба прогона без искусственного sleep в sync,
+Google/FCM/телефонов/внешнего HTTP и параллельного DB test runner. Python 3.10.7
+в host venv отличается от production Docker 3.12. Это одно короткое сравнение
+13.10 на exact `665706be2f6343072864344e68fdb6e081237582` и локальном diff;
+старый 4394067 baseline в app audit не заменён.
+
+SQL statements на успешный medication push: batch 1 — 15→15; 10 — 42→15;
+200 — 612→18; 1000 — 3012→42. Authentication/handler publication и credential
+rechecks входят в счёт. 429/500 до полезной работы имеют 5 statements. Timings
+ниже включают успешные и failed запросы; req/s — все завершённые HTTP requests
+делённые на wall time burst, не transaction capacity. Drain/retry в эти timings
+не входит. p95 показан лишь при 20 samples как эмпирическая порядковая статистика;
+p99 и steady-state tails из такой выборки не оцениваются.
+
+| Batch / clients | До 200/500 → после 200/429 | req/s до→после | p50 s до→после | max s до→после | p95 s до→после |
+|---|---|---|---|---|---|
+| 1 / 1 | 1/0 → 1/0 | 19.01→20.74 | 0.053→0.048 | 0.053→0.048 | — |
+| 1 / 10 | 10/0 → 10/0 | 55.74→57.40 | 0.114→0.111 | 0.178→0.172 | — |
+| 1 / 20 | 20/0 → 20/0 | 83.50→82.75 | 0.172→0.177 | 0.233→0.235 | 0.229→0.232 |
+| 10 / 1 | 1/0 → 1/0 | 32.32→62.23 | 0.031→0.016 | 0.031→0.016 | — |
+| 10 / 10 | 10/0 → 10/0 | 26.13→47.06 | 0.225→0.132 | 0.380→0.210 | — |
+| 10 / 20 | 20/0 → 20/0 | 30.53→64.53 | 0.406→0.208 | 0.649→0.304 | 0.626→0.298 |
+| 200 / 1 | 1/0 → 1/0 | 2.27→11.79 | 0.440→0.085 | 0.440→0.085 | — |
+| 200 / 10 | 10/0 → 10/0 | 2.20→10.82 | 2.491→0.486 | 4.530→0.919 | — |
+| 200 / 20 | 15/5 → 20/0 | 1.79→7.79 | 5.666→1.249 | 11.166→2.555 | 10.315→2.422 |
+| 1000 / 1 | 1/0 → 1/0 | 0.28→1.57 | 3.620→0.639 | 3.620→0.639 | — |
+| 1000 / 10 | 2/8 → 8/2 | 1.29→1.85 | 5.131→3.797 | 7.752→5.378 | — |
+| 1000 / 20 | 4/16 → 18/2 | 1.35→1.85 | 8.883→5.672 | 14.772→10.791 | 10.973→10.156 |
+
+Mixed burst: 20 клиентов, по 5 push200/pull/ready/logout разных accounts.
+В обоих прогонах 10×200 и 10×204; req/s 4.94→16.84,
+p50 1.866→0.706s, max 4.020→1.162s,
+p95 4.016→1.158s. Ready использует настоящий полный pull
+cursor/high-water после import, logout проверен последующим 401 старого JWT.
+В load fixture readiness до burst не заполнена: расходы repeated ready-owned
+high-water queries отдельно проверены regression, но эта таблица их sustained
+стоимость не измеряет.
+
+После каждого burst failed request сохраняет исходные IDs/payload и имеет
+до 3 serial retry attempts. На after 4×429 (по 2 на 10×1000 и 20×1000) каждый ответ
+имеет `rate_limited`/`Retry-After: 5`; повтор после 5s завершается 200 без row
+retry/rejection. SELECT из отдельной сессии сверяет все expected IDs; обе
+серии восстановили в каждом случае полный набор, включая 20000 строк последнего
+burst. Это host proof сохранности synthetic rows, не модель Flutter restart,
+сети или sustained recovery. Общий fence сохраняется; pool/resource failures
+не превращаются в 429. Dose/fallback/inventory/per-profile high-water costs,
+RTT, queue age, lock wait/hold, память и staging на фактическом сервере остаются
+[отдельным gate](debts.md#sync-overload-и-capacity-после-локального-aud-007).
+
+Evidence находится в private temp root
+`/tmp/sonadose-audit-remediation-20261013-_k2op4b8`:
+`aud007-red.log/.xml` (final exact parent: 7 failures/10 passes, 0 errors),
+`aud007-narrow.log/.xml` (15 new tests), `aud007-green.log/.xml` (276 related),
+`aud007-load-before.log/.json`, `aud007-load-after.log/.json` и source
+`aud007-load.py`; machine summary/полный diff — `aud007-evidence.json` и
+`aud007-review.patch`. Initial red с ошибочной raw bytea name fixture хранится
+отдельно и не используется как final proof. Scoped gate:
+
+```bash
+cd api
+PYTHONDONTWRITEBYTECODE=1 TEST_DATABASE_URL='<private audit fixture URL>' \
+  .venv/bin/python -m pytest \
+  tests/test_sync_batching.py tests/test_sync.py \
+  tests/test_sync_publication.py tests/test_authority_atomicity.py \
+  tests/test_auth.py tests/test_credential_generation.py \
+  tests/test_pairing.py tests/test_health.py -q
+```
+
+Root final review не нашёл blockers в production diff. Первый root full suite:
+435 tests / 434 passed / 1 failure / 0 errors, 184.410s. Единственный failure —
+старое ожидание 500 в `test_timed_out_revoke_does_not_ack_or_partially_end_consent`.
+Review correction меняет только status/code на 429/rate_limited и проверяет
+`Retry-After: 5`; durable consent/pending, no-ack, release publication во время
+paused send и успешный повтор revoke assertions сохранены. Настоящий in-flight
+PostgreSQL timeout regression — 1 passed за 5.699s; весь eligibility file —
+34 passed за 16.133s. Evidence: `aud007-eligibility-narrow.log/.xml`,
+`aud007-eligibility-green.log/.xml`; первый root suite сохранён отдельно как
+`final-backend-suite-initial.log/.xml`. После correction root повторно одобрил
+review; итоговый full backend suite — **435 passed**, failures/errors/skips0,
+184.651s, exit0. Evidence: `final-backend-suite.log/.xml`; команда из api —
+`.venv/bin/python -m pytest -q` с явным TEST_DATABASE_URL private fixture и
+PYTHONDONTWRITEBYTECODE=1. После green менялись только эти документы. Deploy,
+production/runtime capacity, реальные Google/FCM и устройства здесь не проверены.
 
 ## Атомарность authority transitions (AUD-002)
 

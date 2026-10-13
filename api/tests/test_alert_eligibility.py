@@ -347,8 +347,9 @@ async def test_timed_out_revoke_does_not_ack_or_partially_end_consent(api, sessi
         async with AsyncClient(transport=ASGITransport(app=api.app, raise_app_exceptions=False),
                                base_url="http://test") as http:
             failed = await asyncio.wait_for(http.delete(url, headers=auth_header(owner)), 7)
-        assert failed.status_code == 500
-        assert failed.json()["error"]["code"] == "internal_error"
+        assert failed.status_code == 429
+        assert failed.json()["error"]["code"] == "rate_limited"
+        assert failed.headers["Retry-After"] == "5"
         async with maker() as check:
             member = (await check.execute(select(ProfileMembership).where(
                 ProfileMembership.profile_id == uuid.UUID(pid),
