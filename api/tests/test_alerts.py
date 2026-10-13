@@ -52,7 +52,7 @@ class RecordingPush:
         self.collapse: list[str] = []
         self.ttl: list[int] = []
 
-    async def send(self, token: str, data: dict, collapse: str, ttl_seconds: int) -> Delivery:
+    async def send(self, token: str, data: dict, collapse: str, ttl_seconds: int, **kwargs) -> Delivery:
         self.sent.append((token, data))
         self.collapse.append(collapse)
         self.ttl.append(ttl_seconds)
@@ -71,7 +71,7 @@ class FailingPush:
         self.outcome = outcome
         self.attempts = 0
 
-    async def send(self, token: str, data: dict, collapse: str, ttl_seconds: int) -> Delivery:
+    async def send(self, token: str, data: dict, collapse: str, ttl_seconds: int, **kwargs) -> Delivery:
         self.attempts += 1
         if self.remaining > 0:
             self.remaining -= 1
@@ -628,7 +628,9 @@ async def test_each_signal_keeps_its_own_ttl_at_fcm(api, session, db_engine):
     await session.commit()
 
     pusher = RecordingPush()
-    await scan_once(async_sessionmaker(db_engine, expire_on_commit=False), pusher)
+    # A frozen detection/delivery clock checks both full windows at first use;
+    # moving-time/retry regressions live in test_delivery_expiry.
+    await scan_once(async_sessionmaker(db_engine, expire_on_commit=False), pusher, now=utcnow())
 
     ttl_of = {p["type"]: t for (_, p), t in zip(pusher.sent, pusher.ttl)}
     assert ttl_of["dose_missed"] == int(alerts.TTL[AlertKind.dose_missed].total_seconds())

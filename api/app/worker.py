@@ -20,7 +20,7 @@ from app.core.config import get_settings
 from app.core.logging import setup_logging
 from app.db.session import create_engine, create_sessionmaker
 from app.services import alerts, retention
-from app.services.push import Push, build_push
+from app.services.push import Clock, Delivery, Push, build_push, remaining_ttl
 
 SCAN_INTERVAL_SECONDS = 60
 
@@ -28,7 +28,8 @@ log = structlog.get_logger(__name__)
 
 
 async def scan_once(
-    sessionmaker, push: Push, now: datetime | None = None, lease: timedelta | None = None
+    sessionmaker, push: Push, now: datetime | None = None, lease: timedelta | None = None,
+    *, clock: Clock | None = None,
 ) -> int:
     """Detect, then deliver. Two phases, and the split is the point.
 
@@ -39,12 +40,18 @@ async def scan_once(
     family that a dose was missed, that is the wrong way to fail.
 
     Now the claim only says the alert exists and is owed. Delivery is a separate
-    pass over what is owed, with its own attempts and backoff, and a caregiver
-    is not woken twice because the retry carries a collapse key.
+    pass over what is owed, with its own attempts and backoff. Retried pushes
+    may duplicate; pending collapse and client dedup limit different windows.
 
     Returns the number of alerts delivered in this pass.
+
+    Production uses a fresh UTC clock at delivery boundaries. An explicit
+    `now` without `clock` freezes time for existing deterministic callers;
+    supply `clock` to model time advancing while keeping a detection snapshot.
     """
-    now = now or datetime.now(timezone.utc)
+    if clock is None:
+        clock = (lambda: now) if now is not None else (lambda: datetime.now(timezone.utc))
+    now = now or clock()
     delivered = 0
 
     async with sessionmaker() as session:
@@ -60,19 +67,27 @@ async def scan_once(
 
         # Before delivering, not after: an alert that stopped being useful while
         # the worker was down should be retired, not sent late.
-        await alerts.expire(session, now)
+        await alerts.expire(session, clock())
         await session.commit()
 
-        pending = await alerts.due(session, now)
+        pending = await alerts.due(session, clock())
         # Tokens for the whole batch in one query, rather than one per delivery.
         by_account = await alerts.tokens_by_account(
             session, await alerts.accounts_of(session, pending)
         )
 
         for delivery_id in pending:
-            delivery = await alerts.take(session, delivery_id, now)
+            delivery = await alerts.take(session, delivery_id, clock())
             if delivery is None:
                 # Another worker has it, or has already finished with it.
+                continue
+
+            # Recheck after acquiring the row: the batch query and previous
+            # sends can spend its lifetime. Subsecond budgets cannot be safely
+            # represented by our whole-second FCM TTL and are retired as well.
+            if remaining_ttl(delivery.expires_at, clock()) <= 0:
+                alerts.record(delivery, Delivery.expired, clock())
+                await session.commit()
                 continue
 
             if delivery.kind is alerts.AlertKind.reminder_authority_lost:
@@ -80,7 +95,7 @@ async def scan_once(
                 # the alert path with exceptions bolted on: one named device
                 # instead of an account, and a payload built from the world as
                 # it is now instead of the row as it was queued.
-                resolved = await alerts.resolve_nudge(session, delivery, now)
+                resolved = await alerts.resolve_nudge(session, delivery, clock())
                 if resolved is alerts.NoNudge.moot:
                     # Authority came back, or there is nothing left to arm.
                     # Retired, not retried — and separately from a failure,
@@ -101,7 +116,7 @@ async def scan_once(
                         device_id=str(delivery.device_id),
                         queued_at=delivery.expires_at.isoformat(),
                     )
-                    alerts.defer(delivery, now, alerts.AWAITING_WINNER_WAIT)
+                    alerts.defer(delivery, clock(), alerts.AWAITING_WINNER_WAIT)
                     await session.commit()
                     continue
                 if resolved is alerts.NoNudge.no_token:
@@ -110,12 +125,12 @@ async def scan_once(
                         profile_id=str(delivery.profile_id),
                         device_id=str(delivery.device_id),
                     )
-                    alerts.defer(delivery, now, alerts.NO_TOKEN_WAIT)
+                    alerts.defer(delivery, clock(), alerts.NO_TOKEN_WAIT)
                     await session.commit()
                     continue
 
-                outcome = await alerts.deliver_nudge(push, delivery, resolved)
-                alerts.record(delivery, outcome, now)
+                outcome = await alerts.deliver_nudge(push, delivery, resolved, clock=clock)
+                alerts.record(delivery, outcome, clock())
                 await session.commit()
                 continue
 
@@ -149,12 +164,12 @@ async def scan_once(
                     kind=delivery.kind.value,
                     waiting_since=delivery.expires_at.isoformat(),
                 )
-                alerts.defer(delivery, now, alerts.NO_TOKEN_WAIT)
+                alerts.defer(delivery, clock(), alerts.NO_TOKEN_WAIT)
                 await session.commit()
                 continue
 
-            outcome = await alerts.deliver(push, delivery, tokens)
-            alerts.record(delivery, outcome, now)
+            outcome = await alerts.deliver(push, delivery, tokens, clock=clock)
+            alerts.record(delivery, outcome, clock())
             if delivery.state == alerts.AlertState.sent.value:
                 delivered += 1
 

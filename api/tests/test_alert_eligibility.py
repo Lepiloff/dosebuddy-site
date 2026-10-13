@@ -267,8 +267,8 @@ async def test_revoke_ack_waits_for_started_send_and_blocks_future_retry(
     started, finish = asyncio.Event(), asyncio.Event()
 
     class PausedPush(RecordingPush):
-        async def send(self, token, data, collapse, ttl_seconds):
-            await super().send(token, data, collapse, ttl_seconds)
+        async def send(self, token, data, collapse, ttl_seconds, **kwargs):
+            await super().send(token, data, collapse, ttl_seconds, **kwargs)
             started.set()
             await finish.wait()
             return outcome
@@ -334,7 +334,7 @@ async def test_timed_out_revoke_does_not_ack_or_partially_end_consent(api, sessi
     started, finish = asyncio.Event(), asyncio.Event()
 
     class PausedRetry:
-        async def send(self, *args):
+        async def send(self, *args, **kwargs):
             started.set()
             await finish.wait()
             return Delivery.retry

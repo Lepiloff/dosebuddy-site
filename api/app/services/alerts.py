@@ -26,7 +26,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from app.services.push import Delivery
+from app.services.push import Clock, Delivery, remaining_ttl
 
 from app.db.publication import NEXT_SERVER_SEQ, lock_publication
 from app.db.models import (
@@ -43,6 +43,7 @@ from app.db.models import (
     Role,
     Schedule,
     StockEvent,
+    utcnow,
 )
 
 log = structlog.get_logger(__name__)
@@ -672,7 +673,7 @@ async def resolve_nudge(
     # The two are the same question — how long this is worth delivering — and
     # letting a retry outlive the row would have the server stop caring about a
     # message FCM is still holding.
-    remaining = int((delivery.expires_at - now).total_seconds())
+    remaining = remaining_ttl(delivery.expires_at, now)
     if remaining <= 0:
         return NoNudge.moot
 
@@ -696,7 +697,9 @@ async def resolve_nudge(
     )
 
 
-async def deliver_nudge(push, delivery: AlertDelivery, nudge: Nudge) -> Delivery:
+async def deliver_nudge(
+    push, delivery: AlertDelivery, nudge: Nudge, *, clock: Clock | None = None,
+) -> Delivery:
     """One device, one token, one outcome.
 
     Deliberately not `deliver`, which reports the best result across every
@@ -704,8 +707,13 @@ async def deliver_nudge(push, delivery: AlertDelivery, nudge: Nudge) -> Delivery
     someone's two phones is telling them — and wrong here, where the whole point
     is that exactly one device is being addressed.
     """
+    clock = clock or utcnow
+    remaining = remaining_ttl(delivery.expires_at, clock())
+    if remaining <= 0:
+        return Delivery.expired
     return await push.send(
-        nudge.token, nudge.payload, collapse_key(delivery), nudge.ttl_seconds
+        nudge.token, nudge.payload, collapse_key(delivery), min(nudge.ttl_seconds, remaining),
+        expires_at=delivery.expires_at, clock=clock,
     )
 
 
@@ -735,7 +743,7 @@ def payload_for(delivery: AlertDelivery) -> dict[str, str]:
     no medication name.
 
     **`account_id` is the account this was raised for, and it is here so a phone
-    can refuse it.** Delivery is at-least-once with a TTL measured in hours, so a
+    can refuse it.** Retried pushes may arrive more than once or late, so a
     push can arrive after the person has signed out of that account and into
     another one — and with only `{type, profile_id, subject_id}` the phone had
     nothing to tell that apart from an alert about its own data. It showed a
@@ -755,7 +763,9 @@ def payload_for(delivery: AlertDelivery) -> dict[str, str]:
     }
 
 
-async def deliver(push, delivery: AlertDelivery, tokens: tuple[str, ...]) -> Delivery:
+async def deliver(
+    push, delivery: AlertDelivery, tokens: tuple[str, ...], *, clock: Clock | None = None,
+) -> Delivery:
     """Send to every device the caregiver has, and report the best outcome.
 
     Best, not worst: reaching one of someone's two phones is telling them. Only
@@ -763,18 +773,26 @@ async def deliver(push, delivery: AlertDelivery, tokens: tuple[str, ...]) -> Del
     tokens are dead" decide what happens next, and a single retryable failure is
     enough to keep the alert alive.
     """
-    # The same TTL the server uses for this signal. If FCM's were shorter it
-    # would drop the message while the server still counted it delivered — a
-    # loss with no trace on either side.
-    ttl_seconds = int(TTL[delivery.kind].total_seconds())
-    outcomes = [
-        await push.send(
-            token, payload_for(delivery), collapse_key(delivery), ttl_seconds
+    clock = clock or utcnow
+    outcomes = []
+    for token in tokens:
+        # Each device and each retry spends the same durable row's lifetime.
+        # Earlier sends may have consumed it even though this pass began on time.
+        remaining = remaining_ttl(delivery.expires_at, clock())
+        if remaining <= 0:
+            outcomes.append(Delivery.expired)
+            break
+        outcome = await push.send(
+            token, payload_for(delivery), collapse_key(delivery), remaining,
+            expires_at=delivery.expires_at, clock=clock,
         )
-        for token in tokens
-    ]
+        outcomes.append(outcome)
+        if outcome is Delivery.expired:
+            break
     if Delivery.ok in outcomes:
         return Delivery.ok
+    if Delivery.expired in outcomes:
+        return Delivery.expired
     if Delivery.retry in outcomes:
         return Delivery.retry
     return Delivery.gone
@@ -787,6 +805,12 @@ def record(delivery: AlertDelivery, outcome: Delivery, now: datetime) -> None:
     all land after it stopped being useful should say so, rather than retrying
     into a window where nobody wants the answer any more.
     """
+    if outcome is Delivery.expired:
+        # No viable next send remains. This is retirement, not a dead token or
+        # failed attempt; prior success is selected by deliver before this point.
+        delivery.state = AlertState.expired.value
+        return
+
     delivery.attempts += 1
 
     if outcome is Delivery.ok:

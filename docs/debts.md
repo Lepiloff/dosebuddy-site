@@ -609,7 +609,7 @@ profile_stale  молчание с 10:21:38 → положен 11:21:38 → от
 Решение15.08.2026: отложить до Family, не менять сервер в ходе приёмки v1.1.
 Это прежнее датированное решение; новое поручение13.10 разрешило локальный fix.
 
-**AUD-006: исправлено локально 13.10.2026; review/rollout/live gates открыты.**
+**AUD-006: исправлено локально 13.10.2026, review пройден; rollout/live gates открыты.**
 
 Pending caregiver intent переживал successful revoke/downgrade и отправлялся
 по старому согласию. Теперь dispatch проверяет живое `with_alerts`, профиль,
@@ -631,6 +631,34 @@ send заканчивается до commit/ack revoke; возможный пр�
 отозвать, и он может прийти позже. Отдельный gate — device/offline FCM и local
 role snapshot. Lock order и rollout `0023` описаны в
 [sync publication](sync-publication.md#caregiver-consent-retirement).
+
+## Срок доставки caregiver intent
+
+**AUD-008: исправлено локально 13.10.2026, review пройден; live gate открыт.**
+
+Сканирование очереди раньше замораживало `now` на весь проход, caregiver
+dispatch заново выдавал полные6/24ч каждому токену и retry. Теперь свежие часы
+проверяются перед каждой строкой/токеном, а настоящий `FcmPush` пересчитывает
+оставшиеся целые секунды SQL `expires_at` перед HTTP post после blocking OAuth
+и входа в client. Истёкший либо меньше секунды остаток прекращает send,
+`expired` отделён от мёртвого токена; уже принятый token сохраняет итог `sent`.
+Authority nudge использует тот же transport deadline. Схема, public payload,
+endpoints, collapse keys и dependencies не менялись.
+
+`tests/test_delivery_expiry.py` проходит через настоящие worker/alerts/FcmPush,
+PostgreSQL и controlled clock; OAuth/HTTP synthetic, без реальных sends.
+Проверены rows/tokens, retry в конце окна, zero/subsecond, поздние OAuth/client
+wait, eligibility wait, best outcome и authority path. Явный `now` без `clock`
+сохраняет прежнее frozen поведение тестовых callers; production main использует
+движущиеся UTC часы.
+
+Остаточная граница: HTTP, начатый вовремя, может быть принят позднее;
+transport TTL не отзывает принятый FCM, полученное локальное уведомление или
+replay. У caregiver payload нет client expiry. Это требует отдельного решения
+контракта, если нужна более строгая граница показа. Старый phone RemoteFcmBridge
+перед live gate должен поддержать новые внутренние `expires_at`/`clock` и тот
+же guard после собственных ожиданий. Полный механизм и пределы —
+[§5 API contract](v1.1-api-contract.md#5-алерты).
 
 ---
 

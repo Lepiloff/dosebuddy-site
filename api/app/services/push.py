@@ -7,7 +7,7 @@ before the credentials exist — logging what it would have sent instead of
 failing, which is a better state to deploy into than one that crashes on the
 first missed dose.
 
-`send` reports one of three outcomes rather than true/false. A boolean forces
+`send` reports distinct outcomes rather than true/false. A boolean forces
 the caller to guess which kind of failure it had, and the two kinds want
 opposite treatment: retrying a dead token is pointless forever, and giving up on
 a 503 loses an alert to a blip lasting seconds.
@@ -16,6 +16,8 @@ a 503 loses an alert to a blip lasting seconds.
 from __future__ import annotations
 
 import enum
+from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
 from typing import Protocol
 
 import httpx
@@ -25,6 +27,17 @@ from google.oauth2 import service_account
 
 log = structlog.get_logger(__name__)
 
+Clock = Callable[[], datetime]
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def remaining_ttl(expires_at: datetime, now: datetime) -> int:
+    """Whole useful seconds without rounding past the row's deadline."""
+    return max(0, int((expires_at - now).total_seconds()))
+
 
 class Delivery(enum.Enum):
     ok = "ok"
@@ -33,11 +46,15 @@ class Delivery(enum.Enum):
     # This token will never accept anything again — reinstalled app, wiped
     # device. Retrying wastes attempts an alert may still need for a live token.
     gone = "gone"
+    # The intent outlived its useful life before the next HTTP send began.
+    # This says nothing about whether the token is registered.
+    expired = "expired"
 
 
 class Push(Protocol):
     async def send(
-        self, token: str, data: dict[str, str], collapse: str, ttl_seconds: int
+        self, token: str, data: dict[str, str], collapse: str, ttl_seconds: int,
+        *, expires_at: datetime | None = None, clock: Clock | None = None,
     ) -> Delivery: ...
 
 
@@ -50,8 +67,13 @@ class LoggingPush:
     """
 
     async def send(
-        self, token: str, data: dict[str, str], collapse: str, ttl_seconds: int
+        self, token: str, data: dict[str, str], collapse: str, ttl_seconds: int,
+        *, expires_at: datetime | None = None, clock: Clock | None = None,
     ) -> Delivery:
+        if ttl_seconds <= 0 or (
+            expires_at is not None and remaining_ttl(expires_at, (clock or utcnow)()) <= 0
+        ):
+            return Delivery.expired
         log.warning("push.not_configured", type=data.get("type"), token_suffix=token[-6:])
         return Delivery.retry
 
@@ -78,8 +100,17 @@ class FcmPush:
         self._credentials_path = credentials_path
 
     async def send(
-        self, token: str, data: dict[str, str], collapse: str, ttl_seconds: int
+        self, token: str, data: dict[str, str], collapse: str, ttl_seconds: int,
+        *, expires_at: datetime | None = None, clock: Clock | None = None,
     ) -> Delivery:
+        clock = clock or utcnow
+        # Direct callers without a SQL deadline still spend their supplied TTL
+        # while acquiring credentials, rather than starting it again afterwards.
+        expires_at = expires_at or clock() + timedelta(seconds=ttl_seconds)
+        ttl_seconds = min(ttl_seconds, remaining_ttl(expires_at, clock()))
+        if ttl_seconds <= 0:
+            return Delivery.expired
+
         creds = service_account.Credentials.from_service_account_file(
             self._credentials_path,
             scopes=["https://www.googleapis.com/auth/firebase.messaging"],
@@ -91,26 +122,23 @@ class FcmPush:
             "token": token,
             "data": data,
             "android": {
-                # Two sends of the same alert land as one notification. This is
-                # what makes retrying safe: without it, at-least-once delivery
-                # would mean a caregiver occasionally woken twice for one dose,
-                # and a caregiver woken twice learns to ignore the third time.
+                # Collapse can replace pending copies; it cannot retract a
+                # copy already delivered. Retries still need client dedup.
                 "collapse_key": collapse,
                 "priority": "high",
-                # How long FCM should hold it for a phone that is off, rather
-                # than delivering something stale. Per signal, not one figure
-                # for all: this was a flat six hours, so `profile_stale` — which
-                # is about a day — was dropped by FCM after six. The server had
-                # already recorded it sent and would never retry, so a phone off
-                # overnight simply never heard. Same number as the server's own
-                # TTL, and it has to stay that way: FCM giving up sooner is a
-                # loss the server cannot see.
-                "ttl": f"{ttl_seconds}s",
+                # Filled at the HTTP boundary, after credential/client waits.
             },
         }
 
         try:
             async with httpx.AsyncClient(timeout=10) as client:
+                # OAuth refresh is synchronous, and client entry may also wait.
+                # Neither may renew the original delivery window. FCM ttl=0
+                # means immediate delivery, so an exhausted budget must not post.
+                ttl_seconds = min(ttl_seconds, remaining_ttl(expires_at, clock()))
+                if ttl_seconds <= 0:
+                    return Delivery.expired
+                message["android"]["ttl"] = f"{ttl_seconds}s"
                 r = await client.post(
                     url,
                     headers={"Authorization": f"Bearer {creds.token}"},
