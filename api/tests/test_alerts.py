@@ -4,6 +4,7 @@ The rules, not the transport. What is worth testing here is who gets told, when,
 how often, and — the one with teeth — what the payload does not contain.
 """
 
+import logging
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -33,6 +34,7 @@ from tests.test_sync import (
     _owner_with_data,
     _pair,
     dose,
+    logged,
     medication,
     ms,
     preview,
@@ -1071,6 +1073,58 @@ async def test_the_lease_is_off_unless_it_is_configured(api, session, db_engine)
     assert profile.owner_device_id == losing.id
     assert profile.server_seq > before
     assert profile.authority_leased is False, "the phone it went back to may never report"
+
+
+async def test_worker_logs_the_expired_lease_owner_before_handback(
+    api, session, db_engine, caplog,
+):
+    """The diagnostic source must survive the ORM-synchronized UPDATE.
+
+    The worker already committed the right authority before this regression:
+    only its warning described a handback from the receiving phone to itself.
+    Read the committed state through a new session as well as the actual log.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    _owner, pid, losing, winning = await _handover(api, session, db_engine)
+    profile = await session.get(Profile, uuid.UUID(pid))
+    await session.refresh(profile)
+    assert profile.owner_device_id == winning.id
+    assert profile.pending_owner_device_id is None
+    before = profile.server_seq
+    now = utcnow()
+    await session.execute(
+        sa_update(Profile).where(Profile.id == profile.id).values(
+            authority_leased=True, previous_owner_device_id=losing.id,
+        )
+    )
+    session.add(DeviceReadiness(
+        device_id=winning.id, profile_id=profile.id, revision=before,
+        applied_cursor=before, updated_at=now - timedelta(minutes=2),
+    ))
+    await session.commit()
+
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    pusher = RecordingPush()
+    with caplog.at_level(logging.WARNING, logger="app.services.alerts"):
+        caplog.clear()
+        assert await scan_once(factory, pusher, now, lease=timedelta(minutes=1)) == 0
+        handbacks = logged(caplog, "authority.handed_back")
+
+    async with factory() as observer:
+        durable = await observer.get(Profile, uuid.UUID(pid))
+        assert durable.owner_device_id == losing.id
+        assert durable.previous_owner_device_id == winning.id
+        assert durable.pending_owner_device_id is None
+        assert durable.server_seq > before
+        assert durable.authority_leased is False
+
+    assert pusher.sent == []
+    assert len(handbacks) == 1
+    assert f"profile_id={pid}" in handbacks[0]
+    assert f"from_device_id={winning.id}" in handbacks[0], handbacks[0]
+    assert f"to_device_id={losing.id}" in handbacks[0], handbacks[0]
+    assert "silent_for_s=120" in handbacks[0]
 
 
 async def test_an_unleased_handover_is_never_taken_back(api, session, db_engine):

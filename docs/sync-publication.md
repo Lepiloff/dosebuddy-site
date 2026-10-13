@@ -112,6 +112,24 @@ logout/delete, timeout/retry, queue failure и configured lease→paused fake FC
 Связанный regression gate — 248 passed; на approved001 source получены
 ожидаемые red. Это host proof, не выполненный production/device handover.
 
+### Диагностика возврата lease (локальный AUD-010, 13.10)
+
+`worker.main` передаёт настроенный lease в `scan_once`, который до detection
+вызывает `alerts.hand_back_unconfirmed`. При возврате B→A исходный owner теперь
+сохраняется до ORM UPDATE: SQLAlchemy синхронизирует загруженный `Profile`, и
+чтение его owner после UPDATE раньше давало warning A→A. Меняется только
+`authority.handed_back.from_device_id`; authority SQL, guards, publication lock,
+commit и настройки lease прежние. Warning по-прежнему пишется до commit.
+
+Regression `test_worker_logs_the_expired_lease_owner_before_handback` запускает
+настоящий worker на PostgreSQL с просроченной readiness B. Он проверяет warning
+B→A и новым SELECT из отдельной сессии owner=A/previous=B, новую revision,
+pending=NULL и leased=false. На parent `c8d616b` единственный red — неверное
+поле source; узкий green — 1 passed, связанные `test_alerts.py`,
+`test_authority_atomicity.py`, `test_sync_publication.py` — 97 passed.
+Это host evidence: production config/deploy, естественный client lease/renew,
+FCM и телефоны этим исправлением не проверялись.
+
 ## Восстановление ранее пропущенных строк
 
 Миграция `0021` устанавливает функции/fences/defaults и переиздаёт **все сохранённые

@@ -522,6 +522,8 @@ async def hand_back_unconfirmed(
             # phone that may yet report, which is better than a profile no
             # device claims at all.
             continue
+        # The ORM UPDATE also changes the loaded profile; preserve the log's source.
+        from_device_id = profile.owner_device_id
         await session.execute(
             sa_update(Profile)
             .where(Profile.id == profile.id)
@@ -540,7 +542,7 @@ async def hand_back_unconfirmed(
         log.warning(
             "authority.handed_back",
             profile_id=str(profile.id),
-            from_device_id=str(profile.owner_device_id),
+            from_device_id=str(from_device_id),
             to_device_id=str(previous.id),
             silent_for_s=int((now - reported_at).total_seconds()) if reported_at else None,
         )
