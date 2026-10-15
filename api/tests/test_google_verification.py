@@ -58,6 +58,8 @@ def certificates(monkeypatch):
         status = 200
         arrived = threading.Event()
         release = None
+        release_wait_expired = threading.Event()
+        response_started = threading.Event()
         certs = {"synthetic-key": certificate_for(private_key)}
         signing_key = private_key
         key_id = "synthetic-key"
@@ -89,8 +91,10 @@ def certificates(monkeypatch):
             state.arrived.set()
             time.sleep(state.delay)
             if state.release is not None:
-                state.release.wait(2)
+                if not state.release.wait(2):
+                    state.release_wait_expired.set()
             data = json.dumps(state.certs).encode()
+            state.response_started.set()
             self.send_response(state.status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
@@ -158,46 +162,54 @@ async def test_slow_certificates_leave_heartbeat_health_and_sync_responsive(
     real_api, certificates, endpoint,
 ):
     headers = await unrelated_session(real_api)
-    certificates.delay = 0.3
+    certificates.release = threading.Event()
     certificates.status = 503
-    ticks = []
+    heartbeat_progress = asyncio.Event()
 
     async def heartbeat():
         while True:
-            ticks.append(time.monotonic())
+            heartbeat_progress.set()
             await asyncio.sleep(0.01)
 
     async def probes():
-        # Include dispatch delay: on the old code this coroutine cannot even
-        # wake until all three synchronous certificate requests have finished.
-        started = time.monotonic()
-        await asyncio.sleep(0.02)
         assert (await real_api.get("/health")).status_code == 200
         assert (await real_api.get("/health/ready")).status_code == 200
         assert (await real_api.get("/v1/sync/pull", headers=headers)).status_code == 200
         assert (await real_api.post("/v1/sync/push", headers=headers, json={})).status_code == 200
-        return time.monotonic() - started
+        await heartbeat_progress.wait()
 
     beat = asyncio.create_task(heartbeat())
     requests = []
+    probe = None
     try:
-        await asyncio.sleep(0.03)
-        probe = asyncio.create_task(probes())
         requests = [asyncio.create_task(real_api.post(
             endpoint, json=google_request(endpoint, "synthetic-invalid-token"),
         )) for _ in range(3)]
-        elapsed = await probe
+        await wait_for_certificate_request(certificates)
+        assert not certificates.release_wait_expired.is_set(), "certificate watchdog released the response"
+        heartbeat_progress.clear()
+        probe = asyncio.create_task(probes())
+        await asyncio.wait_for(probe, 1)
+        # Unrelated work must finish while certificate I/O is still parked.
+        # The server's bounded fallback must never satisfy this causal gate.
+        assert not certificates.release_wait_expired.is_set(), "certificate watchdog released the response"
+        assert not certificates.response_started.is_set()
+        assert not certificates.release.is_set()
+        assert certificates.calls == 1
+        assert all(not request.done() for request in requests)
+        certificates.release.set()
         responses = await asyncio.gather(*requests)
-        await asyncio.sleep(0.02)
         assert certificates.calls == 3
         assert all(r.status_code == 401 for r in responses)
         assert all(r.json()["error"]["code"] == "invalid_google_token" for r in responses)
-        max_gap = max(b - a for a, b in zip(ticks, ticks[1:]))
-        assert max_gap < 0.15, f"event loop paused for {max_gap:.3f}s"
-        assert elapsed < 0.2, f"unrelated HTTP work waited {elapsed:.3f}s"
     finally:
-        beat.cancel()
-        await asyncio.gather(beat, *requests, return_exceptions=True)
+        certificates.release.set()
+        tasks = [beat, *requests]
+        if probe is not None:
+            tasks.append(probe)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @pytest.mark.parametrize("endpoint", ["/v1/auth/google", "/v1/account/delete-retry"])
