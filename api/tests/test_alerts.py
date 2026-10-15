@@ -318,6 +318,7 @@ async def test_the_real_sender_can_be_constructed():
 
     sender = FcmPush("some-project", "/nonexistent/key.json")
     assert sender is not None
+    await sender.aclose()
 
 
 # ---------------------------------------------------------------------------

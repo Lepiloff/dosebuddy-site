@@ -421,6 +421,53 @@ receiver'а** — `Start proc … for broadcast FlutterFirebaseMessagingReceiver
 списания попытки, и пишется `alert.no_recipient`. Молчание об этом однажды
 спрятало настоящий отказ на два дня.
 
+### HTTP client принадлежит worker (локальный S5a.1, 15.10)
+
+`worker.main` создаёт один sender и передаёт его последовательным `scan_once`.
+`FcmPush` лениво создаёт один AsyncClient с прежним timeout10 при первой
+непросроченной отправке, прошедшей credential load/refresh. Client используется
+для следующих recipients и проходов; Authorization, token и payload передаются
+отдельно в каждом request. Payload/eligibility/authority не кэшируются.
+
+Load service-account файла и синхронный OAuth refresh остаются на каждом send.
+Ошибка refresh по-прежнему выходит до `record/commit` текущей delivery, а внешний
+worker продолжает со следующего pass. Закоммиченные предыдущие deliveries не
+откатываются; уже принятый FCM эффект до SQL rollback может повториться.
+Cache credentials и новая политика ротации ключа в этот fix не входят.
+
+Исходный expires_at проверяется на прежних row/recipient границах и ещё раз
+после refresh/создания client, прямо перед post, включая повторное использование
+client. Остаток меньше1s не превращается в отправку с ttl=0. HTTPError и status
+outcomes прежние; внутренних resend нет, retry/backoff принадлежат durable очереди.
+
+В finally worker вызывает `sender.aclose`, а во вложенном finally —
+`engine.dispose`, в том числе при ошибке close. Close FcmPush идемпотентен;
+закрытый sender отвергает send до credentials/HTTP, не создаёт client заново.
+Close неиспользованного sender ресурсов не создаёт; LoggingPush имеет no-op close.
+Отмена работающего прохода проходит через тот же cleanup. Аварийное завершение
+процесса не гарантирует выполнение finally; очередь восстанавливается из SQL.
+
+Это локальное изменение времени жизни HTTP client. Сокеты могут обновляться
+после idle/ошибки; уменьшение числа client constructions не доказывает TCP/TLS
+reuse, сокращение latency или receipt от телефона. API по-прежнему не имеет
+sender. Публичные payloads, schema, publication/consent guards и lease прежние.
+
+Host измерение15.10: для5/100 sends через один sender создан/закрыт1 client
+вместо5/100 на исходном271b93a; load/refresh credentials остались5/100.
+Независимое review без оставшихся findings. Узкие проверки:
+[sender](../api/tests/test_push_lifecycle.py) и
+[actual main/finally](../api/tests/test_worker_lifecycle.py) —31/31;
+[SQL recovery](../api/tests/test_fcm_restart.py) —4/4; существующие alert/expiry/
+collapse/eligibility tests —111/111 на baseline и после изменения.
+OAuth/provider synthetic, HTTP encoding и PostgreSQL16 настоящие. Новые
+sender/SQL sessions восстанавливают pending после503/transport/refresh ошибки
+с прежним deadline; partial recipient acceptance до исключения остаётся
+повторяемым эффектом. Process kill, SIGTERM, production и телефон не проверены;
+этот результат не является deploy acceptance.
+Итоговый полный backend pytest после независимого review —470/470, exit0,
+433.74s (Python3.10.7/PostgreSQL16.15, isolated Unix socket). Тестовый cluster
+остановлен после проверки. Production не разворачивался.
+
 ### Независимые события и collapse (локальный AUD-009, 13.10)
 
 Caregiver data-only messages — самостоятельные события, а не сигнал прочитать

@@ -57,6 +57,8 @@ class Push(Protocol):
         *, expires_at: datetime | None = None, clock: Clock | None = None,
     ) -> Delivery: ...
 
+    async def aclose(self) -> None: ...
+
 
 class LoggingPush:
     """What runs until a Firebase service account is configured.
@@ -76,6 +78,9 @@ class LoggingPush:
             return Delivery.expired
         log.warning("push.not_configured", type=data.get("type"), token_suffix=token[-6:])
         return Delivery.retry
+
+    async def aclose(self) -> None:
+        pass
 
 
 # What FCM's errors mean for us. Anything unlisted is treated as retryable: a
@@ -98,11 +103,22 @@ class FcmPush:
     def __init__(self, project_id: str, credentials_path: str):
         self._project_id = project_id
         self._credentials_path = credentials_path
+        self._client: httpx.AsyncClient | None = None
+        self._closed = False
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._client is not None:
+            await self._client.aclose()
 
     async def send(
         self, token: str, data: dict[str, str], collapse: str | None, ttl_seconds: int,
         *, expires_at: datetime | None = None, clock: Clock | None = None,
     ) -> Delivery:
+        if self._closed:
+            raise RuntimeError("FCM sender is closed")
         clock = clock or utcnow
         # Direct callers without a SQL deadline still spend their supplied TTL
         # while acquiring credentials, rather than starting it again afterwards.
@@ -132,19 +148,20 @@ class FcmPush:
             message["android"]["collapse_key"] = collapse
 
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                # OAuth refresh is synchronous, and client entry may also wait.
-                # Neither may renew the original delivery window. FCM ttl=0
-                # means immediate delivery, so an exhausted budget must not post.
-                ttl_seconds = min(ttl_seconds, remaining_ttl(expires_at, clock()))
-                if ttl_seconds <= 0:
-                    return Delivery.expired
-                message["android"]["ttl"] = f"{ttl_seconds}s"
-                r = await client.post(
-                    url,
-                    headers={"Authorization": f"Bearer {creds.token}"},
-                    json={"message": message},
-                )
+            if self._client is None:
+                self._client = httpx.AsyncClient(timeout=10)
+            # OAuth refresh and first client construction spend the original
+            # delivery window. FCM ttl=0 means immediate delivery, so an
+            # exhausted budget must not post, including on a reused client.
+            ttl_seconds = min(ttl_seconds, remaining_ttl(expires_at, clock()))
+            if ttl_seconds <= 0:
+                return Delivery.expired
+            message["android"]["ttl"] = f"{ttl_seconds}s"
+            r = await self._client.post(
+                url,
+                headers={"Authorization": f"Bearer {creds.token}"},
+                json={"message": message},
+            )
         except httpx.HTTPError as exc:
             log.warning("push.unreachable", error=type(exc).__name__, type=data.get("type"))
             return Delivery.retry

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+import pytest_asyncio
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -25,8 +26,8 @@ from tests.test_sync import _owner_with_data
 pytestmark = pytest.mark.asyncio
 
 
-@pytest.fixture
-def fcm(monkeypatch):
+@pytest_asyncio.fixture
+async def fcm(monkeypatch):
     messages = []
     control = SimpleNamespace(status=200)
 
@@ -60,7 +61,8 @@ def fcm(monkeypatch):
     sender = build_push(make_settings(
         fcm_project_id="synthetic-project", fcm_credentials_path="/unused/synthetic-key.json",
     ))
-    return sender, messages, control
+    yield sender, messages, control
+    await sender.aclose()
 
 
 async def second_watched_profile(api, session, caregiver):

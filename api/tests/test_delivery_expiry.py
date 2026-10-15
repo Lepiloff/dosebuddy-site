@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -45,41 +46,46 @@ def clock(monkeypatch):
     return value
 
 
-def fcm(monkeypatch, clock, *, oauth_wait=0, client_wait=0, http_wait=0, status=200):
-    requests, refreshes = [], []
+@pytest_asyncio.fixture
+async def fcm(monkeypatch, clock):
+    senders = []
 
-    class Credentials:
-        token = "synthetic-oauth-token"
+    def create(*, oauth_wait=0, client_wait=0, http_wait=0, status=200):
+        requests, refreshes = [], []
 
-        def refresh(self, request):
-            refreshes.append(clock())
-            clock.advance(oauth_wait)
+        class Credentials:
+            token = "synthetic-oauth-token"
 
-    monkeypatch.setattr(
-        push_service.service_account.Credentials, "from_service_account_file",
-        lambda *args, **kwargs: Credentials(),
-    )
+            def refresh(self, request):
+                refreshes.append(clock())
+                clock.advance(oauth_wait)
 
-    class Client:
-        def __init__(self, **kwargs):
-            pass
+        monkeypatch.setattr(
+            push_service.service_account.Credentials, "from_service_account_file",
+            lambda *args, **kwargs: Credentials(),
+        )
 
-        async def __aenter__(self):
-            await asyncio.sleep(0)
-            clock.advance(client_wait)
-            return self
+        class Client:
+            def __init__(self, **kwargs):
+                clock.advance(client_wait)
 
-        async def __aexit__(self, *args):
-            return False
+            async def aclose(self):
+                pass
 
-        async def post(self, url, *, headers, json):
-            requests.append((clock(), json["message"]))
-            await asyncio.sleep(0)
-            clock.advance(http_wait)
-            return SimpleNamespace(status_code=status)
+            async def post(self, url, *, headers, json):
+                requests.append((clock(), json["message"]))
+                await asyncio.sleep(0)
+                clock.advance(http_wait)
+                return SimpleNamespace(status_code=status)
 
-    monkeypatch.setattr(push_service.httpx, "AsyncClient", Client)
-    return FcmPush("synthetic-project", "/unused/synthetic-key.json"), requests, refreshes
+        monkeypatch.setattr(push_service.httpx, "AsyncClient", Client)
+        sender = FcmPush("synthetic-project", "/unused/synthetic-key.json")
+        senders.append(sender)
+        return sender, requests, refreshes
+
+    yield create
+    for sender in senders:
+        await sender.aclose()
 
 
 async def queued(session, caregiver, pid, clock, *, remaining, kind=AlertKind.dose_missed):
@@ -128,14 +134,14 @@ async def test_worker_rechecks_expiry_between_rows(api, session, db_engine, cloc
 
 @pytest.mark.parametrize("status", [200, 503, 404])
 async def test_worker_stops_tokens_at_expiry_and_keeps_best_outcome(
-    api, session, db_engine, clock, monkeypatch, status,
+    api, session, db_engine, clock, fcm, status,
 ):
     _, caregiver, pid, *_ = await _with_watcher(api, session)
     session.add(Device(id=uuid.uuid4(), account_id=uuid.UUID(caregiver["account_id"]),
                        platform="android", push_token="second-token"))
     await session.commit()
     delivery_id = await queued(session, caregiver, pid, clock, remaining=3.5)
-    sender, requests, _ = fcm(monkeypatch, clock, http_wait=4, status=status)
+    sender, requests, _ = fcm(http_wait=4, status=status)
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
     assert await worker.scan_once(maker, sender) == (1 if status == 200 else 0)
     assert len(requests) == 1, "no new token may start after the absolute deadline"
@@ -147,18 +153,18 @@ async def test_worker_stops_tokens_at_expiry_and_keeps_best_outcome(
 
 @pytest.mark.parametrize("kind", [AlertKind.dose_missed, AlertKind.profile_stale])
 async def test_worker_retry_uses_remaining_life_not_a_fresh_window(
-    api, session, db_engine, clock, monkeypatch, kind,
+    api, session, db_engine, clock, fcm, kind,
 ):
     _, caregiver, pid, *_ = await _with_watcher(api, session)
     delivery_id = await queued(session, caregiver, pid, clock, remaining=65.5, kind=kind)
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
-    sender, requests, _ = fcm(monkeypatch, clock, status=503)
+    sender, requests, _ = fcm(status=503)
     assert await worker.scan_once(maker, sender) == 0
     initial = await row(maker, delivery_id)
     assert initial.state == AlertState.pending.value
     assert initial.expires_at == clock() + timedelta(seconds=65.5)
     clock.advance(61)
-    sender, retry_requests, _ = fcm(monkeypatch, clock, oauth_wait=1)
+    sender, retry_requests, _ = fcm(oauth_wait=1)
     assert await worker.scan_once(maker, sender) == 1
     assert requests[0][1]["android"]["ttl"] == "65s"
     assert retry_requests[0][1]["android"]["ttl"] == "3s"
@@ -188,23 +194,23 @@ async def test_worker_retires_zero_or_subsecond_life(api, session, db_engine, cl
 
 @pytest.mark.parametrize("oauth_wait,client_wait", [(6, 0), (2, 4)])
 async def test_fcm_rechecks_deadline_after_oauth_and_client_wait(
-    clock, monkeypatch, oauth_wait, client_wait,
+    clock, fcm, oauth_wait, client_wait,
 ):
-    sender, requests, _ = fcm(monkeypatch, clock, oauth_wait=oauth_wait, client_wait=client_wait)
+    sender, requests, _ = fcm(oauth_wait=oauth_wait, client_wait=client_wait)
     outcome = await sender.send("token", {"type": "dose_missed"}, "collapse", 5)
     assert requests == [], "OAuth/client setup exhausted the original send budget"
     assert outcome.value == "expired"
 
 
-async def test_fcm_reduces_ttl_after_oauth_and_client_wait(clock, monkeypatch):
-    sender, requests, _ = fcm(monkeypatch, clock, oauth_wait=2, client_wait=1)
+async def test_fcm_reduces_ttl_after_oauth_and_client_wait(clock, fcm):
+    sender, requests, _ = fcm(oauth_wait=2, client_wait=1)
     assert await sender.send("token", {"type": "dose_missed"}, "collapse", 7) is Delivery.ok
     assert requests[0][1]["android"]["ttl"] == "4s"
 
 
 @pytest.mark.parametrize("ttl", [0, -1])
-async def test_fcm_zero_life_never_refreshes_credentials(clock, monkeypatch, ttl):
-    sender, requests, refreshes = fcm(monkeypatch, clock)
+async def test_fcm_zero_life_never_refreshes_credentials(clock, fcm, ttl):
+    sender, requests, refreshes = fcm()
     outcome = await sender.send("token", {"type": "dose_missed"}, "collapse", ttl)
     assert refreshes == [] and requests == []
     assert outcome.value == "expired"
@@ -230,7 +236,7 @@ async def test_worker_checks_expiry_after_eligibility_wait(api, session, db_engi
 
 @pytest.mark.parametrize("oauth_wait,expected", [(2, "3s"), (6, None)])
 async def test_authority_nudge_uses_same_fcm_deadline(
-    api, session, db_engine, clock, monkeypatch, oauth_wait, expected,
+    api, session, db_engine, clock, fcm, oauth_wait, expected,
 ):
     await _handover(api, session, db_engine)
     delivery_id = (await session.execute(select(AlertDelivery.id))).scalar_one()
@@ -238,7 +244,7 @@ async def test_authority_nudge_uses_same_fcm_deadline(
     await session.execute(update(AlertDelivery).where(AlertDelivery.id == delivery_id)
                           .values(next_attempt_at=clock(), expires_at=deadline))
     await session.commit()
-    sender, requests, _ = fcm(monkeypatch, clock, oauth_wait=oauth_wait)
+    sender, requests, _ = fcm(oauth_wait=oauth_wait)
     maker = async_sessionmaker(db_engine, expire_on_commit=False)
     await worker.scan_once(maker, sender)
     persisted = await row(maker, delivery_id)

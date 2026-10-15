@@ -256,7 +256,10 @@ async def main() -> None:
 
             await asyncio.sleep(SCAN_INTERVAL_SECONDS)
     finally:
-        await engine.dispose()
+        try:
+            await push.aclose()
+        finally:
+            await engine.dispose()
 
 
 if __name__ == "__main__":
