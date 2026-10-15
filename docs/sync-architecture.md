@@ -429,11 +429,12 @@ receiver'а** — `Start proc … for broadcast FlutterFirebaseMessagingReceiver
 для следующих recipients и проходов; Authorization, token и payload передаются
 отдельно в каждом request. Payload/eligibility/authority не кэшируются.
 
-Load service-account файла и синхронный OAuth refresh остаются на каждом send.
+На срезе S5a.1 load service-account файла и синхронный OAuth refresh оставались
+на каждом send; последующий согласованный cache описан ниже в S5a.2.
 Ошибка refresh по-прежнему выходит до `record/commit` текущей delivery, а внешний
 worker продолжает со следующего pass. Закоммиченные предыдущие deliveries не
 откатываются; уже принятый FCM эффект до SQL rollback может повториться.
-Cache credentials и новая политика ротации ключа в этот fix не входят.
+Cache credentials и новая политика ротации ключа в S5a.1 не входили.
 
 Исходный expires_at проверяется на прежних row/recipient границах и ещё раз
 после refresh/создания client, прямо перед post, включая повторное использование
@@ -467,6 +468,58 @@ sender/SQL sessions восстанавливают pending после503/transpo
 Итоговый полный backend pytest после независимого review —470/470, exit0,
 433.74s (Python3.10.7/PostgreSQL16.15, isolated Unix socket). Тестовый cluster
 остановлен после проверки. Production не разворачивался.
+
+### Credentials принадлежат sender (локальный S5a.2 A, 15.10)
+
+Владелец15.10 согласовал A и локальную реализацию с тестами без deploy.
+`FcmPush` лениво сохраняет credentials после первого успешного load: файл больше
+не перечитывается до нового sender/worker. Failed load оставляет cache пустым и
+повторяется следующим send. Loaded key сохраняется и при refresh failure: filefix
+его не подменяет; automatic reload не введён. [Политика restart/recreate](../deploy/README.md#lifetime-cache-и-замена-ключа-локальный-s5a2-1510).
+
+Reuse token разрешён только для непустого string, известного expiry и реального
+`TokenState.FRESH` google-auth2.56.3. При STALE/INVALID/missing/malformed token
+выполняется один вызов `creds.refresh`; существующие внутренние OAuth retries не
+меняются. Перед refresh и при любом его escape старый token очищается. Ошибка
+пробрасывается без FCM POST; loaded key и lazy OAuth Request/Session сохраняются
+для следующего send. Unknown expiry и ещё не истёкший STALE результат refresh
+допускают один текущий POST; следующий send снова refresh, без inline loop.
+
+HTTP401 очищает token и возвращает прежний retry без inline FCM resend. Следующий
+send может оказаться следующим recipient той же delivery: `[401,200]` по-прежнему
+даёт best outcome ok/sent, не durable retry отказавшему recipient. All401 сохраняет
+pending/backoff в пределах прежней attempts/deadline policy; исчерпание policy
+может завершить delivery. Exceptions до record/commit сохраняют исходную pending. Уже
+принятый recipient перед последующей refresh error может получить повтор.
+Eligibility/current authority, per-row locks/commit и unique intent не меняются.
+
+TTL от прежнего expires_at проверяется после setup прямо перед POST; token там
+также проверяется на тип/пустоту/INVALID после возможного client wait. Один HTTP
+client, per-request headers/data и HTTP outcomes прежние. Delivery clock и UTC
+clock библиотеки в tests контролируются отдельно; порог STALE библиотеки —225s.
+
+Idempotent aclose закрывает owned OAuth Session и HTTP client через вложенные
+finally даже при error/cancel одного, отвязывает Request.session перед destructor
+и освобождает ссылки cache. Worker finally/engine.dispose прежние. Unused sender
+и уже expired send новых OAuth resources не создают; прежние resources не
+уничтожаются expired send. Это не механизм SIGTERM/drain и не exactly-once.
+
+Host gates:61 no-DB tests (реальные token_state/Request/Session/httpx encoding с
+synthetic loader/refresh/provider transport),8 PostgreSQL recovery и111 related прошли.
+Новый keyfile policy проверен mocked loader, не actual key rotation. Offline probe
+измерил для5/100 FRESH sends по1 loader/refresh/Request/Session/client и по1 close
+каждого owned transport. Physical file reads/OAuth/provider latency не измерялись.
+Первый full:502 passed/2 failed, exit1,527.65s;80 Python files за run не менялись.
+Один из двух Google timing cases (auth) воспроизведён с exact deb77db push bytes
+в памяти; delete case прошёл. FcmPush constructions0 в baseline/current;
+причина timings не доказана. Отдельный
+reviewed test-only causal gate описан ниже в Google verification: Google-file15/15
+прошёл, synchronous mutant2/2 отклонён. Исходный failed gate сохранён в
+`/tmp/sonadose-s5a2-full.log`. Финальный full504/504, exit0,434.71s pytest /
+440.70s runner (`...-full-final.log`, `...-full-final-result.json`);80 Python files
+неизменны. Независимое source/tests/tool/docs review без оставшихся findings,
+S5a.2 завершён локально; private PostgreSQL остановлен. Это не Google runtime fix
+или latency improvement; deploy/live/phone не выполнялись.
 
 ### Независимые события и collapse (локальный AUD-009, 13.10)
 
@@ -579,8 +632,20 @@ Shutdown отклоняет новые/ожидающие callers и поздн�
 в event loop.
 
 `api/tests/test_google_verification.py` вызывает оба production handlers
-через настоящий Google requests adapter и локальный HTTP-сервер сертификатов
-с задержкой, синтетические RSA-токены и PostgreSQL. Проверены heartbeat,
+через настоящий Google requests adapter и локальный HTTP-сервер сертификатов,
+синтетические RSA-токены и PostgreSQL. Два availability cases после отдельного
+test-only review15.10 удерживают certificate response на Event и требуют
+health/ready/pull/push и нового heartbeat tick **до release**, пока auth requests
+pending. Прежний server `release.wait(2)` ограничен watchdog; его fallback и
+начало response явно наблюдаются, все tasks закрываются в finally. Gate больше
+не использует прежние временные пороги host-теста<200ms HTTP / <150ms heartbeat.
+Публичный SLA этим тестом не устанавливался. Synchronous verifier
+mutant только в памяти отклонён обоими endpoint по fallback; targeted2/2 и весь
+Google-file15/15 прошли. Соседние13 cases и Google runtime не менялись.
+Первичный failed full и baseline comparison не доказывают host-load причину
+или ускорение от test correction. Отдельный test-only commit `d9e6f42`;
+финальный полный gate504/504, exit0, прошёл без дальнейших runtime/tests изменений.
+Проверены также
 health/ready, sync pull/push, свежесть cache/ротация ключей, неверные
 claims/signature, переполнение, общий срок очереди, отмена и shutdown.
 Это host evidence с синтетическим provider сертификатов; реальный Google

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
+from google.auth.credentials import Credentials as GoogleCredentials
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -53,12 +54,14 @@ async def fcm(monkeypatch, clock):
     def create(*, oauth_wait=0, client_wait=0, http_wait=0, status=200):
         requests, refreshes = [], []
 
-        class Credentials:
-            token = "synthetic-oauth-token"
-
+        class Credentials(GoogleCredentials):
             def refresh(self, request):
                 refreshes.append(clock())
                 clock.advance(oauth_wait)
+                # Unknown expiry is one-use, so these deadline fixtures still
+                # exercise an OAuth wait at every recipient boundary.
+                self.token = "synthetic-oauth-token"
+                self.expiry = None
 
         monkeypatch.setattr(
             push_service.service_account.Credentials, "from_service_account_file",

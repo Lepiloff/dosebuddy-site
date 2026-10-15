@@ -8,6 +8,10 @@ from types import SimpleNamespace
 import httpx
 import pytest
 import pytest_asyncio
+import requests
+from google.auth import _helpers as auth_helpers
+from google.auth.credentials import Credentials as GoogleCredentials
+from google.auth.transport.requests import Request as GoogleRequest
 
 from app.services import push as push_service
 from app.services.push import Delivery, FcmPush, LoggingPush
@@ -22,6 +26,9 @@ async def fcm(monkeypatch):
         now=START, loads=0, refreshes=0, refresh_wait=0, client_wait=0,
         fail_refresh=False, response=200, responses=[], requests=[], clients=[], senders=[],
         close_error=False, block=False, entered=asyncio.Event(), release=asyncio.Event(),
+        grant_expiry=3600, grant_token=..., load_error=None, request_error=None,
+        refresh_error=None, oauth_close_error=None, oauth_requests=[], oauth_sessions=[],
+        credentials=[], key_version="key-a", after_post=None,
     )
 
     def advance(seconds):
@@ -29,23 +36,51 @@ async def fcm(monkeypatch):
 
     state.advance = advance
     state.clock = lambda: state.now
-    marker = object()
+    monkeypatch.setattr(auth_helpers, "utcnow", lambda: state.now.replace(tzinfo=None))
 
-    class Credentials:
+    class Credentials(GoogleCredentials):
         @classmethod
         def from_service_account_file(cls, path, *, scopes):
             assert path == ":synthetic:"
             assert scopes == ["https://www.googleapis.com/auth/firebase.messaging"]
             state.loads += 1
-            return cls()
+            if state.load_error is not None:
+                raise state.load_error
+            value = cls()
+            value.key_version = state.key_version
+            state.credentials.append(value)
+            return value
 
         def refresh(self, request):
-            assert request is marker
+            assert request in state.oauth_requests
             state.refreshes += 1
             advance(state.refresh_wait)
+            if state.refresh_error is not None:
+                raise state.refresh_error
             if state.fail_refresh:
                 raise ValueError("synthetic refresh failure")
-            self.token = f"oauth-{state.refreshes}"
+            self.token = f"oauth-{state.refreshes}" if state.grant_token is ... else state.grant_token
+            self.expiry = (None if state.grant_expiry is None else
+                           auth_helpers.utcnow() + timedelta(seconds=state.grant_expiry))
+
+    class OAuthSession(requests.Session):
+        def __init__(self):
+            super().__init__()
+            self.close_calls = 0
+            state.oauth_sessions.append(self)
+
+        def close(self):
+            self.close_calls += 1
+            super().close()
+            if state.oauth_close_error is not None:
+                raise state.oauth_close_error
+
+    def oauth_request():
+        if state.request_error is not None:
+            raise state.request_error
+        value = GoogleRequest(session=OAuthSession())
+        state.oauth_requests.append(value)
+        return value
 
     class Client(httpx.AsyncClient):
         def __init__(self, **kwargs):
@@ -65,6 +100,8 @@ async def fcm(monkeypatch):
                 response = state.responses.pop(0) if state.responses else state.response
                 if isinstance(response, BaseException):
                     raise response
+                if state.after_post is not None:
+                    state.after_post()
                 return httpx.Response(response, json={})
 
             super().__init__(transport=httpx.MockTransport(accept), trust_env=False, verify=False, **kwargs)
@@ -75,10 +112,12 @@ async def fcm(monkeypatch):
             self.close_calls += 1
             await super().aclose()
             if state.close_error:
+                if isinstance(state.close_error, BaseException):
+                    raise state.close_error
                 raise RuntimeError("synthetic close failure")
 
     monkeypatch.setattr(push_service, "service_account", SimpleNamespace(Credentials=Credentials))
-    monkeypatch.setattr(push_service, "GoogleRequest", lambda: marker)
+    monkeypatch.setattr(push_service, "GoogleRequest", oauth_request)
     monkeypatch.setattr(push_service, "httpx", SimpleNamespace(AsyncClient=Client, HTTPError=httpx.HTTPError))
 
     def sender():
@@ -112,10 +151,10 @@ async def test_one_lazy_client_keeps_every_payload_recipient_and_fresh_authoriza
         if authority:
             android["collapse_key"] = collapse
         assert message == {"token": f"recipient-{i % 3}", "data": data, "android": android}
-        assert authorization == f"Bearer oauth-{i + 1}"
+        assert authorization == "Bearer oauth-1"
         assert "authorization" not in client.headers
     assert len(fcm.clients) == 1 and len(fcm.requests) == count
-    assert fcm.loads == fcm.refreshes == count
+    assert fcm.loads == fcm.refreshes == 1
     assert not fcm.clients[0].is_closed
     await sender.aclose()
     await sender.aclose()
@@ -132,9 +171,10 @@ async def test_status_outcomes_do_not_replace_client_or_retry_internally(fcm, st
     assert len(fcm.requests) == 1
     fcm.response = 200
     assert await sender.send("next", {"type": "profile_stale"}, None, 60, clock=fcm.clock) is Delivery.ok
-    assert len(fcm.clients) == 1 and fcm.loads == fcm.refreshes == 2
+    assert len(fcm.clients) == 1 and fcm.loads == 1
+    assert fcm.refreshes == (2 if status == 401 else 1)
     assert fcm.requests[1][1]["token"] == "next"
-    assert fcm.requests[1][2] == "Bearer oauth-2"
+    assert fcm.requests[1][2] == ("Bearer oauth-2" if status == 401 else "Bearer oauth-1")
 
 
 async def test_transport_failure_reuses_client_and_original_deadline(fcm):
@@ -156,13 +196,15 @@ async def test_refresh_failure_propagates_without_post_and_next_send_recovers(fc
     sender = fcm.sender()
     if warm:
         await sender.send("recipient", {}, None, 60, clock=fcm.clock)
+        fcm.credentials[0].expiry = fcm.now.replace(tzinfo=None) + timedelta(seconds=225)
     fcm.fail_refresh = True
     with pytest.raises(ValueError, match="synthetic refresh failure"):
         await sender.send("recipient", {}, None, 60, clock=fcm.clock)
     assert len(fcm.requests) == int(warm) and len(fcm.clients) == int(warm)
     fcm.fail_refresh = False
     assert await sender.send("recipient", {}, None, 60, clock=fcm.clock) is Delivery.ok
-    assert len(fcm.clients) == 1 and fcm.loads == fcm.refreshes == 2 + int(warm)
+    assert len(fcm.clients) == 1 and fcm.loads == 1
+    assert fcm.refreshes == 2 + int(warm)
 
 
 @pytest.mark.parametrize("ttl,remaining", [(0, 60), (-1, 60), (60, 0), (60, 0.999)])
@@ -187,6 +229,7 @@ async def test_setup_reduces_ttl_and_reused_client_still_checks_after_refresh(fc
     assert await sender.send("recipient", {}, None, 7, clock=fcm.clock) is Delivery.ok
     assert fcm.requests[0][1]["android"]["ttl"] == "4s"
     fcm.refresh_wait = 6
+    fcm.credentials[0].expiry = fcm.now.replace(tzinfo=None) + timedelta(seconds=225)
     assert await sender.send("recipient", {}, None, 5, clock=fcm.clock) is Delivery.expired
     assert len(fcm.requests) == 1 and len(fcm.clients) == 1
 

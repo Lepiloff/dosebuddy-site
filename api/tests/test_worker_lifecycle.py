@@ -45,14 +45,16 @@ def wire_main(monkeypatch, fcm):
     return sender, events
 
 
-@pytest.mark.parametrize("unused,scan_error,close_error", [
-    (False, False, False), (True, False, False), (False, True, False), (False, False, True),
+@pytest.mark.parametrize("unused,scan_error,close_error,oauth_error", [
+    (False, False, False, False), (True, False, False, False), (False, True, False, False),
+    (False, False, True, False), (False, False, False, True),
 ])
 async def test_main_finally_closes_sender_and_disposes_engine(
-    monkeypatch, fcm, unused, scan_error, close_error,
+    monkeypatch, fcm, unused, scan_error, close_error, oauth_error,
 ):
     sender, events = wire_main(monkeypatch, fcm)
     fcm.close_error = close_error
+    fcm.oauth_close_error = RuntimeError("OAuth close failure") if oauth_error else None
 
     async def scan(sessionmaker, push, *, lease):
         assert sessionmaker == "synthetic-sessionmaker" and push is sender and lease is None
@@ -64,12 +66,15 @@ async def test_main_finally_closes_sender_and_disposes_engine(
         return 0
 
     monkeypatch.setattr(worker, "scan_once", scan)
-    with pytest.raises(RuntimeError if close_error else asyncio.CancelledError):
+    with pytest.raises(RuntimeError if close_error or oauth_error else asyncio.CancelledError):
         await worker.main()
     assert events == ["scan", "sweep", "sleep", "close", "dispose"]
     assert len(fcm.clients) == (0 if unused else 1)
     if fcm.clients:
         assert fcm.clients[0].is_closed and fcm.clients[0].close_calls == 1
+        assert fcm.oauth_sessions[0].close_calls == 1 and fcm.oauth_requests[0].session is None
+    else:
+        assert not fcm.oauth_sessions
 
 
 async def test_main_cancellation_during_real_http_closes_sender_and_engine(monkeypatch, fcm):
@@ -87,6 +92,7 @@ async def test_main_cancellation_during_real_http_closes_sender_and_engine(monke
         await task
     assert events == ["close", "dispose"]
     assert fcm.clients[0].is_closed and fcm.clients[0].close_calls == 1
+    assert fcm.oauth_sessions[0].close_calls == 1 and fcm.oauth_requests[0].session is None
 
 
 async def test_main_keeps_one_client_between_failed_and_successful_scans(monkeypatch, fcm):
@@ -110,7 +116,7 @@ async def test_main_keeps_one_client_between_failed_and_successful_scans(monkeyp
         await worker.main()
     assert calls == ["retry", "ok"]
     assert len(fcm.clients) == 1 and fcm.clients[0].close_calls == 1
-    assert fcm.refreshes == fcm.loads == 2
+    assert fcm.refreshes == fcm.loads == 1
     assert events == ["sweep", "sweep", "close", "dispose"]
 
 
@@ -129,3 +135,4 @@ async def test_main_unexpected_escape_still_closes_sender_and_engine(monkeypatch
         await worker.main()
     assert events == ["close", "dispose"]
     assert fcm.clients[0].is_closed and fcm.clients[0].close_calls == 1
+    assert fcm.oauth_sessions[0].close_calls == 1 and fcm.oauth_requests[0].session is None

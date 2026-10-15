@@ -376,6 +376,29 @@ credential or the API is the problem.
 > deleted in the console, and any copy — a backup, a synced folder, a trash can
 > — still works. Revoke first, delete second.
 
+### Lifetime cache и замена ключа (локальный S5a.2, 15.10)
+
+Согласован вариант A: worker лениво загружает key один раз после успешного load
+и использует его до нового sender/process. Ошибка первоначального load ничего
+не кэширует; но после успешного load refresh failure не перечитывает исправленный
+или заменённый файл. Automatic reload нет. Directory mount
+`./secrets:/run/secrets:ro` не является командой restart.
+
+При будущей замене bytes по прежнему path нужен **явный** restart worker:
+`docker compose restart worker`. Изменение env/path требует recreate с новым
+config, например `docker compose up -d --no-deps --force-recreate worker`.
+Обычный `remote-deploy.sh` может выбрать `--no-recreate api worker`, поэтому
+keyfile-only replacement сам по себе не гарантирует новый worker.
+
+Это согласованная lifecycle policy, а не выполненный live rotation runbook:
+здесь команды не запускались и ключи не читались. Restart прерывает работу;
+собственного SIGTERM/drain handler нет. SQL pending/expiry переживают restart,
+но FCM acceptance и SQL commit неатомарны: повтор уже принятого сообщения возможен.
+Async cancellation/finally tests не доказывают graceful OS shutdown или receipt
+телефона; live OAuth/key replacement и deployment acceptance остаются отдельными.
+[Локальные host gates и их пределы](../docs/sync-architecture.md#credentials-принадлежат-sender-локальный-s5a2-a-1510)
+прошли (финальный full504/504), но не заменяют отдельную live deployment acceptance.
+
 ## Rollback
 
 Keep this available for the whole migration. **Pages stays enabled and the

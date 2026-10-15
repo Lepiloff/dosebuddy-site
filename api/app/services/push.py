@@ -23,6 +23,8 @@ from typing import Protocol
 import httpx
 import structlog
 from google.auth.transport.requests import Request as GoogleRequest
+from google.auth.credentials import TokenState
+from google.auth.exceptions import RefreshError
 from google.oauth2 import service_account
 
 log = structlog.get_logger(__name__)
@@ -104,14 +106,38 @@ class FcmPush:
         self._project_id = project_id
         self._credentials_path = credentials_path
         self._client: httpx.AsyncClient | None = None
+        self._credentials: service_account.Credentials | None = None
+        self._oauth_request: GoogleRequest | None = None
         self._closed = False
 
     async def aclose(self) -> None:
         if self._closed:
             return
         self._closed = True
-        if self._client is not None:
-            await self._client.aclose()
+        request, self._oauth_request = self._oauth_request, None
+        self._credentials = None
+        try:
+            if request is not None:
+                try:
+                    request.session.close()
+                finally:
+                    # GoogleRequest.__del__ also closes its attached session.
+                    request.session = None
+        finally:
+            if self._client is not None:
+                try:
+                    await self._client.aclose()
+                finally:
+                    self._client = None
+
+    @staticmethod
+    def _usable_token(creds) -> str:
+        token = creds.token
+        if (not isinstance(token, str) or not token
+                or creds.token_state not in (TokenState.FRESH, TokenState.STALE)):
+            creds.token = None
+            raise RefreshError("FCM credentials have no usable access token")
+        return token
 
     async def send(
         self, token: str, data: dict[str, str], collapse: str | None, ttl_seconds: int,
@@ -127,11 +153,25 @@ class FcmPush:
         if ttl_seconds <= 0:
             return Delivery.expired
 
-        creds = service_account.Credentials.from_service_account_file(
-            self._credentials_path,
-            scopes=["https://www.googleapis.com/auth/firebase.messaging"],
-        )
-        creds.refresh(GoogleRequest())
+        if self._credentials is None:
+            # Key replacement takes effect only with a new sender/worker.
+            self._credentials = service_account.Credentials.from_service_account_file(
+                self._credentials_path,
+                scopes=["https://www.googleapis.com/auth/firebase.messaging"],
+            )
+        creds = self._credentials
+        if (not isinstance(creds.token, str) or not creds.token or creds.expiry is None
+                or creds.token_state is not TokenState.FRESH):
+            # A failed refresh must never fall back to the previous token.
+            creds.token = None
+            try:
+                if self._oauth_request is None:
+                    self._oauth_request = GoogleRequest()
+                creds.refresh(self._oauth_request)
+            except BaseException:
+                creds.token = None
+                raise
+        self._usable_token(creds)
 
         url = f"https://fcm.googleapis.com/v1/projects/{self._project_id}/messages:send"
         message = {
@@ -157,9 +197,10 @@ class FcmPush:
             if ttl_seconds <= 0:
                 return Delivery.expired
             message["android"]["ttl"] = f"{ttl_seconds}s"
+            token = self._usable_token(creds)
             r = await self._client.post(
                 url,
-                headers={"Authorization": f"Bearer {creds.token}"},
+                headers={"Authorization": f"Bearer {token}"},
                 json={"message": message},
             )
         except httpx.HTTPError as exc:
@@ -168,6 +209,9 @@ class FcmPush:
 
         if r.status_code == 200:
             return Delivery.ok
+
+        if r.status_code == 401:
+            creds.token = None
 
         outcome = Delivery.gone if r.status_code in _PERMANENT else Delivery.retry
         log.warning(

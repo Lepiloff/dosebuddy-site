@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 import pytest_asyncio
+from google.auth.credentials import Credentials as GoogleCredentials
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -31,11 +32,10 @@ async def fcm(monkeypatch):
     messages = []
     control = SimpleNamespace(status=200)
 
-    class Credentials:
-        token = "synthetic-oauth-token"
-
+    class Credentials(GoogleCredentials):
         def refresh(self, request):
-            pass
+            self.token = "synthetic-oauth-token"
+            self.expiry = None
 
     monkeypatch.setattr(
         push_service.service_account.Credentials, "from_service_account_file",
