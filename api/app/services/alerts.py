@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import structlog
-from sqlalchemy import Select, func, select, text, union_all
+from sqlalchemy import Select, func, select, text, true, union_all
 from sqlalchemy import update as sa_update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -586,6 +586,59 @@ async def profile_high_water(session: AsyncSession, profile: Profile) -> int:
     # The profile row itself always exists, so the coalesce is for a profile
     # with no data at all rather than for an impossible case.
     return max(int(highest or 0), profile.server_seq)
+
+
+async def profiles_high_water(
+    session: AsyncSession, profiles: Sequence[Profile]
+) -> dict[uuid.UUID, int]:
+    """Read authority watermarks together under the caller's publication fence.
+
+    Include tombstones and children of deleted medications, just as the fresh
+    singleton used by ready/nudge does. The CTE binds candidate IDs only once.
+    """
+    if not profiles:
+        return {}
+
+    scope = (
+        select(Profile.id.label("profile_id"), Profile.server_seq.label("seq"))
+        .where(Profile.id.in_([profile.id for profile in profiles]))
+        .cte("readiness_profiles")
+    )
+    medications = (
+        select(Medication.id)
+        .where(Medication.profile_id == scope.c.profile_id)
+        .correlate(scope)
+    )
+    # Correlated MAX keeps the singleton's index-tip access to long histories;
+    # grouping every child's rows would scan all doses even for one profile.
+    marks = union_all(
+        select(scope.c.seq.label("seq")).correlate(scope),
+        select(func.max(Medication.server_seq))
+        .where(Medication.profile_id == scope.c.profile_id)
+        .correlate(scope),
+        select(func.max(DoseEvent.server_seq))
+        .where(DoseEvent.profile_id == scope.c.profile_id)
+        .correlate(scope),
+        select(func.max(Schedule.server_seq))
+        .where(Schedule.medication_id.in_(medications))
+        .correlate(scope),
+        select(func.max(StockEvent.server_seq))
+        .where(StockEvent.medication_id.in_(medications))
+        .correlate(scope),
+    ).subquery("readiness_marks")
+    watermark = (
+        select(func.max(marks.c.seq).label("seq"))
+        .correlate(scope)
+        .lateral("readiness_high_water")
+    )
+    rows = await session.execute(
+        select(scope.c.profile_id, watermark.c.seq)
+        .select_from(scope.join(watermark, true()))
+    )
+    highest = {profile.id: profile.server_seq for profile in profiles}
+    for profile_id, seq in rows:
+        highest[profile_id] = max(int(seq or 0), highest[profile_id])
+    return highest
 
 
 async def resolve_nudge(

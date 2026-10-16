@@ -44,7 +44,7 @@ from sqlalchemy.orm import aliased
 from app.api.deps import Caller, get_session, lock_caller, recheck_caller, sync_caller
 from app.db.publication import NEXT_SERVER_SEQ, lock_publication
 from app.db.errors import sqlstate as _sqlstate
-from app.services.alerts import profile_high_water
+from app.services.alerts import profiles_high_water
 from app.api.schemas import Changes, Outcome, PullOut, PushIn, PushOut, RecordOut
 from app.db.models import (
     IMMUTABLE_PARENT_SQLSTATE,
@@ -918,6 +918,12 @@ async def _authority(
     }
 
     now = utcnow()
+    eligible = [
+        profile for profile in rows
+        if (ready := ready_rows.get((profile.owner_device_id, profile.id)))
+        and ready.revision >= profile.server_seq
+    ]
+    high_water = await profiles_high_water(session, eligible)
     block: dict[str, dict[str, Any]] = {}
     for profile in rows:
         ready = ready_rows.get((profile.owner_device_id, profile.id))
@@ -927,7 +933,7 @@ async def _authority(
         covered = bool(
             ready
             and ready.revision >= profile.server_seq
-            and ready.applied_cursor >= await profile_high_water(session, profile)
+            and ready.applied_cursor >= high_water[profile.id]
         )
         until = (
             ready.updated_at + lease

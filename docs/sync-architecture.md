@@ -111,6 +111,25 @@ Python потом выбрасывал всё после первых 500. Оп�
 отдаём. Новый курсор — **наибольший `server_seq` в отданной странице**, отсюда
 требование к §4.
 
+`_authority` в pull/preview группирует high-water одним SQL только для профилей,
+у которых DeviceReadiness совпадает с текущим owner и покрывает revision профиля.
+CTE связывает IDs один раз; LATERAL вычисляет коррелированные scalar MAX для
+Profile, Medication, DoseEvent и Schedule/StockEvent через все Medication,
+включая удалённых родителей и детей. Общей группировки всей истории нет.
+Пустой набор кандидатов не вызывает high-water SQL. Карта живёт в одном вызове
+под прежним publication fence; между ожиданиями/запросами она не кэшируется.
+Singleton `profile_high_water` для ready/nudge не изменён. Свежие auth/handler
+проверки, projection, cursor/Device ack, `as_of`, `ready_until` и lease прежние.
+
+Локальный шаг S5b разрешён владельцем 16.10 без deploy: на исходном коде прошла
+21 проверка поведения, cost-проба ожидаемо упала. Первый GROUP BY прошёл 526 tests,
+но performance-review выявил полное чтение длинной DoseEvent истории. LATERAL
+восстановил индексный MAX: EXPLAIN regression проверяет 1 row вместо 10000 без
+порога времени. Все 23 узких tests, независимые HTTP/history сравнения, повтор
+пяти отрицательных controls и финальный full 527/527 прошли. Независимое review
+кода/tests/tool/замеров/docs завершено без замечаний; S5b закрыт локально.
+Это синтетический host PostgreSQL, не гарантия production latency/device gate; у N=1 остаётся небольшая постоянная SQL надбавка.
+
 ---
 
 ## 4. Запись: last-write-wins по записи целиком
