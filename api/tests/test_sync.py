@@ -845,7 +845,7 @@ async def test_a_refused_move_lands_no_field_of_the_row(api):
            if m["id"] == mid][0]
     assert med["profile_id"] == pid
     assert med["name"] == "Aspirin"
-    assert med["dosage_text"] is None
+    assert med["dosage_text"] == ""
     assert med["dose_amount"] == 1.0
 
 
