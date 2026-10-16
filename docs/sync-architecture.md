@@ -421,6 +421,31 @@ receiver'а** — `Start proc … for broadcast FlutterFirebaseMessagingReceiver
 алерт в день на двоих**. Чем за большим числом людей ухаживаешь, тем больше ключ
 скрывал.
 
+### Уже известные fences не требуют повторного claim (локальный S5c, 16.10)
+
+После detection `without_delivery_fences` пропускает существующие ключи
+`(account_id, profile_id, kind, subject_id)` независимо от state. Empty found не
+делает SQL. Непустой caregiver found сначала берёт один publication lock с прежним
+transaction-local `lock_timeout=5000`, затем читает keys порциями 500. Существует
+только chunk-local set; missing сохраняют исходный порядок и дубликаты. Это не
+admission cap и не cache между scans. Новые keys проходят дословно прежний `claim`:
+его собственный lock, fresh consent после await и unique ON CONFLICT сохранены.
+Expire/первый commit, oldest due 200, take/dispatch guards, исходные TTL и commits
+после каждой delivery не менялись. Pending retry сохраняет долг; terminal fences
+не возрождаются.
+
+Runtime не удаляет AlertDelivery отдельно; retention очищает revoked memberships,
+а parent/account CASCADE одновременно убирает eligibility. Отдельная будущая очистка
+fences при живом eligible parent потребует пересмотра этого предположения.
+[Новые actual PostgreSQL tests](../api/tests/test_worker_fence_prefilter.py):
+baseline behavioral 10/10, cost red 1503→3 SQL для 501 existing fence; после fix
+11/11 и related 128/128 прошли. Один новый key требует 5 preparation SQL вместо 3,
+поэтому выигрыш его latency не обещан. Code review и after comparison пройдены:
+целевых SQL меньше, delivery/durable parity сохранена; контрольные timings дрейфуют.
+Финальный full 538/538 прошёл, exit 0; runtime/tests/измерения независимо одобрены,
+S5c закрыт локально. Это host/fake sender evidence, не live FCM/device.
+Прежний acceptance→SQL commit gap допускает повтор; exactly-once не заявляется.
+
 ### Что означает `sent`
 
 **Воркер отдал сообщение FCM.** Не «телефон получил». На второй вопрос с этой

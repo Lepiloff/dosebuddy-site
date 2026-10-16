@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import structlog
-from sqlalchemy import Select, func, select, text, true, union_all
+from sqlalchemy import Select, func, select, text, true, tuple_, union_all
 from sqlalchemy import update as sa_update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -327,6 +327,32 @@ NO_TOKEN_WAIT = timedelta(minutes=5)
 def defer(delivery: AlertDelivery, now: datetime, wait: timedelta) -> None:
     """Put a delivery aside without counting an attempt against it."""
     delivery.next_attempt_at = now + wait
+
+
+async def without_delivery_fences(session: AsyncSession, found: Sequence[Alert]) -> list[Alert]:
+    """Keep new caregiver candidates in detection order, including duplicates.
+
+    Every durable state retains the unique fence. New keys still pass through
+    claim's fresh consent check and ON CONFLICT; this read is only a prefilter.
+    """
+    if not found:
+        return []
+
+    # The first claim used to establish this fence and its transaction-local
+    # lock timeout before expire, even when every insert hit an existing key.
+    await lock_publication(session)
+    missing: list[Alert] = []
+    columns = (AlertDelivery.account_id, AlertDelivery.profile_id,
+               AlertDelivery.kind, AlertDelivery.subject_id)
+    for start in range(0, len(found), 500):
+        chunk = found[start:start + 500]
+        keys = [(alert.account_id, alert.profile_id, alert.kind, alert.subject_id)
+                for alert in chunk]
+        existing = {tuple(row) for row in (await session.execute(
+            select(*columns).where(tuple_(*columns).in_(keys))
+        )).all()}
+        missing.extend(alert for alert, key in zip(chunk, keys) if key not in existing)
+    return missing
 
 
 async def claim(session: AsyncSession, alert: Alert, now: datetime) -> bool:

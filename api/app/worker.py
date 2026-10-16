@@ -63,7 +63,7 @@ async def scan_once(
 
         found = await alerts.find_missed_dose_alerts(session, now)
         found += await alerts.find_stale_profile_alerts(session, now)
-        for alert in found:
+        for alert in await alerts.without_delivery_fences(session, found):
             await alerts.claim(session, alert, now)
 
         # Before delivering, not after: an alert that stopped being useful while
