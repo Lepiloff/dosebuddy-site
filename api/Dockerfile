@@ -22,6 +22,7 @@ RUN if [ -f requirements.lock.txt ]; then \
 COPY alembic.ini ./
 COPY alembic ./alembic
 COPY app ./app
+COPY tools/__init__.py tools/caregiver_recovery.py ./tools/
 
 # Not root. This process will hold article 9 health data, and there is no
 # reason for a remote code path to start out owning the filesystem too.
@@ -38,4 +39,4 @@ EXPOSE 8000
 # app; settings are read when the app is built, not when the module is imported.
 CMD ["uvicorn", "app.main:create_app", "--factory", \
      "--host", "0.0.0.0", "--port", "8000", \
-     "--proxy-headers", "--forwarded-allow-ips", "*"]
+     "--proxy-headers", "--forwarded-allow-ips", "*", "--no-access-log"]

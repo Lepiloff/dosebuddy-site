@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     # fallback secret is worse than no secret, because it looks configured.
     jwt_secret: str
 
+    # Dedicated shared random 32-byte base64url keys. Optional while the
+    # recovery reader is disabled; validated only by reader/explicit enable.
+    caregiver_cursor_signing_key: str = Field(default="", repr=False)
+    caregiver_cursor_verifier_keys: list[str] = Field(default_factory=list, repr=False)
+
     # 32 bytes, base64. Read straight from the environment by
     # app.core.crypto — a SQLAlchemy type decorator is built at import time and
     # cannot reach settings. It is declared here anyway so a missing key fails

@@ -49,8 +49,7 @@ class RequestLog(BaseHTTPMiddleware):
         log.info(
             "http",
             method=request.method,
-            # The path, not the query string: a cursor is harmless but the query
-            # string is the easiest place for something unintended to end up.
+            # The path, never the query: opaque cursors are private metadata.
             path=request.url.path,
             status=response.status_code,
             ms=elapsed_ms,

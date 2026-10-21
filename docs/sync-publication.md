@@ -336,7 +336,7 @@ auth/account, publication, authority, schema, retention, migration) —
 Локальная additive0024 от0023 добавляет `caregiver_recovery_control`,
 `caregiver_recovery_events` и отдельную BIGINT sequence `caregiver_event_seq`
 (`INCREMENT1 CACHE1 NO CYCLE`). Это только source/retirement/retention;
-GET reader/cursor ещё не реализован, production migration/enable не выполнялись.
+B2 reader/cursor описан ниже; production migration/enable не выполнялись.
 
 BEFORE INSERT STATEMENT на `alert_deliveries` берёт publication до parent rows;
 AFTER INSERT создаёт child только для нового caregiver parent и включённой
@@ -383,8 +383,8 @@ idempotent, reader остаётся false. Scan мог вычислить `now<T
 Close под publication выключает обе стороны и фиксирует closed_at. Re-enable
 создаёт новый E/T; gap/legacy intents не выдаются за covered events. Перед
 rollback на старые producers закрыть coverage; схему/durable fences сохранить.
-Reader enable и HTTP410 epoch handling относятся к B2, mixed-old-worker rollout
-без закрытия coverage не поддержан. Этот runbook не утверждает live состояние.
+Reader enable и HTTP410 epoch handling реализованы B2 ниже; mixed-old-worker
+rollout без закрытия coverage не поддержан. Этот runbook не утверждает live состояние.
 
 Worker daily sweep отдельно коммитит membership cleanup и до10 коротких
 transactions по1000 children, eligible при `expires_at <= now−24h`. Полные10
@@ -398,6 +398,69 @@ Host evidence21.10: реальные PostgreSQL source/migration/retirement/rete
 тесты и отдельный immediate-stop/restart probe durable frontier; воспроизводимые
 команды/логи — app task `caregiver-recovery-implementation-20261021.md`.
 Это не HTTP reader, live FCM, device или deployment acceptance.
+
+<a id="caregiver-recovery-reader-b2"></a>
+## Read API, cursor keys и reader cutover (R1 B2, локально21.10)
+
+`main.create_app` подключает `caregiver_events` под `/v1`. `sync_caller` сначала
+проверяет bearer/last-seen и коммитит; handler отдельно берёт publication и
+`recheck_caller`, затем читает control/UTC as_of/fresh eligibility. H только
+committed_frontier. Integer-ms expiry filter исключает субмиллисекундный остаток,
+который иначе дал бы expires_at_ms==as_of_ms и invalid page. Query limit+1/seq
+использует current epoch/nonretired и исходный deadline, не transport state.
+Response строится до read-only rollback, network вне lock; server cursor/ack,
+Device.cursor_seq/readiness и expiry не изменяются.
+
+Codec `ce1` — HMAC-SHA256 с domain `sonadose/caregiver-events/cursor\0`, account/E,
+p/H/mode/issued/expiry. Continuation не обновляет24h срок, checkpoint фиксирует
+новый snapshot; empty gaps доходят до H. Valid expired/old-E/unsupported-version
+даёт410, invalid/foreign400; auth error предшествует cursor facts. No implicit
+reset/backfill. Точный wire/errors — [контракт](v1.1-api-contract.md#caregiver-events-read-api).
+
+Configuration из `deploy/env.example`/compose API: optional
+`CAREGIVER_CURSOR_SIGNING_KEY` (random32 bytes base64url без padding),
+`CAREGIVER_CURSOR_VERIFIER_KEYS` (JSON list прежних таких keys). Не JWT/pairing/
+encryption key, не process-random default. Одинаковые stable values нужны всем
+API replicas и operator. Legacy-disabled deployment стартует без них; missing/
+bad keys при GET дают503/Retry-After60, reader-enable отказывается. При rotation
+новый signer выкатывается со старыми verifier keys: сохранить каждый минимум24h
+**после остановки последнего issuer старого ключа**, включая rollback replicas.
+Это явный operator gate, не автоматическое обнаружение других hosts. Удаление
+ключа раньше срока превращает ещё живые tokens в400; rollback должен сохранять
+все ещё нужные verifiers. Key values не печатать в logs/runbook artifacts.
+
+После проверенных schema/all-new producers/retirement и E/T, одинаковых keys и
+proxy privacy на **каждом** API host, operator из reviewed image:
+
+```bash
+python -m tools.caregiver_recovery reader-enable --all-writers-upgraded
+python -m tools.caregiver_recovery reader-disable
+```
+
+Enable требует flag, schema guards, configured keys и active producer coverage;
+не создаёт E/T и не включает producer. Reader-only disable сохраняет E/T/H;
+последующее enable/restart с теми же keys не инвалидирует cursor. Перед producer/
+retirement rollback — `close`, gap, затем полный all-new enable с E2/T2 и новый
+reader-enable. Никаких автоматических production SQL/deploy или implicit enable.
+Dockerfile включает operator module; image build в этой задаче не выполнялся.
+
+`CaregiverPrivacy` — ASGI граница точного endpoint: headers для всех responses,
+slash404 без redirect, unexpected exception→sanitised500 без exception text/SQL
+в uvicorn error logs. RequestLog сохраняет только path/status/time; Docker и
+sandbox Uvicorn CMD явно `--no-access-log`, чей default logger включает query.
+Nginx узкий location сохраняет default bucket; shared privacy include повторяет
+HSTS/nosniff/noindex и Cache/Pragma/Vary `always`, скрывает upstream validators/
+cache headers, отключает access **и error_log** (иначе limit/upstream error
+включает request URI). Dedicated named429 несёт ту же policy и Retry-After5;
+502/прочие failures наследуют policy. Plaintext endpoint private404 без redirect. Для proxy
+cache off отключает upstream not-modified filtering (inference по
+[nginx1.27 primary source](https://github.com/nginx/nginx/blob/release-1.27.0/src/http/ngx_http_upstream.c#L2755));
+API conditional requests отдельно проверены как200, не304.
+
+Host HTTP/PostgreSQL и native nginx/Uvicorn tests проверяют эти границы. Host
+Python3.10/Uvicorn0.52.2/nginx1.18 отличаются от image Python3.12/locked
+Uvicorn0.52.1/nginx1.27; это не production-identical image/deploy proof.
+App A1/A2 и live/device gates остаются отдельными, B2 не завершает весь R1.
 
 <a id="first-rollout-requires-a-maintenance-window"></a>
 ## Первый rollout требует окна обслуживания

@@ -718,6 +718,12 @@ offline, force-stop и потеря до receipt остаются. Их recovery
 отдельного решения владельца о продукте/контракте; inbox/API/dependencies
 в AUD-009 не добавлены.
 
+R1 отдельно утверждён владельцем21.10: локальные0024 durable source и B2
+read API реализованы, defaults disabled; app catch-up A1/A2 и live rollout ещё
+впереди. [As-built/runbook](sync-publication.md#caregiver-recovery-reader-b2).
+Это последующее решение для recovery, прежний AUD-009 transport fix не переоткрыт;
+server receipt/ack не вводится. Историческое описание до этого решения — выше.
+
 Host evidence — `tests/test_fcm_collapse.py`: worker→настоящий `FcmPush`→
 httpx JSON,5/10 разных событий на одном token, оба kinds и два профиля,
 503→200 с прежним event identity/исходным expiry, смешанный authority поток.

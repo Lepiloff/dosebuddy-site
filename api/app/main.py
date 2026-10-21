@@ -16,7 +16,8 @@ import redis.asyncio as aioredis
 import structlog
 from fastapi import APIRouter, FastAPI
 
-from app.api import auth, errors, health, pairing, sync
+from app.api import auth, caregiver_events, errors, health, pairing, sync
+from app.core.caregiver_privacy import CaregiverPrivacy
 from app.core.config import Settings, get_settings
 from app.core.logging import setup_logging
 from app.core.observability import RequestLog
@@ -66,6 +67,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = settings
     app.add_middleware(RequestLog)
+    app.add_middleware(CaregiverPrivacy, path=settings.api_prefix + "/caregiver-events")
     # No push sender here, deliberately. This process has no FCM credentials —
     # `deploy/docker-compose.yml` gives them to the worker alone, so the key
     # stays out of the process answering requests from the internet — and for
@@ -84,6 +86,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     v1.include_router(auth.router)
     v1.include_router(pairing.router)
     v1.include_router(sync.router)
+    v1.include_router(caregiver_events.router)
     app.include_router(v1)
 
     # Verifying a Google ID token is behind an interface so tests can drive the

@@ -40,3 +40,16 @@ async def close_coverage(session: AsyncSession, now: datetime | None = None) -> 
     control.producer_enabled = False
     await session.flush()
     return control
+
+
+async def set_reader(session: AsyncSession, *, enabled: bool, writers_verified: bool = False) -> CaregiverRecoveryControl:
+    if enabled and not writers_verified:
+        raise ValueError("Verify the complete reader rollout before enabling")
+    await lock_publication(session)
+    control = (await session.execute(select(CaregiverRecoveryControl)
+                                    .execution_options(populate_existing=True))).scalar_one()
+    if enabled and not control.producer_enabled:
+        raise ValueError("Coverage must be enabled before the reader")
+    control.reader_enabled = enabled
+    await session.flush()
+    return control

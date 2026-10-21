@@ -53,6 +53,8 @@ services:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       REDIS_URL: redis://redis:6379/0
       JWT_SECRET: ${JWT_SECRET}
+      CAREGIVER_CURSOR_SIGNING_KEY: ${CAREGIVER_CURSOR_SIGNING_KEY:-}
+      CAREGIVER_CURSOR_VERIFIER_KEYS: '${CAREGIVER_CURSOR_VERIFIER_KEYS:-[]}'
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
       # On here, unlike production: the whole point of a sandbox is being able
@@ -68,7 +70,7 @@ services:
       redis: {condition: service_healthy}
     command: >-
       sh -c "alembic upgrade head &&
-             exec uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000"
+             exec uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000 --no-access-log"
     # The worker waits on this, not merely on the container existing. The API
     # migrates before it serves, so "answering" is the only reliable signal that
     # the schema is there — and a worker that starts first spends its first

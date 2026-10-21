@@ -104,8 +104,17 @@ async def test_operator_enable_is_explicit_schema_checked_and_close_reenable_cha
     first = await run("enable", "--all-writers-upgraded")
     assert first["producer_enabled"] and not first["reader_enabled"]
     assert await run("enable", "--all-writers-upgraded") == first
+    await run("reader-enable", "--all-writers-upgraded", succeeds=False)  # no key
+    assert not (await run("status"))["reader_enabled"]
+    env["CAREGIVER_CURSOR_SIGNING_KEY"] = "cnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnI"
+    await run("reader-enable", succeeds=False)
+    reading = await run("reader-enable", "--all-writers-upgraded")
+    assert reading["reader_enabled"] and reading["epoch"] == first["epoch"]
+    paused = await run("reader-disable")
+    assert not paused["reader_enabled"] and paused["epoch"] == first["epoch"]
     closed = await run("close")
     assert not closed["producer_enabled"] and closed["closed_at"] is not None
+    await run("reader-enable", "--all-writers-upgraded", succeeds=False)
     second = await run("enable", "--all-writers-upgraded")
     assert second["epoch"] != first["epoch"] and not second["reader_enabled"]
 

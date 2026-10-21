@@ -582,8 +582,8 @@ Authority nudge по-прежнему заменяем и сохраняет к�
 доставки FCM: Android имеет отдельный лимит100 pending non-collapsible
 messages, удаляет сохранённые при его достижении, а порядок не гарантирован.
 `sent` остаётся transport acceptance.0024 локально добавляет disabled durable
-projection для будущего read API (см. ниже); reader и receipt/ack клиента на
-сервер пока отсутствуют, как и восстановление через deleted-messages сигнал;
+projection и read API (см. ниже); server receipt/ack не вводится. App catch-up
+и восстановление через deleted-messages сигнал ещё не реализованы;
 `showPending` знает только локально полученное. Остаточный долг, включая
 offline/deletion и общий token для разных профилей, —
 [debts](debts.md#caregiver-delivery-recovery); текущая форма transport —
@@ -632,7 +632,7 @@ parent UUID, отдельный возрастающий seq, epoch, исход�
 по-прежнему проходит без publication после delivery lock.
 
 Singleton `caregiver_recovery_control` безопасно disabled после установки.
-Явные enable/close/re-enable под publication управляют E/T; reader пока false,
+Явные enable/close/re-enable под publication управляют E/T; reader default false,
 coverage до подтверждённого полного cutover не заявлена. Durable
 `committed_frontier` обновляется атомарно с parent/child: rollback не публикует
 sequence allocation, purge не уменьшает H. Raw last_value нельзя использовать
@@ -650,7 +650,25 @@ physical purge без downtime/backlog — expiry+24..48h, не точный dea
 [publication0024](sync-publication.md#caregiver-recovery-source-0024).
 Настоящие PostgreSQL migration/rollback/restart/consent/retention тесты и
 controlled crash probe проверяют host source; GET/cursor/app/live/deploy gates
-к ним не относятся. B2 reader и app этапы следуют после независимого B1 review.
+к B1 evidence не относятся. B2 reader описан ниже; app этапы ещё не выполнены.
+
+### Recovery read API (R1 B2, локально21.10)
+
+`GET /v1/caregiver-events` имеет отдельный account-bound24h HMAC cursor,
+page default/max50. Повторная auth/generation проверка и fresh eligibility под
+publication; snapshot H — committed watermark, continuation сохраняет H/expiry,
+checkpoint продвигается в H и начинает новый snapshot при следующем запросе.
+Empty/expired/retired gaps дают200 с metadata/checkpoint, не204. Exact wire
+expiry проверяется в integer ms. Нет destructive ack/renewal/server device cursor.
+Source E/T и reader включаются раздельно explicit operator tool, default disabled;
+optional keys не обязательны legacy startup. Общие stable keys и old verifiers
+>=24h, cutover/rollback, ASGI/Uvicorn/nginx logging/cache guards —
+[publication B2](sync-publication.md#caregiver-recovery-reader-b2),
+[wire](v1.1-api-contract.md#caregiver-events-read-api).
+
+API read не вызывает FCM send, ownership или alarms. Client durable receipt/CAS,
+launch/background wiring и P0 gates ещё требуют A1/A2; ordinary pull/2027 прежние.
+Host tests не являются deployment/live FCM/device acceptance.
 
 ---
 
@@ -660,7 +678,7 @@ controlled crash probe проверяют host source; GET/cursor/app/live/deplo
 |---|---|---|
 | access | 15 мин | всё |
 | refresh | 90 дней | ротируется при использовании |
-| sync | 90 дней | push/pull, preview, records и ready; без claim/pairing/delete |
+| sync | 90 дней | push/pull, preview, records, ready и caregiver-events read; без claim/pairing/delete |
 | код пары | 10 мин | одноразовый |
 
 Sync-токен существует потому, что фоновая половина приложения не может
