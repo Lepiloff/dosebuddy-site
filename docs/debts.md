@@ -718,9 +718,15 @@ offline, force-stop и потеря до receipt остаются. Их recovery
 отдельного решения владельца о продукте/контракте; inbox/API/dependencies
 в AUD-009 не добавлены.
 
-R1 отдельно утверждён владельцем21.10: локальные0024 durable source и B2
-read API реализованы, defaults disabled; app catch-up A1/A2 и live rollout ещё
-впереди. [As-built/runbook](sync-publication.md#caregiver-recovery-reader-b2).
+R1 отдельно утверждён владельцем21.10: **HOST_IMPLEMENTATION_COMPLETE**.
+Backend88c06e4/schema0024 durable source/read API и appaa6b06b/CE24 durable
+catch-up с actual launch/resume/daily/periodic callers реализованы и reviewed,
+findings0. Backend637/637, app1585/1585 PASS0skip; scoped host HTTP→Dart→SQLite
+использует fake notification scheduler. [App task/checkpoints/остаток](../../dosebuddy/docs/caregiver-recovery-implementation-20261021.md#final-result-20261021),
+[as-built/runbook](sync-publication.md#caregiver-recovery-reader-b2).
+Defaults disabled; live privacy wording, pinned image/TLS/all-new fleet/keys/E/T/
+reader cutover, device/native FCM recovery и capacity/retention backlog остаются
+operator gates, не production acceptance. Final docs review APPROVED, findings0.
 Это последующее решение для recovery, прежний AUD-009 transport fix не переоткрыт;
 server receipt/ack не вводится. Историческое описание до этого решения — выше.
 

@@ -419,15 +419,28 @@ reset/backfill. Точный wire/errors — [контракт](v1.1-api-contrac
 
 Configuration из `deploy/env.example`/compose API: optional
 `CAREGIVER_CURSOR_SIGNING_KEY` (random32 bytes base64url без padding),
-`CAREGIVER_CURSOR_VERIFIER_KEYS` (JSON list прежних таких keys). Не JWT/pairing/
+`CAREGIVER_CURSOR_VERIFIER_KEYS` (JSON list дополнительных verifier keys,
+включая staged и previous keys). Не JWT/pairing/
 encryption key, не process-random default. Одинаковые stable values нужны всем
 API replicas и operator. Legacy-disabled deployment стартует без них; missing/
-bad keys при GET дают503/Retry-After60, reader-enable отказывается. При rotation
-новый signer выкатывается со старыми verifier keys: сохранить каждый минимум24h
-**после остановки последнего issuer старого ключа**, включая rollback replicas.
-Это явный operator gate, не автоматическое обнаружение других hosts. Удаление
-ключа раньше срока превращает ещё живые tokens в400; rollback должен сохранять
-все ещё нужные verifiers. Key values не печатать в logs/runbook artifacts.
+bad keys при GET дают503/Retry-After60, reader-enable отказывается.
+
+Безопасная rotation mixed fleet — отдельный operator gate:
+
+1. До первого нового signer preload verifier нового ключа на **всех readers**,
+   пока signer у них ещё старый; сохранить проверку всех ещё нужных old keys.
+   Подтвердить каждый host/replica и rollback configuration. Иначе старый reader
+   ответит400 на живой cursor, выданный уже новым signer.
+2. Только после полного preload переключать signer на новый ключ, сохраняя
+   возможность проверить оба ключа на каждой replica, включая rollback.
+3. Сохранять старый verifier минимум24h **после остановки последнего issuer
+   старого ключа**, включая rollback replicas; если old issuer возобновился,
+   отсчёт начинается после его последней остановки. Раннее удаление ключа
+   превращает ещё живые tokens в400.
+
+Codec поддерживает verifier list, но других hosts автоматически не обнаруживает.
+Multi-host rotation/rollback здесь не выполнялись и не объявлены PASS. Key values
+не печатать в logs/runbook artifacts.
 
 После проверенных schema/all-new producers/retirement и E/T, одинаковых keys и
 proxy privacy на **каждом** API host, operator из reviewed image:
@@ -460,7 +473,11 @@ API conditional requests отдельно проверены как200, не304.
 Host HTTP/PostgreSQL и native nginx/Uvicorn tests проверяют эти границы. Host
 Python3.10/Uvicorn0.52.2/nginx1.18 отличаются от image Python3.12/locked
 Uvicorn0.52.1/nginx1.27; это не production-identical image/deploy proof.
-App A1/A2 и live/device gates остаются отдельными, B2 не завершает весь R1.
+Последующие app A1/A2 завершены локально: reviewed appaa6b06b/CE24, actual callers,
+full Flutter1585/1585; [app task](../../dosebuddy/docs/caregiver-recovery-implementation-20261021.md#final-result-20261021).
+Backend code checkpoint88c06e4/full637/637 сохранён без повторного CI. Это
+HOST_IMPLEMENTATION_COMPLETE, не live/device/deploy acceptance; operator gates
+выше требуют отдельного разрешения и проверки среды. Final docs review APPROVED, findings0.
 
 <a id="first-rollout-requires-a-maintenance-window"></a>
 ## Первый rollout требует окна обслуживания

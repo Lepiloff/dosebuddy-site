@@ -650,7 +650,8 @@ physical purge без downtime/backlog — expiry+24..48h, не точный dea
 [publication0024](sync-publication.md#caregiver-recovery-source-0024).
 Настоящие PostgreSQL migration/rollback/restart/consent/retention тесты и
 controlled crash probe проверяют host source; GET/cursor/app/live/deploy gates
-к B1 evidence не относятся. B2 reader описан ниже; app этапы ещё не выполнены.
+к B1 evidence не относятся. Последующие B2/A1/A2 завершены отдельно, ниже —
+актуальный local host статус; исходный B1 evidence их не доказывает.
 
 ### Recovery read API (R1 B2, локально21.10)
 
@@ -667,8 +668,13 @@ optional keys не обязательны legacy startup. Общие stable keys
 [wire](v1.1-api-contract.md#caregiver-events-read-api).
 
 API read не вызывает FCM send, ownership или alarms. Client durable receipt/CAS,
-launch/background wiring и P0 gates ещё требуют A1/A2; ordinary pull/2027 прежние.
-Host tests не являются deployment/live FCM/device acceptance.
+launch/resume/daily/periodic wiring и P0 isolation реализованы в reviewed
+appaa6b06b/CE24; backend88c06e4/schema0024. **HOST_IMPLEMENTATION_COMPLETE**:
+backend637/637 и app1585/1585 PASS0skip, [checkpoints/evidence](../../dosebuddy/docs/caregiver-recovery-implementation-20261021.md#final-result-20261021).
+Ordinary pull/2027 прежние. Host checks с fake notification scheduler не являются
+deployment/live FCM/device acceptance; privacy/image/fleet/keys/E/T/reader gates,
+физическое recovery и capacity/retention backlog ещё открыты. Final docs review
+APPROVED, findings0; никакого автоматического enable/deploy.
 
 ---
 
