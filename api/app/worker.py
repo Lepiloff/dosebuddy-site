@@ -183,25 +183,32 @@ async def scan_once(
 
 async def sweep_if_due(
     sessionmaker, last: datetime | None, now: datetime
-) -> datetime:
+) -> datetime | None:
     """Run the retention sweep at most once a day.
 
     It lives on the alert loop because that is the only process we already run
     on a schedule; giving retention its own cron would mean a second thing to
     deploy and a second thing to notice has stopped.
 
-    `last` is held in memory only, so a restart sweeps immediately. That is
-    deliberate: the pass is a single indexed DELETE over rows whose age is
-    measured in years, and running it once more than needed costs nothing —
-    while persisting a timestamp to avoid that would add state we would then
-    have to keep correct.
+    `last` is held in memory only, so a restart sweeps immediately. Membership
+    history and bounded recovery batches commit separately. A full recovery
+    batch leaves the old due stamp until a later iteration drains the remainder;
+    exceptions likewise never acknowledge a completed daily pass.
     """
     if last is not None and now - last < retention.SWEEP_INTERVAL:
         return last
     async with sessionmaker() as session:
         await retention.sweep(session, now)
         await session.commit()
-    return now
+    # Separate short transactions bound cleanup locks and keep the original
+    # due stamp until every eligible projection batch has been drained.
+    for _ in range(retention.RECOVERY_MAX_BATCHES):
+        async with sessionmaker() as session:
+            removed = await retention.purge_recovery_batch(session, now)
+            await session.commit()
+        if removed < retention.RECOVERY_BATCH_SIZE:
+            return now
+    return last
 
 
 async def main() -> None:

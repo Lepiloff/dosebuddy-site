@@ -134,14 +134,15 @@ async def test_the_sweep_runs_on_start_and_then_once_a_day():
     start = utcnow()
 
     last = await sweep_if_due(sessionmaker, None, start)
-    assert sessionmaker.opened == 1
+    # Membership sweep and an empty recovery batch commit independently.
+    assert sessionmaker.opened == 2
     assert last == start
 
     last = await sweep_if_due(sessionmaker, last, start + timedelta(hours=23))
-    assert sessionmaker.opened == 1
+    assert sessionmaker.opened == 2
     assert last == start
 
     later = start + retention.SWEEP_INTERVAL
     last = await sweep_if_due(sessionmaker, last, later)
-    assert sessionmaker.opened == 2
+    assert sessionmaker.opened == 4
     assert last == later

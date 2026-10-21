@@ -2,8 +2,9 @@
 
 The database's BEFORE STATEMENT fence takes this lock before row locks and
 sequence defaults. Callers taking explicit advisory/row locks first must take
-this fence explicitly. Alert-only delivery transactions never enter the fence;
-no mirror/visibility/auth write may follow their FOR UPDATE across FCM.
+this fence explicitly. Delivery dispatch UPDATE transactions never enter the
+fence; no mirror/visibility/auth write may follow their FOR UPDATE across FCM.
+Delivery INSERT does enter it, before row locks, for the recovery source.
 """
 
 from sqlalchemy import text
@@ -24,8 +25,11 @@ MIRROR_TABLES = ("profiles", "medications", "schedules", "dose_events", "stock_e
 # Include auth and visibility writes: a logout that locked Device before
 # waiting for publication would deadlock a pull holding publication while it
 # records Device.cursor_seq. Refresh/pairing rows also precede mirror writes.
-# AlertDelivery alone is excluded because a send holds its row across FCM and
-# does no publication work afterward (worker.scan_once).
+# AlertDelivery uses a separate INSERT-only fence; dispatch UPDATE holds its
+# row across FCM and does no publication work afterward (worker.scan_once).
+# Recovery control also has its own statement fence. Recovery children are
+# inserted under the parent's fence, retired under lifecycle fences, or deleted
+# by bounded retention; they must not acquire publication after child row locks.
 PUBLICATION_TABLES = (
     "accounts", "devices", "refresh_tokens", "profiles", "device_readiness",
     "profile_memberships", "pairing_codes", "medications", "schedules",

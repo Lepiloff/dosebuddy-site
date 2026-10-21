@@ -21,10 +21,10 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 import structlog
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import ProfileMembership
+from app.db.models import CaregiverRecoveryEvent, ProfileMembership
 
 log = structlog.get_logger(__name__)
 
@@ -37,6 +37,20 @@ REVOKED_MEMBERSHIP_TTL = timedelta(days=730)
 # retention window measured in years is not made more correct by being enforced
 # to the minute.
 SWEEP_INTERVAL = timedelta(days=1)
+RECOVERY_RETENTION = timedelta(hours=24)
+RECOVERY_BATCH_SIZE = 1000
+RECOVERY_MAX_BATCHES = 10
+
+
+async def purge_recovery_batch(session: AsyncSession, now: datetime) -> int:
+    """Delete only expired projection rows; retain the parent unique fences."""
+    candidates = (select(CaregiverRecoveryEvent.delivery_id)
+                  .where(CaregiverRecoveryEvent.expires_at <= now - RECOVERY_RETENTION)
+                  .order_by(CaregiverRecoveryEvent.expires_at, CaregiverRecoveryEvent.delivery_id)
+                  .limit(RECOVERY_BATCH_SIZE))
+    result = await session.execute(delete(CaregiverRecoveryEvent).where(
+        CaregiverRecoveryEvent.delivery_id.in_(candidates)))
+    return result.rowcount or 0
 
 
 async def purge_revoked_memberships(session: AsyncSession, now: datetime) -> int:

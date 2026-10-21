@@ -581,8 +581,9 @@ Authority nudge по-прежнему заменяем и сохраняет к�
 Это устранение конкретного четырёхключевого caregiver-дефекта, не гарантия
 доставки FCM: Android имеет отдельный лимит100 pending non-collapsible
 messages, удаляет сохранённые при его достижении, а порядок не гарантирован.
-`sent` остаётся transport acceptance. Durable caregiver inbox и receipt/ack
-клиента на сервер отсутствуют, как и восстановление через deleted-messages сигнал;
+`sent` остаётся transport acceptance.0024 локально добавляет disabled durable
+projection для будущего read API (см. ниже); reader и receipt/ack клиента на
+сервер пока отсутствуют, как и восстановление через deleted-messages сигнал;
 `showPending` знает только локально полученное. Остаточный долг, включая
 offline/deletion и общий token для разных профилей, —
 [debts](debts.md#caregiver-delivery-recovery); текущая форма transport —
@@ -620,6 +621,36 @@ revoked-set клиента — отдельная граница. Lock order, mi
 [sync publication](sync-publication.md#caregiver-consent-retirement);
 `test_alert_eligibility.py`/`test_alert_eligibility_migration.py` используют
 настоящие HTTP/PostgreSQL/worker, fake sender. Deploy и live FCM не выполнялись.
+
+### Durable recovery source (R1 B1, локальная0024, 21.10)
+
+`caregiver_recovery_events` хранит1:1 projection нового caregiver delivery intent:
+parent UUID, отдельный возрастающий seq, epoch, исходные raised_at/expires_at и
+необратимый retired_at. Queue INSERT имеет statement publication fence, child
+создаётся AFTER INSERT в той же transaction; unique conflict не backfill и не
+продлевает expiry. Authority payload/retries/lease0 не меняются. Dispatch UPDATE
+по-прежнему проходит без publication после delivery lock.
+
+Singleton `caregiver_recovery_control` безопасно disabled после установки.
+Явные enable/close/re-enable под publication управляют E/T; reader пока false,
+coverage до подтверждённого полного cutover не заявлена. Durable
+`committed_frontier` обновляется атомарно с parent/child: rollback не публикует
+sequence allocation, purge не уменьшает H. Raw last_value нельзя использовать
+как recovery cursor frontier, в том числе после crash. Обычный sync pull и
+текущие FCM consumers эту projection пока не читают; R1 целиком не завершён.
+
+Новые lifecycle guards retire child независимо от pending/sent/given_up parent,
+включая revoke/downgrade/delete; same-ID regrant не оживляет его. Hard erasure
+идёт FK cascade. Retention удаляет только projection после eligibility
+expiry+24h: daily до10 batches по1000 с остатком на следующую iteration и
+ошибкой независимо от delivery. Parent unique fences сохраняются. Типичный
+physical purge без downtime/backlog — expiry+24..48h, не точный deadline.
+
+Точная lock/epoch/retention схема и reviewed operator path —
+[publication0024](sync-publication.md#caregiver-recovery-source-0024).
+Настоящие PostgreSQL migration/rollback/restart/consent/retention тесты и
+controlled crash probe проверяют host source; GET/cursor/app/live/deploy gates
+к ним не относятся. B2 reader и app этапы следуют после независимого B1 review.
 
 ---
 

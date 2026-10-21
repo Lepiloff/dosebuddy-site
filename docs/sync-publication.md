@@ -66,9 +66,12 @@ row locks берут **после** publication, если транзакция �
 обычные Device/parent/FK rows → alert rows. Пространства двух типов advisory
 locks не пересекаются. Нельзя брать publication после `FOR UPDATE` alert delivery.
 
-`alert_deliveries` намеренно исключена: worker `take` удерживает row во время
-FCM, затем только читает eligibility/profile/device и сохраняет delivery, не пишет защищённые
-таблицы. FCM не удерживает publication **непосредственно**. Но account/profile
+`alert_deliveries` исключена из общего INSERT/UPDATE/DELETE fence: worker `take`
+удерживает row во время FCM, затем только читает eligibility/profile/device и
+обновляет delivery, не пишет защищённые таблицы. Начиная с0024 отдельный
+**BEFORE INSERT STATEMENT** fence защищает создание любой delivery, включая
+authority и disabled recovery; dispatch UPDATE по-прежнему не берёт publication.
+FCM не удерживает publication **непосредственно**. Но account/profile
 cascade может ждать эту строку; конфликт queue тоже может задержать транзакцию.
 `sync_publication_lock` задаёт transaction-local `lock_timeout = 5000ms` до
 захвата lock, ограничивая каждое ожидание DB lock. Это новый предел отдельного
@@ -326,6 +329,75 @@ auth/account, publication, authority, schema, retention, migration) —
 **209 passed**. Empty upgrade→head/schema_check, точное metadata/migration
 сравнение **38 indexes / 23 triggers / 5 functions**, downgrade→base — PASS.
 Это synthetic host PostgreSQL evidence, без production capacity обещаний.
+
+<a id="caregiver-recovery-source-0024"></a>
+## Durable источник caregiver recovery (R1 B1, 0024)
+
+Локальная additive0024 от0023 добавляет `caregiver_recovery_control`,
+`caregiver_recovery_events` и отдельную BIGINT sequence `caregiver_event_seq`
+(`INCREMENT1 CACHE1 NO CYCLE`). Это только source/retirement/retention;
+GET reader/cursor ещё не реализован, production migration/enable не выполнялись.
+
+BEFORE INSERT STATEMENT на `alert_deliveries` берёт publication до parent rows;
+AFTER INSERT создаёт child только для нового caregiver parent и включённой
+coverage. UUID parent — PK/FK child с hard-erasure cascade. `raised_at` — исходный
+claim input (`next_attempt_at` при INSERT), expiry копируется без продления.
+Existing unique conflict не вызывает AFTER INSERT: legacy parent не backfill,
+purged child не создаётся повторно. Parent, child и `committed_frontier` singleton
+коммитятся вместе. Последний обновляется выданным seq в той же transaction:
+rollback оставляет H прежним, purge его не уменьшает; raw sequence `last_value`
+не является durable опубликованным H. Номера с пробелами допустимы.
+
+Control имеет собственный statement fence. Child INSERT наследует parent fence,
+retirement — lifecycle fence; bounded retention только удаляет children и не
+продвигает cursor/H. У child нет statement publication fence: его нельзя брать
+после row locks. `schema_check` проверяет columns/defaults/checks/indexes/FK,
+sequence, singleton, точные функции и enabled trigger definitions. Immutable
+guard запрещает менять identity/lifetime и снимать уже записанный `retired_at`.
+
+Порядок: publication → lifecycle → delivery/child; FCM dispatch UPDATE берёт
+только delivery row и не запрашивает publication. Отдельные0024 lifecycle guards
+необратимо retire projection при revoke/downgrade/live membership DELETE,
+profile/account soft delete **для всех** parent transport states, включая sent
+и given_up.0023 по-прежнему завершает только pending transport debts. Same-ID
+regrant не снимает retirement; purge старого revoked history не отменяет новую
+live membership. Hard erasure удаляет child каскадом вместе с parent.
+
+Установка безопасно оставляет producer/reader disabled, epoch/T NULL, H0;
+никаких startup enable/backfill. Штатный operator tool после будущего reviewed
+rollout (команды не выполняют deploy):
+
+```bash
+python -m tools.caregiver_recovery status
+python -m tools.caregiver_recovery enable --all-writers-upgraded
+python -m tools.caregiver_recovery close
+```
+
+Перед enable оператор обязан сверить approved image/schema guards, завершение
+старых transactions и обновление **всех** API/worker producers и lifecycle
+guards. Flag — явное подтверждение этой проверки, не автоматическое обнаружение
+смешанного парка. Tool дополнительно запускает schema_check. Enable берёт
+publication, затем выбирает свежие epoch E и server time T; повтор active enable
+idempotent, reader остаётся false. Scan мог вычислить `now<T`, но parent INSERT
+после cutover получает E по serialization; original deadline не меняется.
+Close под publication выключает обе стороны и фиксирует closed_at. Re-enable
+создаёт новый E/T; gap/legacy intents не выдаются за covered events. Перед
+rollback на старые producers закрыть coverage; схему/durable fences сохранить.
+Reader enable и HTTP410 epoch handling относятся к B2, mixed-old-worker rollout
+без закрытия coverage не поддержан. Этот runbook не утверждает live состояние.
+
+Worker daily sweep отдельно коммитит membership cleanup и до10 коротких
+transactions по1000 children, eligible при `expires_at <= now−24h`. Полные10
+batch оставляют прежний due stamp для следующей iteration; ошибка также не
+закрывает daily debt и ловится отдельно от alert delivery. Restart запускает
+due sweep заново. При здоровом daily loop без backlog физическое удаление
+обычно между expiry+24h и+48h; downtime/backlog увеличивают срок. Parent unique
+fences и существующие client dedup fences эта policy не удаляет.
+
+Host evidence21.10: реальные PostgreSQL source/migration/retirement/retention
+тесты и отдельный immediate-stop/restart probe durable frontier; воспроизводимые
+команды/логи — app task `caregiver-recovery-implementation-20261021.md`.
+Это не HTTP reader, live FCM, device или deployment acceptance.
 
 <a id="first-rollout-requires-a-maintenance-window"></a>
 ## Первый rollout требует окна обслуживания

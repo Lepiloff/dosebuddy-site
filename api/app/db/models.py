@@ -25,6 +25,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Sequence,
     String,
     Text,
     event,
@@ -35,6 +36,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.crypto import EncryptedString
 from app.db.session import Base
+from app.db.caregiver_recovery import (
+    RECOVERY_FUNCTIONS, RECOVERY_TRIGGERS, SEED_RECOVERY_CONTROL,
+)
 from app.db.alert_eligibility import (
     RETIRE_CAREGIVER_FUNCTION, RETIRE_CAREGIVER_TRIGGERS, retirement_trigger,
 )
@@ -784,6 +788,48 @@ class AlertDelivery(Base):
     )
 
 
+class CaregiverRecoveryControl(Base):
+    __tablename__ = "caregiver_recovery_control"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_caregiver_recovery_singleton"),
+        CheckConstraint("NOT producer_enabled OR (epoch IS NOT NULL AND coverage_started_at IS NOT NULL)",
+                        name="ck_caregiver_recovery_coverage"),
+        CheckConstraint("NOT reader_enabled OR producer_enabled", name="ck_caregiver_recovery_reader"),
+        CheckConstraint("committed_frontier >= 0", name="ck_caregiver_recovery_frontier"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    producer_enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    reader_enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    committed_frontier: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))
+    epoch: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    coverage_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+CAREGIVER_EVENT_SEQ = Sequence("caregiver_event_seq", metadata=Base.metadata,
+                               increment=1, cache=1, cycle=False)
+
+
+class CaregiverRecoveryEvent(Base):
+    __tablename__ = "caregiver_recovery_events"
+    __table_args__ = (
+        CheckConstraint("event_seq > 0", name="ck_caregiver_recovery_seq"),
+        CheckConstraint("expires_at > raised_at", name="ck_caregiver_recovery_lifetime"),
+        Index("uq_caregiver_recovery_seq", "event_seq", unique=True),
+        Index("ix_caregiver_recovery_epoch_seq", "epoch", "event_seq"),
+        Index("ix_caregiver_recovery_expiry", "expires_at"),
+    )
+
+    delivery_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("alert_deliveries.id", ondelete="CASCADE"), primary_key=True)
+    event_seq: Mapped[int] = mapped_column(BigInteger)
+    epoch: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    raised_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 # ---------------------------------------------------------------------------
 # A row does not change parent
 # ---------------------------------------------------------------------------
@@ -933,3 +979,10 @@ event.listen(Base.metadata, "after_create",
 for trigger in RETIRE_CAREGIVER_TRIGGERS:
     event.listen(Base.metadata, "after_create",
                  DDL(retirement_trigger(*trigger)).execute_if(dialect="postgresql"))
+
+# Frozen in additive migration 0024 as well. No existing delivery UPDATE fence.
+for function in RECOVERY_FUNCTIONS:
+    event.listen(Base.metadata, "after_create", DDL(function).execute_if(dialect="postgresql"))
+for _, _, definition in RECOVERY_TRIGGERS:
+    event.listen(Base.metadata, "after_create", DDL(definition).execute_if(dialect="postgresql"))
+event.listen(Base.metadata, "after_create", DDL(SEED_RECOVERY_CONTROL).execute_if(dialect="postgresql"))

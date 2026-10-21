@@ -51,7 +51,7 @@ import sys
 
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import text
+from sqlalchemy import CheckConstraint, inspect, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -60,7 +60,10 @@ from app.db.models import (
     PARENT_IS_IMMUTABLE_FUNCTION,
     PARENT_IS_IMMUTABLE_TRIGGERS,
     SET_ONCE_TRIGGERS,
+    CaregiverRecoveryControl,
+    CaregiverRecoveryEvent,
 )
+from app.db.caregiver_recovery import RECOVERY_FUNCTIONS, RECOVERY_TRIGGERS
 
 from app.db.publication import (
     MIRROR_TABLES,
@@ -279,6 +282,72 @@ async def _alert_eligibility_problems(conn) -> list[str]:
     return found
 
 
+async def _caregiver_recovery_problems(conn) -> list[str]:
+    found = []
+    for model in (CaregiverRecoveryControl, CaregiverRecoveryEvent):
+        table = model.__table__
+        if (await conn.execute(text("SELECT to_regclass(:name)"), {"name": table.name})).scalar_one() is None:
+            found.append(f"{table.name}: table missing")
+            continue
+
+        def reflect(connection):
+            inspector = inspect(connection)
+            return (inspector.get_columns(table.name), inspector.get_check_constraints(table.name),
+                    inspector.get_indexes(table.name), inspector.get_pk_constraint(table.name),
+                    inspector.get_foreign_keys(table.name))
+
+        columns, checks, indexes, pk, foreign_keys = await conn.run_sync(reflect)
+        actual_columns = {c["name"]: (str(c["type"].compile(dialect=conn.dialect)), c["nullable"], c["default"])
+                          for c in columns}
+        expected_columns = {c.name: (str(c.type.compile(dialect=conn.dialect)), c.nullable,
+                                    str(c.server_default.arg) if c.server_default is not None else None)
+                            for c in table.columns}
+        if actual_columns != expected_columns:
+            found.append(f"{table.name}: columns/defaults changed")
+        actual_checks = {c["name"]: _plainly(c["sqltext"]).lower() for c in checks}
+        for check in table.constraints:
+            if isinstance(check, CheckConstraint) and actual_checks.get(check.name) != _plainly(str(check.sqltext)).lower():
+                found.append(f"{table.name}: CHECK {check.name} missing or changed")
+        actual_indexes = {i["name"]: (i["unique"], i["column_names"]) for i in indexes}
+        for index in table.indexes:
+            if actual_indexes.get(index.name) != (index.unique, [c.name for c in index.columns]):
+                found.append(f"{table.name}: index {index.name} missing or changed")
+        if pk["constrained_columns"] != [c.name for c in table.primary_key]:
+            found.append(f"{table.name}: primary key changed")
+        if model is CaregiverRecoveryEvent and not any(
+            fk["constrained_columns"] == ["delivery_id"]
+            and fk["referred_table"] == "alert_deliveries" and fk["referred_columns"] == ["id"]
+            and fk["options"].get("ondelete") == "CASCADE" for fk in foreign_keys
+        ):
+            found.append("caregiver_recovery_events: parent cascade missing or changed")
+    if any("table missing" in item for item in found):
+        return found
+    if (await conn.execute(text("SELECT increment_by, cache_size, cycle FROM pg_sequences "
+                                "WHERE schemaname='public' AND sequencename='caregiver_event_seq'"))).one_or_none() != (1, 1, False):
+        found.append("caregiver_event_seq must use INCREMENT 1 CACHE 1 NO CYCLE")
+    for definition in RECOVERY_FUNCTIONS:
+        name = definition.split("FUNCTION ", 1)[1].split("()", 1)[0]
+        row = (await conn.execute(text("SELECT pg_get_functiondef(oid), provolatile::text FROM pg_proc "
+                                       "WHERE oid=to_regprocedure(:name)"), {"name": name + "()"})).one_or_none()
+        if row is None or row[1] != "v" or _flat(definition.split("$$")[1]) not in _flat(row[0]):
+            found.append(f"function {name}() is missing or changed")
+    triggers = {(table, name): (definition, enabled) for table, name, definition, enabled in (
+        await conn.execute(text("SELECT c.relname,t.tgname,pg_get_triggerdef(t.oid),t.tgenabled::text "
+                                "FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid "
+                                "WHERE NOT t.tgisinternal AND c.relnamespace='public'::regnamespace"))
+    ).all()}
+    for table, name, definition in RECOVERY_TRIGGERS:
+        row = triggers.get((table, name))
+        def normalize(sql):
+            return _flat(_plainly(sql.replace("public.", ""))).rstrip(";").lower().replace(
+                "insert or update or delete", "insert or delete or update")
+        if row is None or row[1] != "O" or normalize(row[0]) != normalize(definition):
+            found.append(f"{table}: recovery trigger {name} missing or changed")
+    if (await conn.execute(text("SELECT count(*) FROM caregiver_recovery_control WHERE id=1"))).scalar_one() != 1:
+        found.append("caregiver_recovery_control: singleton missing")
+    return found
+
+
 async def problems() -> list[str]:
     engine = create_async_engine(str(get_settings().database_url))
     try:
@@ -290,6 +359,7 @@ async def problems() -> list[str]:
                 + await _publication_problems(conn)
                 + await _credential_problems(conn)
                 + await _alert_eligibility_problems(conn)
+                + await _caregiver_recovery_problems(conn)
             )
     finally:
         await engine.dispose()
@@ -310,7 +380,7 @@ def main() -> int:
         f"and {len(SET_ONCE_TRIGGERS)} set-once triggers in place, "
         f"function bodies and sync publication fences as declared, "
         f"server_seq INCREMENT 1 CACHE 1 NO CYCLE, durable credential generations, "
-        f"caregiver consent retirement, "
+        f"caregiver consent retirement and recovery source/coverage, "
         f"authority lease {lease}"
     )
     return 0

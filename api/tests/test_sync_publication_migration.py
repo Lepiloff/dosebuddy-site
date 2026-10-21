@@ -165,12 +165,29 @@ async def test_upgrade_republishes_skipped_rows_and_retry_is_atomic(migration_db
             }
     async with engine.connect() as connection:
         assert await _publication_problems(connection) == []
-        # Every application table participates, except the delivery queue whose
-        # row is held across FCM. New tables require an explicit lock decision.
+        # Every application table has an explicit lock decision. Queue INSERT
+        # and recovery control have separate fences; dispatch UPDATE cannot
+        # enter publication after its row lock across FCM. Recovery children
+        # inherit the parent INSERT/lifecycle fence; retention only deletes.
+        special_tables = {"alert_deliveries", "caregiver_recovery_control", "caregiver_recovery_events"}
         tables = set((await connection.execute(text(
             "SELECT tablename FROM pg_tables WHERE schemaname='public'"
-        ))).scalars()) - {"alembic_version", "alert_deliveries"}
-        assert tables == set(PUBLICATION_TABLES)
+        ))).scalars()) - {"alembic_version"}
+        assert tables == set(PUBLICATION_TABLES) | special_tables
+        triggers = (await connection.execute(text("""
+            SELECT c.relname, pg_get_triggerdef(t.oid) AS definition
+            FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid
+            WHERE NOT t.tgisinternal AND c.relname IN
+              ('alert_deliveries', 'caregiver_recovery_control', 'caregiver_recovery_events')
+              AND t.tgfoid='sync_publication_fence()'::regprocedure
+        """))).all()
+        fences = {table: definition for table, definition in triggers}
+        assert len(triggers) == 2
+        assert set(fences) == {"alert_deliveries", "caregiver_recovery_control"}
+        assert "BEFORE INSERT ON" in fences["alert_deliveries"]
+        assert "FOR EACH STATEMENT" in fences["alert_deliveries"]
+        assert "BEFORE INSERT OR DELETE OR UPDATE ON" in fences["caregiver_recovery_control"]
+        assert "FOR EACH STATEMENT" in fences["caregiver_recovery_control"]
         assert (await connection.execute(text("SELECT cursor_seq FROM devices WHERE id=:id"),
                                          {"id": dev})).scalar_one() == 2**63 - 1
     # A restarted old client with a legitimate skipped cursor receives every
