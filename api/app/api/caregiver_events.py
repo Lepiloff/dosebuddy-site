@@ -83,7 +83,7 @@ async def read_events(
     try:
         previous = codec.decode(cursor, account, epoch, now_ms) if cursor is not None else None
         if previous is not None and previous.h > control.committed_frontier:
-            raise CursorInvalid()
+            raise FeedReset()
     except CursorInvalid:
         raise HTTPException(400, "caregiver_cursor_invalid") from None
     except CursorExpired:

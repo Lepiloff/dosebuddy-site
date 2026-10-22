@@ -110,6 +110,7 @@ async def test_operator_enable_is_explicit_schema_checked_and_close_reenable_cha
     await run("reader-enable", succeeds=False)
     reading = await run("reader-enable", "--all-writers-upgraded")
     assert reading["reader_enabled"] and reading["epoch"] == first["epoch"]
+    assert await run("enable", "--all-writers-upgraded") == reading
     paused = await run("reader-disable")
     assert not paused["reader_enabled"] and paused["epoch"] == first["epoch"]
     closed = await run("close")

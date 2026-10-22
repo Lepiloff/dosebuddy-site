@@ -8,13 +8,13 @@ from datetime import timedelta
 import jwt
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select, text, update
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.api import caregiver_events as reader
 from app.core.caregiver_cursor import CursorCodec, TTL_MS
 from app.core.security import mint_sync_token, read_access_token
-from app.db.models import AlertDelivery, Device, utcnow
+from app.db.models import AlertDelivery, CaregiverRecoveryControl, CaregiverRecoveryEvent, Device, utcnow
 from app.services.caregiver_recovery import close_coverage, enable_coverage, set_reader
 from tests.conftest import auth_header, sign_in
 from tests.test_alerts import _with_watcher
@@ -162,13 +162,93 @@ async def test_cursor_binding_forgery_impossible_positions_and_rotation(api, ses
     codec = CursorCodec(api.app.state.settings)
     position = codec.decode(token, first["account_id"], first["feed_epoch"], first["as_of"])
     for bad in (replace(position, p=-1), replace(position, h=0), replace(position, p=2, h=1),
-                replace(position, p=True), replace(position, p=999, h=999)):
+                replace(position, p=True), replace(position, p=999, h=999, mode="continue")):
         error(await api.get(PATH, params={"cursor": codec.encode(bad)}, headers=auth_header(caregiver)), 400, "caregiver_cursor_invalid")
     api.app.state.settings = api.app.state.settings.model_copy(update={
         "caregiver_cursor_signing_key": OTHER_KEY, "caregiver_cursor_verifier_keys": [KEY]})
     assert (await page(api, caregiver, token))["events"] == []
     api.app.state.settings = api.app.state.settings.model_copy(update={"caregiver_cursor_verifier_keys": []})
     error(await api.get(PATH, params={"cursor": token}, headers=auth_header(caregiver)), 400, "caregiver_cursor_invalid")
+
+
+async def test_valid_current_epoch_cursor_above_restored_frontier_resets_privately(api, session):
+    _, caregiver, pid = await setup(api, session)
+    await seed(session, caregiver, pid)
+    first = await page(api, caregiver)
+    codec = CursorCodec(api.app.state.settings)
+    position = codec.decode(first["cursor"], first["account_id"], first["feed_epoch"], first["as_of"])
+    # A signed, internally valid checkpoint from a frontier lost by restore.
+    future = codec.encode(replace(position, p=999, h=999))
+    error(await api.get(PATH, params={"cursor": future}, headers=auth_header(caregiver)),
+          410, "caregiver_feed_reset")
+    assert len((await page(api, caregiver))["events"]) == 1
+
+
+async def test_expired_old_key_cursor_becomes_400_only_after_verifier_removal(api, session, monkeypatch):
+    _, caregiver, pid = await setup(api, session)
+    await seed(session, caregiver, pid)
+    first = await page(api, caregiver)
+    token = first["cursor"]
+    api.app.state.settings = api.app.state.settings.model_copy(update={
+        "caregiver_cursor_signing_key": OTHER_KEY, "caregiver_cursor_verifier_keys": [KEY]})
+    assert (await page(api, caregiver, token))["events"] == []
+    expired = reader.EPOCH + timedelta(milliseconds=first["cursor_expires_at"])
+    monkeypatch.setattr(reader, "utcnow", lambda: expired)
+    error(await api.get(PATH, params={"cursor": token}, headers=auth_header(caregiver)),
+          410, "caregiver_cursor_expired")
+    api.app.state.settings = api.app.state.settings.model_copy(update={"caregiver_cursor_verifier_keys": []})
+    error(await api.get(PATH, params={"cursor": token}, headers=auth_header(caregiver)),
+          400, "caregiver_cursor_invalid")
+    assert (await page(api, caregiver))["events"] == []
+
+
+async def test_sequence_reuse_after_synthetic_restore_requires_new_epoch_before_reader_reopens(api, session):
+    _, caregiver, pid = await setup(api, session)
+    await seed(session, caregiver, pid, stop=3)
+    original = await page(api, caregiver)
+    codec = CursorCodec(api.app.state.settings)
+    checkpoint = codec.decode(original["cursor"], original["account_id"], original["feed_epoch"], original["as_of"])
+    assert checkpoint.p == checkpoint.h == 3
+    old_ids = {event["event_id"] for event in original["events"][1:]}
+    old_control = (await session.execute(select(CaregiverRecoveryControl))).scalar_one()
+    old_epoch, old_started = old_control.epoch, old_control.coverage_started_at
+
+    # Synthetic backup state: only seq1 survived, and the allocator was restored
+    # with it. This DB belongs to this test; this is not a production restore.
+    lost_ids = select(CaregiverRecoveryEvent.delivery_id).where(CaregiverRecoveryEvent.event_seq > 1)
+    await session.execute(delete(AlertDelivery).where(AlertDelivery.id.in_(lost_ids)))
+    await session.execute(text("UPDATE caregiver_recovery_control SET committed_frontier=1 WHERE id=1"))
+    await session.execute(text("SELECT setval('caregiver_event_seq', 1, true)"))
+    await session.commit()
+    await seed(session, caregiver, pid, 101, 102)
+    reused = await page(api, caregiver)
+    assert [event["event_seq"] for event in reused["events"]] == ["1", "2", "3"]
+    assert not old_ids.intersection(event["event_id"] for event in reused["events"])
+    assert reused["feed_epoch"] == original["feed_epoch"]
+    # f caught H_old before this reader returned. The same-E checkpoint is valid
+    # and omits the reused seq2/3: frontier410 alone cannot detect this restore.
+    assert (await page(api, caregiver, original["cursor"]))["events"] == []
+
+    # The isolated operator order is reader-disable -> close -> enable. Active
+    # enable alone would preserve the old epoch and an already enabled reader.
+    await set_reader(session, enabled=False)
+    await close_coverage(session)
+    control = await enable_coverage(session, writers_verified=True)
+    assert control.epoch != old_epoch and control.coverage_started_at > old_started
+    assert control.producer_enabled and not control.reader_enabled
+    new_epoch = control.epoch
+    await session.commit()
+    error(await api.get(PATH, params={"cursor": original["cursor"]}, headers=auth_header(caregiver)),
+          503, "caregiver_events_unavailable")
+    await seed(session, caregiver, pid, 201, 201)
+    await set_reader(session, enabled=True, writers_verified=True)
+    await session.commit()
+    error(await api.get(PATH, params={"cursor": original["cursor"]}, headers=auth_header(caregiver)),
+          410, "caregiver_feed_reset")
+    fresh = await page(api, caregiver)
+    assert fresh["feed_epoch"] == str(new_epoch)
+    assert [event["event_seq"] for event in fresh["events"]] == ["4"]
+    assert fresh["events"][0]["event_id"] not in {event["event_id"] for event in reused["events"]}
 
 
 async def test_auth_before_cursor_facts_and_sync_scope(api, session):

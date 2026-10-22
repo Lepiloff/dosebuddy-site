@@ -377,8 +377,9 @@ python -m tools.caregiver_recovery close
 старых transactions и обновление **всех** API/worker producers и lifecycle
 guards. Flag — явное подтверждение этой проверки, не автоматическое обнаружение
 смешанного парка. Tool дополнительно запускает schema_check. Enable берёт
-publication, затем выбирает свежие epoch E и server time T; повтор active enable
-idempotent, reader остаётся false. Scan мог вычислить `now<T`, но parent INSERT
+publication, затем выбирает свежие epoch E и server time T при producer=false→true
+и оставляет reader=false. Повтор active enable идемпотентен: не меняет E/T и не
+выключает уже включённый reader. Scan мог вычислить `now<T`, но parent INSERT
 после cutover получает E по serialization; original deadline не меняется.
 Close под publication выключает обе стороны и фиксирует closed_at. Re-enable
 создаёт новый E/T; gap/legacy intents не выдаются за covered events. Перед
@@ -414,8 +415,13 @@ Device.cursor_seq/readiness и expiry не изменяются.
 Codec `ce1` — HMAC-SHA256 с domain `sonadose/caregiver-events/cursor\0`, account/E,
 p/H/mode/issued/expiry. Continuation не обновляет24h срок, checkpoint фиксирует
 новый snapshot; empty gaps доходят до H. Valid expired/old-E/unsupported-version
-даёт410, invalid/foreign400; auth error предшествует cursor facts. No implicit
-reset/backfill. Точный wire/errors — [контракт](v1.1-api-contract.md#caregiver-events-read-api).
+и полностью валидный current-E cursor с H>committed_frontier дают410;
+invalid/foreign/impossible positions остаются400, auth error предшествует cursor facts.
+Client с fix допускает CAS reset только для typed JSON400 caregiver_cursor_invalid
+при наличии cursor в исходном запросе, в одном общем reset budget с410:4 HTTP
+attempts/10s, receipts/dedup/deadlines сохраняются. Malformed/unknown400 либо400
+без request cursor — protocol stop/no reset. Ни server backfill, ни бесконечного
+client reset нет. Точный wire/errors — [контракт](v1.1-api-contract.md#caregiver-events-read-api).
 
 Configuration из `deploy/env.example`/compose API: optional
 `CAREGIVER_CURSOR_SIGNING_KEY` (random32 bytes base64url без padding),
@@ -433,10 +439,16 @@ bad keys при GET дают503/Retry-After60, reader-enable отказывае�
    ответит400 на живой cursor, выданный уже новым signer.
 2. Только после полного preload переключать signer на новый ключ, сохраняя
    возможность проверить оба ключа на каждой replica, включая rollback.
-3. Сохранять старый verifier минимум24h **после остановки последнего issuer
-   старого ключа**, включая rollback replicas; если old issuer возобновился,
-   отсчёт начинается после его последней остановки. Раннее удаление ключа
-   превращает ещё живые tokens в400.
+3. Удалять старый verifier можно только после ОБОИХ условий: минимум24h
+   **после остановки последнего issuer старого ключа**, включая rollback replicas,
+   и подтверждено отсутствие R1 clients без bounded typed400 reset. Если old issuer
+   возобновился, отсчёт начинается после его последней остановки. Минимум24h
+   необходим, но недостаточен: offline installation может хранить expired cursor;
+   после removal MAC отвергается раньше expiry, поэтому R1 client без fix будет
+   повторять400 даже после restart. Новый frontier410 этого не исправляет.
+   Если fix входит в первый R1 release, публичный R1 без этой защиты не создаётся;
+   это условие rollout, не утверждение о наблюдавшемся production/Play fleet.
+   Issued2027 без R1 recovery сохраняет прежний FCM/pull.
 
 Codec поддерживает verifier list, но других hosts автоматически не обнаруживает.
 Multi-host rotation/rollback здесь не выполнялись и не объявлены PASS. Key values
@@ -457,6 +469,51 @@ retirement rollback — `close`, gap, затем полный all-new enable с 
 reader-enable. Никаких автоматических production SQL/deploy или implicit enable.
 Dockerfile включает operator module; image build в этой задаче не выполнялся.
 
+
+<a id="caregiver-recovery-restore"></a>
+### Restore: обязательная изоляция reader и новая coverage epoch
+
+Frontier410 — только fallback пока restored frontier f ниже старого H_old.
+Backup восстанавливает и sequence; fresh events могут получить reused seq в
+(f,H_old]. Если f догнал H_old до возвращения client, валидный same-E checkpoint
+p=H_old принимается200 и пропускает fresh reused seq<=p. Поэтому даже корректный
+frontier410 не заменяет НОВУЮ epoch после restore.
+
+Обязательный будущий operator порядок, утверждён владельцем22.10; live restore и
+operator команды на реальных данных в этой локальной реализации не выполнялись:
+
+1. ДО restore/reconnect изолировать восстановленную DB от live API/readers,
+   закрыть maintenance gate и завершить in-flight readers. Backup может вернуть
+   reader_enabled=true: открывать API с flags из backup запрещено. Поздний
+   асинхронный reader-disable не исправляет уже возникшее окно200.
+2. На изолированной DB из reviewed image последовательно:
+
+   ```bash
+   python -m tools.caregiver_recovery reader-disable
+   python -m tools.caregiver_recovery close
+   python -m tools.caregiver_recovery enable --all-writers-upgraded
+   python -m tools.caregiver_recovery status
+   ```
+
+   До enable подтвердить все новые writers/retirement/schema и отсутствие старых
+   transactions. Close обязателен: enable при producer_enabled=true идемпотентен
+   и UUID E не меняет; close переводит producer/reader в false, следующий enable
+   создаёт новый E/T и оставляет reader=false.
+3. Подтвердить по status новый UUID E, отличный от restored E, producer=true,
+   reader=false, новый coverage_started_at T и explicit coverage cutover/gap.
+   Сверить всех writers/schema, shared keys и proxy privacy на каждом API host.
+   Maintenance gate остаётся закрытым; flags из backup не дают reader допуска.
+4. Только после отдельного operator допуска выполнить
+   `python -m tools.caregiver_recovery reader-enable --all-writers-upgraded`,
+   затем снять maintenance gate. Не выдавать restore за непрерывный coverage.
+
+Новый E даёт410 валидным верифицируемым old-E cursors независимо от f/H_old;
+invalid MAC остаётся400 и использует только bounded client reset. Без cursor
+выдаются только new-E rows. Old pending другой epoch terminalize по app контракту
+и не оживают при последующем re-enable. Lost DB rows/retirement history/coverage gap
+не backfill. Production SQL/domain records/ключи/restore этой задачей не меняются;
+локальные synthetic fixtures не являются production restore acceptance.
+
 `CaregiverPrivacy` — ASGI граница точного endpoint: headers для всех responses,
 slash404 без redirect, unexpected exception→sanitised500 без exception text/SQL
 в uvicorn error logs. RequestLog сохраняет только path/status/time; Docker и
@@ -475,9 +532,17 @@ Python3.10/Uvicorn0.52.2/nginx1.18 отличаются от image Python3.12/lo
 Uvicorn0.52.1/nginx1.27; это не production-identical image/deploy proof.
 Последующие app A1/A2 завершены локально: reviewed appaa6b06b/CE24, actual callers,
 full Flutter1585/1585; [app task](../../dosebuddy/docs/caregiver-recovery-implementation-20261021.md#final-result-20261021).
-Backend code checkpoint88c06e4/full637/637 сохранён без повторного CI. Это
+Исторический результат21.10: backend checkpoint88c06e4/full637/637. Это
 HOST_IMPLEMENTATION_COMPLETE, не live/device/deploy acceptance; operator gates
 выше требуют отдельного разрешения и проверки среды. Final docs review APPROVED, findings0.
+
+Локальное дополнение22.10, F3: owner-approved frontier410 и restore/verifier
+amendment реализованы, независимое root review PENDING. Actual ASGI/PostgreSQL
+RED1→GREEN1; related124/124 и full backend640/640 PASS,0skip. Synthetic sequence
+reuse fixture подтверждает same-E200 gap и необходимость новой E; actual CLI active
+enable сохраняет enabled reader. Это не real restore/deploy/multi-host acceptance.
+Task-owned PostgreSQL остановлен, listener отсутствует; точные версии/логи и
+остальные gates — [app task](../../dosebuddy/docs/caregiver-recovery-implementation-20261021.md#p2-followup-20261022).
 
 <a id="first-rollout-requires-a-maintenance-window"></a>
 ## Первый rollout требует окна обслуживания
