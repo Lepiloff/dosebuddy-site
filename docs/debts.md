@@ -730,6 +730,14 @@ operator gates, не production acceptance. Final docs review APPROVED, findings
 Это последующее решение для recovery, прежний AUD-009 transport fix не переоткрыт;
 server receipt/ack не вводится. Историческое описание до этого решения — выше.
 
+Дополнение22.10: [R1 P2 follow-up](../../dosebuddy/docs/caregiver-recovery-implementation-20261021.md#p2-followup-20261022)
+F1/F2/F3 approved/findings0, code app6f59ccd/backend2cc0d78; Final root review APPROVED, findings0.
+App analyze clean/1611 PASS0skip, backend640 PASS0skip;21.10 counts выше исторические.
+Frontier410 и [mandatory isolated restore/new-E runbook](sync-publication.md#caregiver-recovery-restore)
+не дают backfill/restore acceptance. Live privacy/fleet/keys/reader/device/capacity
+gates остаются открытыми; issued2027 сохранён,72h DEFERRED, R2 execution — другая сессия. Stale-role
+OPEN_UNCONFIRMED: не воспроизведён/не исправлен, новой находки нет.
+
 Host evidence — `tests/test_fcm_collapse.py`: worker→настоящий `FcmPush`→
 httpx JSON,5/10 разных событий на одном token, оба kinds и два профиля,
 503→200 с прежним event identity/исходным expiry, смешанный authority поток.

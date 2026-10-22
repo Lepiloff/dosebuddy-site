@@ -637,7 +637,8 @@ coverage до подтверждённого полного cutover не зая�
 `committed_frontier` обновляется атомарно с parent/child: rollback не публикует
 sequence allocation, purge не уменьшает H. Raw last_value нельзя использовать
 как recovery cursor frontier, в том числе после crash. Обычный sync pull и
-текущие FCM consumers эту projection пока не читают; R1 целиком не завершён.
+FCM consumers эту projection не читают. На этапе B1,21.10, R1 целиком ещё не был
+завершён; последующие B2/A1/A2 и P2 follow-up описаны ниже.
 
 Новые lifecycle guards retire child независимо от pending/sent/given_up parent,
 включая revoke/downgrade/delete; same-ID regrant не оживляет его. Hard erasure
@@ -675,6 +676,15 @@ Ordinary pull/2027 прежние. Host checks с fake notification scheduler н
 deployment/live FCM/device acceptance; privacy/image/fleet/keys/E/T/reader gates,
 физическое recovery и capacity/retention backlog ещё открыты. Final docs review
 APPROVED, findings0; никакого автоматического enable/deploy.
+
+Дополнение22.10: P2 follow-up reviewed app6f59ccd/backend2cc0d78, F1/F2/F3 findings0.
+Lease-bound legacy admission сохраняет durable metadata; typed400 с request cursor
+делит bounded CAS reset с410. Fully valid current-E H>frontier даёт410;
+[mandatory restore/new-E](sync-publication.md#caregiver-recovery-restore) нужен даже
+при same-E catch-up frontier. Verifier removal требует и24h после last old issuer,
+и отсутствия R1 clients без bounded400 reset. Full backend640 и app1611 PASS0skip,
+app analyze clean; Final root review APPROVED, findings0. [Текущие checkpoints/границы](../../dosebuddy/docs/caregiver-recovery-implementation-20261021.md#p2-followup-20261022).
+Предыдущие637/1585 относятся к21.10; live/device/rollout gates прежние, PG остановлен.
 
 ---
 

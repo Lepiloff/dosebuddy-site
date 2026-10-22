@@ -537,7 +537,8 @@ HOST_IMPLEMENTATION_COMPLETE, не live/device/deploy acceptance; operator gates
 выше требуют отдельного разрешения и проверки среды. Final docs review APPROVED, findings0.
 
 Локальное дополнение22.10, F3: owner-approved frontier410 и restore/verifier
-amendment реализованы, независимое root review PENDING. Actual ASGI/PostgreSQL
+amendment реализованы; независимое root review APPROVED, findings0, backend2cc0d78.
+Actual ASGI/PostgreSQL
 RED1→GREEN1; related124/124 и full backend640/640 PASS,0skip. Synthetic sequence
 reuse fixture подтверждает same-E200 gap и необходимость новой E; actual CLI active
 enable сохраняет enabled reader. Это не real restore/deploy/multi-host acceptance.
