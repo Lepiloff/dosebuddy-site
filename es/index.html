@@ -37,7 +37,7 @@
   "@type": "SoftwareApplication",
   "name": "Sonadose",
   "alternateName": "Sonadose - Recordatorio",
-  "description": "Un pastillero con alarma para el móvil: añades los medicamentos y los horarios, y la app ocupa la pantalla y repite el aviso unas veces, con el horario que tú decidas. Incluye modo sénior de dos botones para quien lo necesite, uso compartido en familia, alarmas exactas que se vuelven a programar tras reiniciar, historial de tomas y control de existencias.",
+  "description": "Un pastillero con alarma para el móvil: añades los medicamentos y los horarios, y la app suena como un despertador y repite el aviso unas veces, con el horario que tú decidas. Incluye modo sénior de dos botones, con alarma a pantalla completa, para quien lo necesite, uso compartido en familia, alarmas exactas que se vuelven a programar tras reiniciar, historial de tomas y control de existencias.",
   "applicationCategory": "HealthApplication",
   "applicationSubCategory": "Recordatorio de medicación",
   "operatingSystem": "Android 8.0 o superior",
@@ -73,7 +73,7 @@
     {
       "@type": "Question",
       "name": "¿En qué se diferencia de un pastillero?",
-      "acceptedAnswer": { "@type": "Answer", "text": "Un pastillero ordena las pastillas de la semana, pero no avisa. Los pastilleros electrónicos con alarma sí avisan, solo que hay que comprarlos y llevarlos encima. Sonadose hace lo mismo en el móvil que ya tienen: una alarma a pantalla completa que se repite, y un historial al que volver." }
+      "acceptedAnswer": { "@type": "Answer", "text": "Un pastillero ordena las pastillas de la semana, pero no avisa. Los pastilleros electrónicos con alarma sí avisan, solo que hay que comprarlos y llevarlos encima. Sonadose hace lo mismo en el móvil que ya tienen: una alarma que suena y se repite, y un historial al que volver." }
     },
     {
       "@type": "Question",
@@ -83,12 +83,12 @@
     {
       "@type": "Question",
       "name": "¿Necesita conexión a internet?",
-      "acceptedAnswer": { "@type": "Answer", "text": "No. Las pautas, los recordatorios y el historial funcionan sin conexión, y no hace falta cuenta para nada de eso. La conexión se usa para instalar la app y —solo si lo activas— para compartir un perfil con alguien." }
+      "acceptedAnswer": { "@type": "Answer", "text": "No. Las pautas, los recordatorios y el historial funcionan sin conexión, y no hace falta cuenta para nada de eso. La conexión se usa para instalar la app y, solo si lo activas, para compartir un perfil con alguien." }
     },
     {
       "@type": "Question",
       "name": "¿Suena si el móvil está en silencio?",
-      "acceptedAnswer": { "@type": "Answer", "text": "Normalmente, sí. El aviso ocupa toda la pantalla y suena por el canal de alarma, como un despertador, que el modo silencio normalmente no apaga. Android pide un par de permisos la primera vez y la configuración inicial los va guiando uno a uno." }
+      "acceptedAnswer": { "@type": "Answer", "text": "Normalmente, sí. El aviso suena por el canal de alarma, como un despertador, que el modo silencio normalmente no apaga. Android pide un par de permisos la primera vez y la configuración inicial los va guiando uno a uno." }
     },
     {
       "@type": "Question",
@@ -175,10 +175,10 @@
         <p class="eyebrow hero-in-1">Para cualquiera con una pauta de medicación</p>
         <h1 class="hero-in-2">El pastillero con alarma que <span class="accent-word">de verdad te avisa</span></h1>
         <p class="hero__lead hero-in-3">
-          Configura la hora una vez. Cuando toca una pastilla, Sonadose ocupa la
-          pantalla como un despertador, no un aviso silencioso que puedes pasar
-          por alto, y lo repite unas veces, con el horario que tú decidas. Al
-          confirmar la toma, se detienen las demás.
+          Configura la hora una vez. Cuando toca una pastilla, Sonadose suena como
+          un despertador, no un aviso silencioso que puedes pasar por alto, y lo
+          repite unas veces, con el horario que tú decidas. Al confirmar la toma,
+          se detienen las demás. En el modo sencillo, ocupa toda la pantalla.
         </p>
 
         <div class="hero__cta hero-in-4">
@@ -216,8 +216,8 @@
           siesta que se alarga, una caja nueva idéntica a la de siempre.
         </p>
         <p>
-          Sonadose está hecho justo para ese momento: suena fuerte, ocupa toda la
-          pantalla y no se rinde tras un solo aviso.
+          Sonadose está hecho justo para ese momento: suena como un despertador y
+          no se rinde tras un solo aviso.
         </p>
       </div>
       <div class="stat-card">
@@ -263,7 +263,7 @@
                      srcset="/img/screens/es-elder-320.webp 320w, /img/screens/es-elder-640.webp 640w"
                      sizes="200px"
                      width="640" height="1256" loading="lazy" decoding="async"
-                     alt="Alarma a pantalla completa de Sonadose con el próximo medicamento, su hora y un botón grande de Tomada.">
+                     alt="Modo sencillo de Sonadose: alarma a pantalla completa con el próximo medicamento, su hora y un botón grande de Tomada.">
               </div>
             </div>
           </article>
@@ -415,8 +415,8 @@
               comprarlos y llevarlos encima.
             </p>
             <p>
-              Sonadose hace lo mismo en el móvil que ya tienen: una alarma a
-              pantalla completa que se repite, y un historial al que volver.
+              Sonadose hace lo mismo en el móvil que ya tienen: una alarma que
+              suena y se repite, y un historial al que volver.
             </p>
           </div>
         </details>
@@ -438,7 +438,7 @@
             <p>
               No. Las pautas, los recordatorios y el historial funcionan sin
               conexión, y no hace falta cuenta para nada de eso. La conexión se
-              usa para instalar la app y —solo si lo activas— para compartir un
+              usa para instalar la app y, solo si lo activas, para compartir un
               perfil con alguien.
             </p>
           </div>
@@ -448,9 +448,8 @@
           <summary>¿Suena si el móvil está en silencio?</summary>
           <div class="faq__body">
             <p>
-              Normalmente, sí. El aviso ocupa toda la pantalla y suena por el canal
-              de alarma, como un despertador, que el modo silencio normalmente no
-              apaga.
+              Normalmente, sí. El aviso suena por el canal de alarma, como un
+              despertador, que el modo silencio normalmente no apaga.
             </p>
             <p>
               Android pide un par de permisos la primera vez (alarmas exactas y
