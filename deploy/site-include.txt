@@ -17,6 +17,7 @@
 /robots.txt
 /sitemap.xml
 /es/***
+/guides/***
 /css/***
 /js/***
 /img/***

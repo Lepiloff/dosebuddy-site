@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Why medication reminders fail on Android | Sonadose</title>
+<meta name="description" content="Why a medication reminder does not go off on some Android phones, and which setting to check on Samsung, Xiaomi and Huawei.">
+<link rel="canonical" href="https://sonadose.com/guides/medication-reminders-not-working-android/">
+<link rel="alternate" hreflang="en" href="https://sonadose.com/guides/medication-reminders-not-working-android/">
+<link rel="alternate" hreflang="es" href="https://sonadose.com/es/guias/alarmas-medicamentos-xiaomi-huawei-samsung/">
+<link rel="alternate" hreflang="x-default" href="https://sonadose.com/guides/medication-reminders-not-working-android/">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Sonadose">
+<meta property="og:locale" content="en">
+<meta property="og:url" content="https://sonadose.com/guides/medication-reminders-not-working-android/">
+<meta property="og:title" content="Why medication reminders fail on Android | Sonadose">
+<meta property="og:description" content="Why a medication reminder does not go off on some Android phones, and which setting to check on Samsung, Xiaomi and Huawei.">
+<meta property="og:image" content="https://sonadose.com/img/og-en.jpg">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="/img/mark.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<meta name="theme-color" content="#2a9d8f">
+<link rel="preload" href="/fonts/atkinson-hyperlegible-next-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/css/site.css">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "Article",
+  "headline": "Why medication reminders fail on Android",
+  "description": "Why a medication reminder does not go off on some Android phones, and which setting to check on Samsung, Xiaomi and Huawei.",
+  "inLanguage": "en",
+  "datePublished": "2026-11-02",
+  "dateModified": "2026-11-02",
+  "author": {
+    "@type": "Organization",
+    "name": "Everpine"
+  },
+  "publisher": {
+    "@type": "Organization",
+    "name": "Everpine"
+  },
+  "mainEntityOfPage": "https://sonadose.com/guides/medication-reminders-not-working-android/"
+}
+</script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="/">
+      <img src="/img/mark.svg" alt="" width="34" height="34">
+      <span>Sonadose</span>
+    </a>
+  </div>
+</header>
+
+<main id="main">
+  <article class="wrap article">
+    <p class="article__eyebrow">Guide · November 2, 2026</p>
+    <h1>Why medication reminders fail on Android, and how to fix it</h1>
+    <p class="article__lead">
+      It is rarely the app. Most of the time the reminder does not arrive because
+      the phone closed the app to save battery. Android does this on its own, and
+      many manufacturers add their own battery saving on top.
+    </p>
+
+    <h2>What happens inside</h2>
+    <p>
+      A medication app schedules exact alarms for each dose. Android allows it,
+      but battery optimization can delay or cancel what an app does in the
+      background. Some manufacturer layers go further: they stop the app from
+      starting by itself after a restart, so nothing places the alarms again.
+    </p>
+
+    <h2>What we saw in our tests</h2>
+    <p>
+      We test Sonadose on a Huawei Nova 5T and a Samsung Galaxy S23. On the
+      Huawei, if the app is not set to manual in App launch, it stops reminding
+      after a restart. With the setting in place, the alarms come back. Updating
+      the app, on the other hand, does not remove scheduled alarms: we checked by
+      installing a new version over the old one.
+    </p>
+
+    <h2>The setting for each brand</h2>
+    <ul>
+      <li>Samsung: in Background usage limits, add the app to “Never auto
+        sleeping apps” and make sure it is not in “Sleeping apps” or “Deep
+        sleeping apps”.</li>
+      <li>Huawei: in App launch, the last item under Battery, turn off “Manage
+        automatically” for the app and keep all three switches on (Auto-launch,
+        Secondary launch, Run in background).</li>
+      <li>Xiaomi: turn on Autostart for the app and set its battery usage to “No
+        restrictions”. This comes from the manufacturer's documentation; we have
+        not tested it on a Xiaomi of our own.</li>
+    </ul>
+    <p>
+      On any brand, also check that the app may show notifications and schedule
+      exact alarms.
+    </p>
+
+    <h2>How to check it works</h2>
+    <p>
+      The most reliable test is the real one: set a reminder a couple of minutes
+      ahead, lock the phone and wait. Sonadose has this built in under Settings,
+      Reliability check: start the test, lock the phone, and in about a minute a
+      test reminder arrives for you to confirm with Taken. The app's battery guide
+      has the steps for your brand.
+    </p>
+
+    <p class="article__note">
+      This guide is not medical advice. Doses and times are the ones your doctor
+      or pharmacist gave you.
+    </p>
+
+    <aside class="article__cta">
+      <h2>A reminder you can test</h2>
+      <p>Sonadose is free on Google Play, for Android 8.0 and later.</p>
+      <a class="play-badge" href="https://play.google.com/store/apps/details?id=com.everpine.dosebuddy&amp;referrer=utm_source%3Dsonadose.com%26utm_medium%3Darticle%26utm_campaign%3Den_reminders_not_working" rel="noopener">
+        <img src="/img/badges/en.webp" alt="Get it on Google Play" width="512" height="198">
+      </a>
+    </aside>
+  </article>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="site-footer__top">
+      <a class="brand" href="/">
+        <img src="/img/mark.svg" alt="" width="34" height="34">
+        <span>Sonadose</span>
+      </a>
+      <nav aria-label="Footer">
+        <ul>
+          <li><a href="/guides/">Guides</a></li>
+          <li><a href="https://lepiloff.github.io/dosebuddy-legal/privacy.html" rel="noopener">Privacy policy</a></li>
+          <li><a href="#consent" data-consent-reopen>Cookie settings</a></li>
+          <li><a href="/es/" hreflang="es" lang="es">Español</a></li>
+        </ul>
+      </nav>
+    </div>
+    <p class="disclaimer">
+      Sonadose is a reminder organizer, not a medical device. It does not diagnose, treat, cure, or prevent any medical condition, and does not provide medical advice, dosage recommendations or interaction checks. Always consult your doctor or pharmacist for medical advice, diagnosis or treatment.
+    </p>
+    <p class="colophon">
+      © 2026 Everpine. Google Play and the Google Play logo are trademarks of Google LLC.
+    </p>
+  </div>
+</footer>
+
+<aside class="consent" id="consent" hidden aria-label="Cookie consent">
+  <div class="wrap consent__inner">
+    <p id="consent-text">
+      We would like to use Google Analytics to count visits and see which pages are useful. It sets cookies, so it is off until you say yes. The site works either way.
+    </p>
+    <div class="consent__actions">
+      <button class="btn" type="button" data-consent="denied">Decline</button>
+      <button class="btn btn--solid" type="button" data-consent="granted">Accept</button>
+    </div>
+  </div>
+</aside>
+
+<script src="/js/consent.js" defer></script>
+<script src="/js/ui.js" defer></script>
+</body>
+</html>
