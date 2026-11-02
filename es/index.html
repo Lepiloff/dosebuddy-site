@@ -37,7 +37,7 @@
   "@type": "SoftwareApplication",
   "name": "Sonadose",
   "alternateName": "Sonadose - Recordatorio",
-  "description": "Un pastillero con alarma para el móvil: añades los medicamentos y los horarios, y la app ocupa la pantalla y repite el aviso hasta confirmar la toma, con el horario que tú decidas. Incluye modo sénior de dos botones para quien lo necesite, uso compartido en familia, alarmas a pantalla completa que sobreviven a reinicios y al ahorro de batería, historial de tomas y control de existencias.",
+  "description": "Un pastillero con alarma para el móvil: añades los medicamentos y los horarios, y la app ocupa la pantalla y repite el aviso unas veces, con el horario que tú decidas. Incluye modo sénior de dos botones para quien lo necesite, uso compartido en familia, alarmas exactas que se vuelven a programar tras reiniciar, historial de tomas y control de existencias.",
   "applicationCategory": "HealthApplication",
   "applicationSubCategory": "Recordatorio de medicación",
   "operatingSystem": "Android 8.0 o superior",
@@ -88,7 +88,12 @@
     {
       "@type": "Question",
       "name": "¿Suena si el móvil está en silencio?",
-      "acceptedAnswer": { "@type": "Answer", "text": "Sí. El aviso ocupa toda la pantalla y suena por el canal de alarma, como un despertador, así que el modo silencio no lo apaga. Android pide un par de permisos la primera vez y la configuración inicial los va guiando uno a uno." }
+      "acceptedAnswer": { "@type": "Answer", "text": "Normalmente, sí. El aviso ocupa toda la pantalla y suena por el canal de alarma, como un despertador, que el modo silencio normalmente no apaga. Android pide un par de permisos la primera vez y la configuración inicial los va guiando uno a uno." }
+    },
+    {
+      "@type": "Question",
+      "name": "¿Qué puede retrasar un recordatorio o un aviso a la familia?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Los recordatorios se programan en el propio móvil y no necesitan conexión, pero Android decide cómo trata a las apps en segundo plano. Los permisos de notificaciones y alarmas y los ajustes de batería del móvil afectan a la entrega; la prueba de fiabilidad y la guía de batería en Ajustes te guían por ellos. Tras reiniciar, los recordatorios vuelven en cuanto se desbloquea el móvil por primera vez. Los avisos a familiares viajan por internet, así que pueden llegar tarde, y cuando los recordatorios pasan a otro móvil, los dos pueden mantenerlos un rato hasta sincronizar." }
     },
     {
       "@type": "Question",
@@ -172,12 +177,12 @@
         <p class="hero__lead hero-in-3">
           Configura la hora una vez. Cuando toca una pastilla, Sonadose ocupa la
           pantalla como un despertador, no un aviso silencioso que puedes pasar
-          por alto, y sigue recordándotelo hasta que lo confirmes, con el
-          horario que tú decidas.
+          por alto, y lo repite unas veces, con el horario que tú decidas. Al
+          confirmar la toma, se detienen las demás.
         </p>
 
         <div class="hero__cta hero-in-4">
-          <a class="play-badge" href="https://play.google.com/store/apps/details?id=com.everpine.dosebuddy&referrer=utm_source%3Demea_Med%26utm_medium%3Dlanding_page" rel="noopener">
+          <a class="play-badge" href="https://play.google.com/store/apps/details?id=com.everpine.dosebuddy&referrer=utm_source%3Dsonadose.com%26utm_medium%3Dwebsite%26utm_campaign%3Dlanding_es%26utm_content%3Dhero" rel="noopener">
             <img src="/img/badges/es.webp" alt="Consigue Sonadose en Google Play" width="512" height="198">
           </a>
           <p class="cta-note">Gratis · Sin publicidad · Sin suscripción · Android 8.0 o superior · Español e inglés</p>
@@ -251,7 +256,7 @@
           <article class="feature">
             <span class="tag tag--amber">Fiabilidad</span>
             <h3>Recordatorios que mantienen su hora</h3>
-            <p>Alarmas a hora exacta que sobreviven a reinicios y al ahorro de batería. Se repiten hasta confirmar la toma, con el intervalo que tú elijas. Prueba de fiabilidad integrada y guía de ajustes de batería para tu marca de móvil.</p>
+            <p>Alarmas a hora exacta con una serie limitada de repeticiones: por defecto, cinco cada cinco minutos. Tras reiniciar, vuelven en cuanto se desbloquea el móvil. Prueba de fiabilidad integrada y guía de ajustes de batería para tu marca de móvil.</p>
             <div class="feature__media">
               <div class="crop-window crop-window--small">
                 <img src="/img/screens/es-elder-640.webp"
@@ -443,13 +448,29 @@
           <summary>¿Suena si el móvil está en silencio?</summary>
           <div class="faq__body">
             <p>
-              Sí. El aviso ocupa toda la pantalla y suena por el canal de alarma,
-              como un despertador, así que el modo silencio no lo apaga.
+              Normalmente, sí. El aviso ocupa toda la pantalla y suena por el canal
+              de alarma, como un despertador, que el modo silencio normalmente no
+              apaga.
             </p>
             <p>
               Android pide un par de permisos la primera vez (alarmas exactas y
               notificaciones a pantalla completa), y la configuración inicial los va
               guiando uno a uno.
+            </p>
+          </div>
+        </details>
+
+        <details name="faq">
+          <summary>¿Qué puede retrasar un recordatorio o un aviso a la familia?</summary>
+          <div class="faq__body">
+            <p>
+              Los recordatorios se programan en el propio móvil y no necesitan conexión, pero Android decide cómo trata a las apps en segundo plano. Los permisos de notificaciones y alarmas y los ajustes de batería del móvil afectan a la entrega; la prueba de fiabilidad y la guía de batería en Ajustes te guían por ellos.
+            </p>
+            <p>
+              Tras reiniciar, los recordatorios vuelven en cuanto se desbloquea el móvil por primera vez.
+            </p>
+            <p>
+              Los avisos a familiares viajan por internet, así que pueden llegar tarde, y cuando los recordatorios pasan a otro móvil, los dos pueden mantenerlos un rato hasta sincronizar.
             </p>
           </div>
         </details>
@@ -514,7 +535,7 @@
         Gratis en Google Play, y sin necesidad de cuenta: el primer medicamento queda
         añadido en lo que se hace un café.
       </p>
-      <a class="play-badge" href="https://play.google.com/store/apps/details?id=com.everpine.dosebuddy&referrer=utm_source%3Demea_Med%26utm_medium%3Dlanding_page" rel="noopener">
+      <a class="play-badge" href="https://play.google.com/store/apps/details?id=com.everpine.dosebuddy&referrer=utm_source%3Dsonadose.com%26utm_medium%3Dwebsite%26utm_campaign%3Dlanding_es%26utm_content%3Dcta" rel="noopener">
         <img src="/img/badges/es.webp" alt="Consigue Sonadose en Google Play" width="512" height="198" loading="lazy">
       </a>
     </div>
@@ -531,7 +552,7 @@
       </a>
       <nav aria-label="Pie de página">
         <ul>
-          <li><a href="https://play.google.com/store/apps/details?id=com.everpine.dosebuddy&referrer=utm_source%3Demea_Med%26utm_medium%3Dlanding_page" rel="noopener">Google Play</a></li>
+          <li><a href="https://play.google.com/store/apps/details?id=com.everpine.dosebuddy&referrer=utm_source%3Dsonadose.com%26utm_medium%3Dwebsite%26utm_campaign%3Dlanding_es%26utm_content%3Dfooter" rel="noopener">Google Play</a></li>
           <li><a href="https://lepiloff.github.io/dosebuddy-legal/privacy.html" rel="noopener">Política de privacidad</a></li>
           <li><a href="#consent" data-consent-reopen>Ajustes de cookies</a></li>
           <li><a href="/" hreflang="en" lang="en">English</a></li>

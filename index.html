@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Medication Alarm &amp; Reminder App, Free on Android</title>
-<meta name="description" content="A free medication alarm that takes over the screen until the dose is confirmed, not a quiet notification. Big-text, easy mode included. No ads. Android 8.0 and up.">
+<meta name="description" content="A free medication alarm: a full-screen reminder at dose time with a few repeats, not a quiet notification. Big-text easy mode included. No ads. Android 8.0+.">
 
 <link rel="canonical" href="https://sonadose.com/">
 <link rel="alternate" hreflang="en" href="https://sonadose.com/">
@@ -17,7 +17,7 @@
 <meta property="og:locale:alternate" content="es">
 <meta property="og:url" content="https://sonadose.com/">
 <meta property="og:title" content="Medication Alarm &amp; Reminder App, Free on Android">
-<meta property="og:description" content="A free medication alarm that takes over the screen and keeps reminding you until the dose is confirmed, not a quiet notification. Includes a simplified big-text, two-button mode for anyone who needs it. No ads, no subscription, Android 8.0 and up.">
+<meta property="og:description" content="A free medication alarm that takes over the screen at dose time and repeats a few times (five, five minutes apart, by default), not a quiet notification. Includes a simplified big-text, two-button mode for anyone who needs it. No ads, no subscription, Android 8.0 and up.">
 <meta property="og:image" content="https://sonadose.com/img/og-en.jpg">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -37,7 +37,7 @@
   "@type": "SoftwareApplication",
   "name": "Sonadose",
   "alternateName": "Sonadose - Pill Reminder",
-  "description": "A medication alarm that takes over the screen when a dose is due and repeats until it's confirmed, on a schedule you control, not a quiet notification. Includes a simplified two-button mode for anyone who needs it, family profile sharing, full-screen alarms that survive reboots and battery savers, intake history, and stock tracking.",
+  "description": "A medication alarm that takes over the screen when a dose is due and repeats a limited number of times on a schedule you control, not a quiet notification. Includes a simplified two-button mode for anyone who needs it, family profile sharing, exact alarms placed again after a restart, intake history, and stock tracking.",
   "applicationCategory": "HealthApplication",
   "applicationSubCategory": "Medication reminder",
   "operatingSystem": "Android 8.0 and up",
@@ -87,7 +87,12 @@
     {
       "@type": "Question",
       "name": "Will it ring if the phone is on silent?",
-      "acceptedAnswer": { "@type": "Answer", "text": "Yes. The reminder takes over the whole screen and rings on the alarm channel, like an alarm clock, so silent mode doesn't mute it. Android asks for a couple of permissions the first time and the setup walks through them." }
+      "acceptedAnswer": { "@type": "Answer", "text": "Normally, yes. The reminder takes over the whole screen and rings on the alarm channel, like an alarm clock, which silent mode normally leaves alone. Android asks for a couple of permissions the first time and the setup walks through them." }
+    },
+    {
+      "@type": "Question",
+      "name": "What can delay a reminder or a family alert?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Reminders are set on the phone itself and need no connection, but Android decides how strictly to treat apps in the background. Notification and alarm permissions and your phone's battery settings affect delivery; the reliability check and the battery guide in Settings walk through them. After a restart, reminders come back once the phone is unlocked for the first time. Alerts to family members travel over the internet, so they can arrive late, and when reminders move to another phone, both phones may keep them for a short while until they sync." }
     },
     {
       "@type": "Question",
@@ -172,12 +177,12 @@
         <h1 class="hero-in-2">The medication alarm that <span class="accent-word">actually gets answered</span></h1>
         <p class="hero__lead hero-in-3">
           Set the time once. When a dose is due, Sonadose takes over the screen
-          like an alarm clock, not a quiet notification you can miss, and keeps
-          reminding you until it's confirmed, on a schedule you control.
+          like an alarm clock, not a quiet notification you can miss, and repeats
+          a few times on a schedule you control. Confirming the dose stops the rest.
         </p>
 
         <div class="hero__cta hero-in-4">
-          <a class="play-badge" href="https://play.google.com/store/apps/details?id=com.everpine.dosebuddy&referrer=utm_source%3Demea_Med%26utm_medium%3Dlanding_page" rel="noopener">
+          <a class="play-badge" href="https://play.google.com/store/apps/details?id=com.everpine.dosebuddy&referrer=utm_source%3Dsonadose.com%26utm_medium%3Dwebsite%26utm_campaign%3Dlanding_en%26utm_content%3Dhero" rel="noopener">
             <img src="/img/badges/en.webp" alt="Get Sonadose on Google Play" width="512" height="198">
           </a>
           <p class="cta-note">Free · No ads · No subscription · Android 8.0 and up · English &amp; Spanish</p>
@@ -252,7 +257,7 @@
           <article class="feature">
             <span class="tag tag--amber">Reliability</span>
             <h3>Reminders that keep their time</h3>
-            <p>Exact alarms that survive a reboot and a battery saver. Repeats until the dose is confirmed, on whatever interval you choose. A built-in reliability check, and a battery guide written for your phone's brand.</p>
+            <p>Exact alarms with a limited chain of repeats: five, five minutes apart, by default. After a restart they come back once the phone is unlocked. A built-in reliability check, and a battery guide written for your phone's brand.</p>
             <div class="feature__media">
               <div class="crop-window crop-window--small">
                 <img src="/img/screens/en-elder-640.webp"
@@ -443,13 +448,29 @@
           <summary>Will it ring if the phone is on silent?</summary>
           <div class="faq__body">
             <p>
-              Yes. The reminder takes over the whole screen and rings on the alarm
-              channel, like an alarm clock, so silent mode doesn't mute it.
+              Normally, yes. The reminder takes over the whole screen and rings on
+              the alarm channel, like an alarm clock, which silent mode normally
+              leaves alone.
             </p>
             <p>
               Android asks for a couple of permissions the first time (exact alarms and
               full-screen notifications), and the setup walks through them one at
               a time.
+            </p>
+          </div>
+        </details>
+
+        <details name="faq">
+          <summary>What can delay a reminder or a family alert?</summary>
+          <div class="faq__body">
+            <p>
+              Reminders are set on the phone itself and need no connection, but Android decides how strictly to treat apps in the background. Notification and alarm permissions and your phone's battery settings affect delivery; the reliability check and the battery guide in Settings walk through them.
+            </p>
+            <p>
+              After a restart, reminders come back once the phone is unlocked for the first time.
+            </p>
+            <p>
+              Alerts to family members travel over the internet, so they can arrive late, and when reminders move to another phone, both phones may keep them for a short while until they sync.
             </p>
           </div>
         </details>
@@ -512,7 +533,7 @@
         Free on Google Play, and no account needed. The first medicine is added
         before the kettle boils.
       </p>
-      <a class="play-badge" href="https://play.google.com/store/apps/details?id=com.everpine.dosebuddy&referrer=utm_source%3Demea_Med%26utm_medium%3Dlanding_page" rel="noopener">
+      <a class="play-badge" href="https://play.google.com/store/apps/details?id=com.everpine.dosebuddy&referrer=utm_source%3Dsonadose.com%26utm_medium%3Dwebsite%26utm_campaign%3Dlanding_en%26utm_content%3Dcta" rel="noopener">
         <img src="/img/badges/en.webp" alt="Get Sonadose on Google Play" width="512" height="198" loading="lazy">
       </a>
     </div>
@@ -529,7 +550,7 @@
       </a>
       <nav aria-label="Footer">
         <ul>
-          <li><a href="https://play.google.com/store/apps/details?id=com.everpine.dosebuddy&referrer=utm_source%3Demea_Med%26utm_medium%3Dlanding_page" rel="noopener">Google Play</a></li>
+          <li><a href="https://play.google.com/store/apps/details?id=com.everpine.dosebuddy&referrer=utm_source%3Dsonadose.com%26utm_medium%3Dwebsite%26utm_campaign%3Dlanding_en%26utm_content%3Dfooter" rel="noopener">Google Play</a></li>
           <li><a href="https://lepiloff.github.io/dosebuddy-legal/privacy.html" rel="noopener">Privacy policy</a></li>
           <li><a href="#consent" data-consent-reopen>Cookie settings</a></li>
           <li><a href="/es/" hreflang="es" lang="es">Español</a></li>
