@@ -12,6 +12,7 @@
 #      SHOTS_SCHEMES (light,dark) SHOTS_OUT (build/ui-shots)
 #      SHOTS_FULL_PAGE=1 for the whole scrollable page
 #      SHOTS_SELECTOR=".hero" to shoot one component instead of the viewport
+#      SHOTS_PAGES="name=/path/,…" to add pages (then pick them in SHOTS_LOCALES)
 #      SHOTS_CHANNEL=chrome (system Chrome; unset falls back to bundled)
 #
 # Deliberately adds no dependency to this repository: Playwright is borrowed

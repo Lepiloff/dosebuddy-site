@@ -19,4 +19,16 @@
     <xhtml:link rel="alternate" hreflang="es" href="https://sonadose.com/es/"/>
     <xhtml:link rel="alternate" hreflang="x-default" href="https://sonadose.com/"/>
   </url>
+  <url>
+    <loc>https://sonadose.com/es/guias/</loc>
+    <lastmod>2026-11-02</lastmod>
+  </url>
+  <url>
+    <loc>https://sonadose.com/es/guias/alternativa-gratuita-medisafe/</loc>
+    <lastmod>2026-11-02</lastmod>
+  </url>
+  <url>
+    <loc>https://sonadose.com/es/guias/pastillero-con-alarma-movil/</loc>
+    <lastmod>2026-11-02</lastmod>
+  </url>
 </urlset>

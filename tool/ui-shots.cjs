@@ -10,7 +10,18 @@ const { chromium } = require("playwright");
 const base = process.env.SHOTS_BASE || "http://127.0.0.1:8765";
 const outDir = process.env.SHOTS_OUT || "build/ui-shots";
 
-const PAGES = { en: "/", es: "/es/" };
+/* Extra pages as name=path pairs, e.g. for the guides:
+   SHOTS_PAGES="es-medisafe=/es/guias/alternativa-gratuita-medisafe/"
+   SHOTS_LOCALES picks among all names, built-in and extra. */
+const PAGES = Object.assign(
+  { en: "/", es: "/es/" },
+  Object.fromEntries(
+    (process.env.SHOTS_PAGES || "")
+      .split(",")
+      .map((s) => s.trim().split("="))
+      .filter((kv) => kv.length === 2 && kv[0] && kv[1])
+  )
+);
 const VIEWPORTS = {
   mobile: { width: 360, height: 800 },
   tablet: { width: 768, height: 1024 },
